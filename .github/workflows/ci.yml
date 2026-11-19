@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: nix flake check (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Must run before Nix is installed: it mounts the reclaimed disk at /nix.
+      # The NixOS VM test needs the space before it starts, so purge in the foreground.
+      - uses: wimpysworld/nothing-but-nix@v12
+        with:
+          witness-carnage: true
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            build-dir = /nix/build
+            extra-substituters = https://nix-cache.qaq.li/remora
+            extra-trusted-public-keys = remora:iOVASnJtE6oEaK6QW9cHYAL/GIN0Ieh+zeV80XCa7D8=
+
+      # Pushes every path the job built when it ends. Pull requests from forks get no token.
+      - if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: ryanccn/attic-action@v0.5
+        with:
+          endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          cache: ${{ vars.ATTIC_CACHE }}
+          token: ${{ secrets.ATTIC_TOKEN }}
+          inputs-from: .
+          skip-use: true
+
+      - run: nix flake check --print-build-logs --keep-going
