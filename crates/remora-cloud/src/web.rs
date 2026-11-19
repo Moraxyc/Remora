@@ -16,10 +16,12 @@ use serde_json::json;
 
 use crate::PublicUrl;
 use crate::browser::{self, Browsers, SignedIn, read_cookie};
+use crate::device::Devices;
 use crate::login::{Logins, Progress};
 use crate::oidc::OidcProvider;
 use crate::password::OwnerPassword;
-use crate::user::{OWNER_ID, Profile, Users};
+use crate::rooms::Rooms;
+use crate::user::{OWNER_ID, Profile, Sessions, Users};
 
 /// Ties a sign-in at the OpenID Connect provider to the browser that started it. Lax, because
 /// the provider sends the browser back from another site.
@@ -37,6 +39,9 @@ pub struct Web {
     pub logins: Logins,
     pub browsers: Browsers,
     pub users: Users,
+    pub devices: Devices,
+    pub sessions: Sessions,
+    pub rooms: Rooms,
     /// Without a password, nobody can sign in with one.
     pub password: Option<Arc<OwnerPassword>>,
     pub oidc: Option<Arc<OidcProvider>>,
@@ -355,4 +360,144 @@ pub async fn decide_login(
         Decision::Deny => tracing::info!(%user_id, "QR login denied"),
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct ManagedDevice {
+    id: String,
+    name: String,
+    platform: u8,
+    online: bool,
+}
+
+/// `GET /api/web/devices`: the signed-in user's bound devices.
+pub async fn devices(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+) -> Result<Json<Vec<ManagedDevice>>, WebError> {
+    let owned = web.devices.owned_by(&signed_in.user.id)?;
+    let list = owned
+        .into_iter()
+        .map(|device| ManagedDevice {
+            online: web.rooms.is_online(&device.id),
+            id: device.id,
+            name: device.name,
+            platform: device.platform,
+        })
+        .collect();
+    Ok(Json(list))
+}
+
+/// `DELETE /api/web/devices/{id}`: unbinds one of the user's devices, ends its host's client
+/// logins and drops its host from signaling.
+pub async fn unbind_device(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, WebError> {
+    if !web.devices.unbind(&id, &signed_in.user.id)? {
+        return Err(WebError::NotFound);
+    }
+    web.rooms.kick_host(&id);
+    tracing::info!(user_id = %signed_in.user.id, device_id = %id, "device unbound from web");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct ClientSessionView {
+    id: String,
+    created: Option<u64>,
+    device: Option<BoundDeviceView>,
+}
+
+#[derive(Serialize)]
+pub struct BoundDeviceView {
+    id: String,
+    name: String,
+    platform: u8,
+}
+
+/// `GET /api/web/client-sessions`: the signed-in user's client logins.
+pub async fn client_sessions(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+) -> Result<Json<Vec<ClientSessionView>>, WebError> {
+    let list = web
+        .sessions
+        .owned_by(&signed_in.user.id)?
+        .into_iter()
+        .map(|session| ClientSessionView {
+            id: session.id,
+            created: session.created,
+            device: session.device.map(|device| BoundDeviceView {
+                id: device.id,
+                name: device.name,
+                platform: device.platform,
+            }),
+        })
+        .collect();
+    Ok(Json(list))
+}
+
+/// `DELETE /api/web/client-sessions/{id}`: revokes one of the user's client logins, and drops
+/// its host from signaling if it was hosting.
+pub async fn revoke_client_session(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, WebError> {
+    let device_id = web
+        .sessions
+        .revoke(&id, &signed_in.user.id)?
+        .ok_or(WebError::NotFound)?;
+    if let Some(device_id) = device_id {
+        web.rooms.kick_host(&device_id);
+    }
+    tracing::info!(user_id = %signed_in.user.id, "client session revoked");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct BrowserView {
+    id: String,
+    created: u64,
+    expires: u64,
+    current: bool,
+}
+
+/// `GET /api/web/browsers`: the signed-in user's active browser sessions.
+pub async fn browsers(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+) -> Result<Json<Vec<BrowserView>>, WebError> {
+    let list = web
+        .browsers
+        .owned_by(&signed_in.user.id)?
+        .into_iter()
+        .map(|browser| BrowserView {
+            current: browser.id == signed_in.browser_id,
+            id: browser.id,
+            created: browser.created,
+            expires: browser.expires,
+        })
+        .collect();
+    Ok(Json(list))
+}
+
+/// `DELETE /api/web/browsers/{id}`: signs out one of the user's browsers. Signing out the
+/// current one clears its cookie.
+pub async fn revoke_browser(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+    Path(id): Path<String>,
+) -> Result<Response, WebError> {
+    if !web.browsers.revoke(&id, &signed_in.user.id)? {
+        return Err(WebError::NotFound);
+    }
+    tracing::info!(user_id = %signed_in.user.id, "browser session revoked");
+    if id == signed_in.browser_id {
+        let cookie = web.session_cookie("", 0);
+        return Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

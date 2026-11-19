@@ -56,6 +56,9 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX browsers_by_user ON browsers (user_id);
 ",
+    "
+    ALTER TABLE sessions ADD COLUMN created INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// What `PRAGMA user_version` says once every migration is applied.

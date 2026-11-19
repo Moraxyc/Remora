@@ -26,12 +26,15 @@
 {#if data.login === null || outcome === 'gone'}
 	<h1>Login expired</h1>
 	<p>This QR code has expired or has been used. Show a new one on the device.</p>
+	<p><a href="/">Manage devices and sessions</a></p>
 {:else if data.login.confirmed || outcome === 'confirmed'}
 	<h1>Logged in</h1>
 	<p>The device is logging in. You can close this page.</p>
+	<p><a href="/">Manage devices and sessions</a></p>
 {:else if outcome === 'denied'}
 	<h1>Denied</h1>
 	<p>The device was not logged in. You can close this page.</p>
+	<p><a href="/">Manage devices and sessions</a></p>
 {:else if !data.session.signed_in}
 	<h1>Sign in</h1>
 	<p>Sign in to decide whether this device may log in.</p>

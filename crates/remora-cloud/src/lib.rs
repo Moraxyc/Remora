@@ -25,7 +25,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::middleware::{from_fn_with_state, map_response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
@@ -162,6 +162,9 @@ impl FromRef<Cloud> for web::Web {
             logins: cloud.logins.clone(),
             browsers: cloud.browsers.clone(),
             users: cloud.users.clone(),
+            devices: cloud.devices.clone(),
+            sessions: cloud.sessions.clone(),
+            rooms: cloud.rooms.clone(),
             password: cloud.owner_password.clone(),
             oidc: cloud.oidc.clone(),
             public_url: cloud.public_url.clone(),
@@ -243,6 +246,15 @@ pub fn router(config: Config) -> Router {
             "/api/web/logins/{id}",
             get(web::login).post(web::decide_login),
         )
+        .route("/api/web/devices", get(web::devices))
+        .route("/api/web/devices/{id}", delete(web::unbind_device))
+        .route("/api/web/client-sessions", get(web::client_sessions))
+        .route(
+            "/api/web/client-sessions/{id}",
+            delete(web::revoke_client_session),
+        )
+        .route("/api/web/browsers", get(web::browsers))
+        .route("/api/web/browsers/{id}", delete(web::revoke_browser))
         .layer(map_response(web::no_store))
         .with_state(cloud.clone());
     // Signaling requests carry the room token instead of a signature, and browsers sign

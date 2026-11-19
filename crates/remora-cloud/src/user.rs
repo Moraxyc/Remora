@@ -5,13 +5,14 @@ use std::sync::Arc;
 use axum::extract::{FromRef, FromRequestParts, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
 use crate::Database;
 use crate::api::{self, ApiError, Empty};
+use crate::device::Device;
 use crate::oidc::Identity;
-use crate::token::{TokenKey, UserToken, random};
+use crate::token::{TokenKey, UserToken, now, random};
 
 /// The user who signs in with the password.
 pub const OWNER_ID: &str = "1";
@@ -90,13 +91,22 @@ impl From<Database> for Sessions {
     }
 }
 
+/// One of a user's logged-in clients, as shown in the web app.
+pub struct ClientSession {
+    pub id: String,
+    /// Seconds since the Unix epoch, or `None` for logins created before timestamps were kept.
+    pub created: Option<u64>,
+    pub device: Option<Device>,
+}
+
 impl Sessions {
     /// Opens a session for `user_id`, and says what its token carries.
     pub fn start(&self, user_id: &str) -> rusqlite::Result<UserToken> {
         let session_id = hex::encode(random::<16>());
+        let created: i64 = now().try_into().unwrap_or(i64::MAX);
         self.0.connection().execute(
-            "INSERT INTO sessions (id, user_id) VALUES (?1, ?2)",
-            [&session_id, user_id],
+            "INSERT INTO sessions (id, user_id, created) VALUES (?1, ?2, ?3)",
+            params![&session_id, user_id, created],
         )?;
         Ok(UserToken {
             user_id: user_id.to_owned(),
@@ -109,6 +119,55 @@ impl Sessions {
             .connection()
             .execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
         Ok(())
+    }
+
+    /// Client logins of `user_id`, newest first.
+    pub fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<ClientSession>> {
+        let connection = self.0.connection();
+        let mut statement = connection.prepare_cached(
+            "SELECT sessions.id, sessions.created, devices.id, devices.name, devices.platform
+             FROM sessions
+             LEFT JOIN devices ON devices.id = sessions.device_id
+             WHERE sessions.user_id = ?1
+             ORDER BY sessions.created DESC, sessions.id",
+        )?;
+        statement
+            .query_map([user_id], |row| {
+                let created: i64 = row.get(1)?;
+                let device = row
+                    .get::<_, Option<String>>(2)?
+                    .map(|id| -> rusqlite::Result<Device> {
+                        Ok(Device {
+                            id,
+                            name: row.get(3)?,
+                            platform: row.get(4)?,
+                        })
+                    })
+                    .transpose()?;
+                Ok(ClientSession {
+                    id: row.get(0)?,
+                    created: u64::try_from(created).ok().filter(|&at| at > 0),
+                    device,
+                })
+            })?
+            .collect()
+    }
+
+    /// Revokes one of `user_id`'s client logins. Returns `None` if there is no such login for
+    /// that user, or `Some(device_id)` with the device the login was bound to, if any.
+    pub fn revoke(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Option<Option<String>>> {
+        self.0
+            .connection()
+            .query_row(
+                "DELETE FROM sessions WHERE id = ?1 AND user_id = ?2 RETURNING device_id",
+                [session_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     fn is_open(&self, token: &UserToken) -> rusqlite::Result<bool> {

@@ -37,6 +37,13 @@ pub struct Started {
     pub cookie: String,
 }
 
+/// A signed-in browser of a user, as shown in the web app.
+pub struct BrowserSession {
+    pub id: String,
+    pub created: u64,
+    pub expires: u64,
+}
+
 impl Browsers {
     /// Signs a browser in as `user_id`.
     pub fn start(&self, user_id: &str) -> rusqlite::Result<Started> {
@@ -87,6 +94,34 @@ impl Browsers {
             .connection()
             .execute("DELETE FROM browsers WHERE id = ?1", [browser_id])?;
         Ok(())
+    }
+
+    /// Active browsers of `user_id`, newest first.
+    pub fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<BrowserSession>> {
+        let connection = self.0.connection();
+        let mut statement = connection.prepare_cached(
+            "SELECT id, created, expires FROM browsers
+             WHERE user_id = ?1 AND expires > ?2
+             ORDER BY created DESC, id",
+        )?;
+        statement
+            .query_map(params![user_id, seconds()], |row| {
+                Ok(BrowserSession {
+                    id: row.get(0)?,
+                    created: row.get::<_, i64>(1)?.try_into().unwrap_or(0),
+                    expires: row.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                })
+            })?
+            .collect()
+    }
+
+    /// Signs one of `user_id`'s browsers out; `false` if there is no such browser for that user.
+    pub fn revoke(&self, browser_id: &str, user_id: &str) -> rusqlite::Result<bool> {
+        let changed = self.0.connection().execute(
+            "DELETE FROM browsers WHERE id = ?1 AND user_id = ?2",
+            [browser_id, user_id],
+        )?;
+        Ok(changed > 0)
     }
 }
 

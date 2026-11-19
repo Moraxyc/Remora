@@ -23,6 +23,27 @@ export interface Login {
 	confirmed: boolean;
 }
 
+export interface ManagedDevice {
+	id: string;
+	name: string;
+	platform: number;
+	online: boolean;
+}
+
+export interface ClientSession {
+	id: string;
+	/** Seconds since the Unix epoch, or null for older sessions. */
+	created: number | null;
+	device: { id: string; name: string; platform: number } | null;
+}
+
+export interface BrowserSession {
+	id: string;
+	created: number;
+	expires: number;
+	current: boolean;
+}
+
 export class ApiError extends Error {
 	constructor(
 		readonly status: number,
@@ -92,6 +113,30 @@ export async function decideLogin(
 	csrf: string
 ): Promise<void> {
 	await call(fetch, 'POST', `logins/${encodeURIComponent(id)}`, { body: { decision }, csrf });
+}
+
+export async function devices(fetch: Fetch): Promise<ManagedDevice[]> {
+	return (await call(fetch, 'GET', 'devices')).json();
+}
+
+export async function unbindDevice(id: string, csrf: string): Promise<void> {
+	await call(fetch, 'DELETE', `devices/${encodeURIComponent(id)}`, { csrf });
+}
+
+export async function clientSessions(fetch: Fetch): Promise<ClientSession[]> {
+	return (await call(fetch, 'GET', 'client-sessions')).json();
+}
+
+export async function revokeClientSession(id: string, csrf: string): Promise<void> {
+	await call(fetch, 'DELETE', `client-sessions/${encodeURIComponent(id)}`, { csrf });
+}
+
+export async function browsers(fetch: Fetch): Promise<BrowserSession[]> {
+	return (await call(fetch, 'GET', 'browsers')).json();
+}
+
+export async function revokeBrowser(id: string, csrf: string): Promise<void> {
+	await call(fetch, 'DELETE', `browsers/${encodeURIComponent(id)}`, { csrf });
 }
 
 /** UU's platform numbers. */

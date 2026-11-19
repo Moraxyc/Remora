@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::routing;
 use axum::{Form, Json, Router};
 use base64::Engine;
@@ -404,4 +404,204 @@ async fn an_unreachable_provider_fails_the_sign_in() {
     });
     let start = fetch(&app, "/api/web/oidc/start?next=/devices", None).await;
     assert_eq!(start.location(), "/devices?sign_in=failed");
+}
+
+async fn web_call(
+    app: &Router,
+    method: Method,
+    path: &str,
+    cookie: &str,
+    csrf: Option<&str>,
+    body: Option<Value>,
+) -> Answer {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::COOKIE, cookie);
+    if let Some(csrf) = csrf {
+        request = request.header("x-csrf-token", csrf);
+    }
+    let body = match body {
+        Some(body) => {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes();
+    Answer {
+        status: parts.status,
+        headers: parts.headers,
+        body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    }
+}
+
+#[tokio::test]
+async fn users_manage_only_their_own_devices_and_sessions() {
+    let idp = Idp::start().await;
+    let app = app(&idp);
+
+    let alice_cookie = sign_in(&app, &idp, "/", "alice", "Alice")
+        .await
+        .cookie("remora_session")
+        .unwrap();
+    let bob_cookie = sign_in(&app, &idp, "/", "bob", "Bob")
+        .await
+        .cookie("remora_session")
+        .unwrap();
+    let alice_csrf = fetch(&app, "/api/web/session", Some(&alice_cookie))
+        .await
+        .body["signed_in"]["csrf"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bob_csrf = fetch(&app, "/api/web/session", Some(&bob_cookie))
+        .await
+        .body["signed_in"]["csrf"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Alice confirms a device and binds it by creating a room.
+    let device_id = common::register_named(&app, "alice-host", "Alice Desktop").await;
+    let qr_req = Request::post("/api/v1/qrcode/gen/login")
+        .header("x-param-device-id", &device_id)
+        .body(Body::empty())
+        .unwrap();
+    let qr_bytes = app
+        .clone()
+        .oneshot(qr_req)
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let qr_data: Value = remora_proto::cloud::parse_response(200, &qr_bytes).unwrap();
+    let qr_id = qr_data["qrcode_jump_url"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap();
+    let confirm = web_call(
+        &app,
+        Method::POST,
+        &format!("/api/web/logins/{qr_id}"),
+        &alice_cookie,
+        Some(&alice_csrf),
+        Some(json!({ "decision": "confirm" })),
+    )
+    .await;
+    assert_eq!(confirm.status, StatusCode::NO_CONTENT);
+    let login: Value = common::post(
+        &app,
+        "/api/v1/login/by_qrcode",
+        Some(
+            &json!({
+                "token": qr_data["status_query_ticket"],
+                "qrcode_jump_url": qr_data["qrcode_jump_url"],
+            })
+            .to_string(),
+        ),
+    )
+    .await
+    .unwrap();
+    let alice_token = login["token"].as_str().unwrap();
+    common::create_room(&app, alice_token, &device_id).await;
+
+    // Alice sees her device, client session and browser; Bob sees none of Alice's.
+    let alice_devices = web_call(
+        &app,
+        Method::GET,
+        "/api/web/devices",
+        &alice_cookie,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(alice_devices.body.as_array().unwrap().len(), 1);
+    let bob_devices = web_call(
+        &app,
+        Method::GET,
+        "/api/web/devices",
+        &bob_cookie,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(bob_devices.body, json!([]));
+
+    let alice_sessions = web_call(
+        &app,
+        Method::GET,
+        "/api/web/client-sessions",
+        &alice_cookie,
+        None,
+        None,
+    )
+    .await;
+    let alice_session_id = alice_sessions.body[0]["id"].as_str().unwrap();
+    let bob_sessions = web_call(
+        &app,
+        Method::GET,
+        "/api/web/client-sessions",
+        &bob_cookie,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(bob_sessions.body, json!([]));
+
+    let alice_browsers = web_call(
+        &app,
+        Method::GET,
+        "/api/web/browsers",
+        &alice_cookie,
+        None,
+        None,
+    )
+    .await;
+    let alice_browser_id = alice_browsers.body[0]["id"].as_str().unwrap();
+    let bob_browsers = web_call(
+        &app,
+        Method::GET,
+        "/api/web/browsers",
+        &bob_cookie,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(bob_browsers.body.as_array().unwrap().len(), 1);
+    assert_ne!(bob_browsers.body[0]["id"], alice_browser_id);
+
+    // Bob cannot unbind Alice's device or revoke her client or browser sessions.
+    for path in [
+        format!("/api/web/devices/{device_id}"),
+        format!("/api/web/client-sessions/{alice_session_id}"),
+        format!("/api/web/browsers/{alice_browser_id}"),
+    ] {
+        let attempt = web_call(
+            &app,
+            Method::DELETE,
+            &path,
+            &bob_cookie,
+            Some(&bob_csrf),
+            None,
+        )
+        .await;
+        assert_eq!(attempt.status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert!(
+        common::get::<Value>(&app, "/api/v1/user/info", Some(alice_token))
+            .await
+            .is_ok()
+    );
 }

@@ -5,10 +5,14 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use remora_cloud::{Config, OwnerPassword};
 use remora_proto::cloud::ApiError;
+use remora_proto::socketio::{Decoder, Packet};
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -378,4 +382,238 @@ async fn the_qr_code_opens_the_app() {
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
+}
+
+#[tokio::test]
+async fn managing_devices_and_client_sessions() {
+    let app = app();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+
+    let mut browser = Browser::default();
+    assert_eq!(
+        browser
+            .call(&app, Method::GET, "/api/web/devices", None)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    browser.sign_in(&app).await;
+    let host_device = common::register_named(&app, "client-host", "Studio").await;
+    let host_qr = Qr::generate(&app, &host_device).await;
+    assert_eq!(
+        browser.decide(&app, &host_qr, "confirm").await,
+        StatusCode::NO_CONTENT
+    );
+    let host_token = host_qr.log_in(&app).await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Viewer-only login (not bound to a device).
+    let viewer_device = common::register_named(&app, "client-viewer", "Laptop").await;
+    let viewer_qr = Qr::generate(&app, &viewer_device).await;
+    assert_eq!(
+        browser.decide(&app, &viewer_qr, "confirm").await,
+        StatusCode::NO_CONTENT
+    );
+    let viewer_token = viewer_qr.log_in(&app).await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Before room/create, no device is bound, and two client sessions exist.
+    let devices = browser
+        .call(&app, Method::GET, "/api/web/devices", None)
+        .await;
+    assert_eq!(devices.body, json!([]));
+    let sessions = browser
+        .call(&app, Method::GET, "/api/web/client-sessions", None)
+        .await;
+    assert_eq!(sessions.body.as_array().unwrap().len(), 2);
+
+    // Host creates a room and connects signaling -> device is bound and online.
+    let room_token = common::create_room(&app, &host_token, &host_device).await;
+    let url = format!("ws://{addr}/socket.io/?transport=websocket&EIO=4");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("X-NRD-AUTH", room_token.parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut decoder = Decoder::new();
+    let Message::Text(open) = socket.next().await.unwrap().unwrap() else {
+        panic!("expected open");
+    };
+    assert!(matches!(
+        decoder.text(&open).unwrap(),
+        Some(Packet::Open(_))
+    ));
+    socket.send(Message::text("40")).await.unwrap();
+    let Message::Text(conn) = socket.next().await.unwrap().unwrap() else {
+        panic!("expected connected");
+    };
+    assert_eq!(decoder.text(&conn).unwrap(), Some(Packet::Connected));
+
+    let devices = browser
+        .call(&app, Method::GET, "/api/web/devices", None)
+        .await;
+    assert_eq!(
+        devices.body,
+        json!([{ "id": host_device, "name": "Studio", "platform": 1, "online": true }])
+    );
+
+    let sessions = browser
+        .call(&app, Method::GET, "/api/web/client-sessions", None)
+        .await;
+    let items = sessions.body.as_array().unwrap();
+    let host_session = items
+        .iter()
+        .find(|item| item["device"]["id"] == host_device)
+        .unwrap();
+    let viewer_session = items.iter().find(|item| item["device"].is_null()).unwrap();
+    assert_eq!(host_session["device"]["name"], "Studio");
+    assert!(host_session["created"].as_u64().is_some());
+
+    // Revoking the viewer session logs out only that viewer.
+    let viewer_session_id = viewer_session["id"].as_str().unwrap();
+    assert_eq!(
+        browser
+            .call(
+                &app,
+                Method::DELETE,
+                &format!("/api/web/client-sessions/{viewer_session_id}"),
+                None
+            )
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        common::get::<Value>(&app, "/api/v1/user/info", Some(&viewer_token)).await,
+        Err(ApiError::TokenExpired)
+    );
+    assert!(
+        common::get::<Value>(&app, "/api/v1/user/info", Some(&host_token))
+            .await
+            .is_ok()
+    );
+
+    // Revoking the host's client session kicks the host off signaling and invalidates its token.
+    let host_session_id = host_session["id"].as_str().unwrap();
+    assert_eq!(
+        browser
+            .call(
+                &app,
+                Method::DELETE,
+                &format!("/api/web/client-sessions/{host_session_id}"),
+                None
+            )
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    let Message::Text(kicked) = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected left");
+    };
+    assert!(matches!(
+        decoder.text(&kicked).unwrap(),
+        Some(Packet::Event(event)) if event.name == "left"
+    ));
+    assert_eq!(
+        common::get::<Value>(&app, "/api/v1/user/info", Some(&host_token)).await,
+        Err(ApiError::TokenExpired)
+    );
+
+    // Unbinding the device removes it from the user's device list.
+    assert_eq!(
+        browser
+            .call(
+                &app,
+                Method::DELETE,
+                &format!("/api/web/devices/{host_device}"),
+                None
+            )
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    let devices = browser
+        .call(&app, Method::GET, "/api/web/devices", None)
+        .await;
+    assert_eq!(devices.body, json!([]));
+    assert_eq!(
+        browser
+            .call(
+                &app,
+                Method::DELETE,
+                &format!("/api/web/devices/{host_device}"),
+                None
+            )
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn managing_browser_sessions() {
+    let app = app();
+    let mut first = Browser::default();
+    first.sign_in(&app).await;
+    let mut second = Browser::default();
+    second.sign_in(&app).await;
+
+    let listed = first
+        .call(&app, Method::GET, "/api/web/browsers", None)
+        .await;
+    let items = listed.body.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let current = items.iter().find(|b| b["current"] == true).unwrap();
+    let other = items.iter().find(|b| b["current"] == false).unwrap();
+    assert!(current["created"].as_u64().is_some());
+    assert!(current["expires"].as_u64() > current["created"].as_u64());
+
+    // Revoking the other browser signs it out, leaving the current one signed in.
+    let other_id = other["id"].as_str().unwrap();
+    let revoked = first
+        .call(
+            &app,
+            Method::DELETE,
+            &format!("/api/web/browsers/{other_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    assert!(revoked.headers.get(header::SET_COOKIE).is_none());
+    let second_session = second
+        .call(&app, Method::GET, "/api/web/session", None)
+        .await;
+    assert_eq!(second_session.body["signed_in"], Value::Null);
+
+    // Revoking the current browser clears its cookie and ends its session.
+    let current_id = current["id"].as_str().unwrap();
+    let self_revoked = first
+        .call(
+            &app,
+            Method::DELETE,
+            &format!("/api/web/browsers/{current_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(self_revoked.status, StatusCode::NO_CONTENT);
+    assert!(first.cookie.is_none());
+    assert_eq!(
+        first
+            .call(&app, Method::GET, "/api/web/browsers", None)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
 }

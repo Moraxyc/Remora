@@ -108,7 +108,7 @@ impl Devices {
 
     /// Takes one of `user_id`'s devices off them and closes its host's sessions; `false` if it
     /// is not theirs.
-    fn unbind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
+    pub fn unbind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
         let mut connection = self.0.connection();
         let transaction = connection.transaction()?;
         let changed = transaction.execute(
@@ -148,7 +148,7 @@ impl Devices {
     }
 
     /// `user_id`'s devices, ordered by id.
-    fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<Device>> {
+    pub fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<Device>> {
         let query = format!(
             "SELECT {} FROM devices WHERE owner = ?1 ORDER BY id",
             Device::COLUMNS
