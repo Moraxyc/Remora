@@ -40,7 +40,10 @@ for good, because clients register once and reuse the device id forever. The sig
 keeps strangers from calling them: on a server that the internet can reach, set `sign_key_file`
 to a random key and configure your clients with it.
 
-Clients have to be pointed at Remora. uu-remote-linux has its API base URL in `src/auth.rs`.
+Clients have to be pointed at Remora. The flake also packages a patched
+[uu-remote-linux](https://github.com/VallierDev/uu-remote-linux) (`packages.uu-remote-linux` and
+`overlays.default`) that reads `UU_BASE_URL` or `"base_url"` in its config file (and `UU_SIGN_KEY`
+/ `"sign_key"` when `sign_key_file` is set).
 
 ### NixOS
 

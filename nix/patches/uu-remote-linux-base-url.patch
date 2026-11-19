@@ -1,0 +1,183 @@
+diff --git a/src/auth.rs b/src/auth.rs
+index 3cb6992..20a80ac 100644
+--- a/src/auth.rs
++++ b/src/auth.rs
+@@ -23,7 +23,11 @@ impl std::fmt::Display for RoomError {
+     }
+ }
+ 
+-pub const BASE_URL: &str = "https://api.nrd.nie.163.com";
++pub const DEFAULT_BASE_URL: &str = "https://api.nrd.nie.163.com";
++
++pub fn base_url() -> String {
++    crate::config::base_url()
++}
+ 
+ /// Account binding and request-signing key. Never committed: loaded at startup from
+ /// a private config file or environment variables (see config.example.json).
+@@ -294,7 +298,7 @@ impl UUAuthClient {
+     /// Signed JSON POST; returns (HTTP status, decoded body).
+     pub async fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<(u16, serde_json::Value), String> {
+         let body_str = serde_json::to_string(body).map_err(|e| e.to_string())?;
+-        let resp = self.http.post(format!("{}{}", BASE_URL, path))
++        let resp = self.http.post(format!("{}{}", base_url(), path))
+             .headers(self.build_headers("POST", path, &body_str)).body(body_str)
+             .send().await.map_err(|e| format!("HTTP post {path} failed: {}", transport_error(&e)))?;
+         let status = resp.status().as_u16();
+@@ -308,7 +312,7 @@ impl UUAuthClient {
+         let started = std::time::Instant::now();
+         let body_str = body.map(serde_json::to_string).transpose()
+             .map_err(|_| QrRequestError::new(QrRequestErrorKind::Request, "encode", started, None))?.unwrap_or_default();
+-        let request = self.http.post(format!("{}{}", BASE_URL, path)).timeout(timeout)
++        let request = self.http.post(format!("{}{}", base_url(), path)).timeout(timeout)
+             .headers(self.build_headers("POST", path, &body_str)).body(body_str);
+         send_qr_request(request, started).await
+     }
+@@ -330,7 +334,7 @@ impl UUAuthClient {
+     }
+     /// Account share info is a GET (POST answers 405, verified live).
+     pub async fn assist_get(&self, path: &str) -> Result<(u16, serde_json::Value), String> {
+-        let request = self.http.get(format!("{BASE_URL}{path}")).headers(self.build_headers("GET", path, "")).build()
++        let request = self.http.get(format!("{}{path}", base_url())).headers(self.build_headers("GET", path, "")).build()
+             .map_err(|_| "assist request construction failed")?;
+         self.assist_send(request).await
+     }
+@@ -346,7 +350,7 @@ impl UUAuthClient {
+ 
+     fn assist_request(&self, path: &str, body: Option<&serde_json::Value>) -> Result<reqwest::Request, String> {
+         let body = body.map(serde_json::to_string).transpose().map_err(|_| "assist request encoding failed")?.unwrap_or_default();
+-        self.http.post(format!("{BASE_URL}{path}"))
++        self.http.post(format!("{}{path}", base_url()))
+             .headers(self.build_headers("POST", path, &body)).body(body).build()
+             .map_err(|_| "assist request construction failed".into())
+     }
+@@ -448,6 +452,16 @@ mod guest_tests {
+         assert_eq!(headers["x-param-vc"], "4318");
+         assert_eq!(headers["user-agent"], "UURemote/4.45.0 (Windows NT 10.0; Win64; x64)");
+     }
++
++    #[test]
++    fn base_url_reads_env_and_strips_trailing_slash() {
++        let _env = crate::config::test_env_lock().lock().unwrap();
++        std::env::remove_var("UU_BASE_URL");
++        assert_eq!(base_url(), DEFAULT_BASE_URL);
++        std::env::set_var("UU_BASE_URL", " https://remora.example.test/// ");
++        assert_eq!(base_url(), "https://remora.example.test");
++        std::env::remove_var("UU_BASE_URL");
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/src/config.rs b/src/config.rs
+index b526b82..ce57f88 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -67,3 +67,11 @@ pub fn version_code() -> String {
+         .unwrap_or_else(|| "4318".into())
+ }
+ 
++/// Cloud API base URL (`UU_BASE_URL` or config `"base_url"`), without a trailing slash.
++pub fn base_url() -> String {
++    let raw = std::env::var("UU_BASE_URL").ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
++        .or_else(|| file().ok().flatten().and_then(|f| f.get("base_url")).and_then(|v| v.as_str()).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()))
++        .unwrap_or_else(|| crate::auth::DEFAULT_BASE_URL.into());
++    raw.trim_end_matches('/').to_owned()
++}
++
+diff --git a/src/viewer/ui.rs b/src/viewer/ui.rs
+index 26068b8..63e9d9c 100644
+--- a/src/viewer/ui.rs
++++ b/src/viewer/ui.rs
+@@ -101,7 +101,7 @@ pub async fn run(credentials: impl Fn() -> Result<crate::auth::Credentials, Stri
+     let mut just_logged_in = false;
+     unsafe { uu_viewer_ui_set_host(super::host::active().into()) }
+     let refresh = |creds: &crate::auth::Credentials| {
+-        let api = super::api::Api::new(crate::auth::UUAuthClient::new(creds.clone()), crate::auth::BASE_URL);
++        let api = super::api::Api::new(crate::auth::UUAuthClient::new(creds.clone()), &crate::auth::base_url());
+         async move { api.device_list().await }
+     };
+     loop {
+@@ -229,7 +229,7 @@ pub async fn run(credentials: impl Fn() -> Result<crate::auth::Credentials, Stri
+                 ["connect", id, "unbind"] => {
+                     if let Some(s)=sessions.remove(*id){s.stop().await;}
+                     let result=match credentials(){
+-                        Ok(creds)=>super::api::Api::new(crate::auth::UUAuthClient::new(creds),crate::auth::BASE_URL).unbind(id,false).await.map_err(|e|e.to_string()),
++                        Ok(creds)=>super::api::Api::new(crate::auth::UUAuthClient::new(creds),&crate::auth::base_url()).unbind(id,false).await.map_err(|e|e.to_string()),
+                         Err(e)=>Err(e),
+                     };
+                     match result {Ok(())=>toast(crate::i18n::s("设备已从账号删除","Device removed from the account")),Err(e)=>toast(&crate::tr!("删除设备失败：{e}","Removing the device failed: {e}"))}
+diff --git a/src/viewer_main.rs b/src/viewer_main.rs
+index 06c3c35..6f26409 100644
+--- a/src/viewer_main.rs
++++ b/src/viewer_main.rs
+@@ -95,7 +95,7 @@ async fn desktop_command(args:&[String],code:Option<String>)->Result<(),String>
+         Some((viewer::sdl::Window::new()?,decoder))
+     }else{None};
+     let creds=credentials()?;
+-    let api=Api::new(auth::UUAuthClient::new(creds.clone()),auth::BASE_URL);
++    let api=Api::new(auth::UUAuthClient::new(creds.clone()),&auth::base_url());
+     let account_connection=code.is_none();
+     #[cfg(feature="viewer-sdl")]
+     macro_rules! wait {($stage:expr,$fut:expr)=>{viewer::sdl::loading(desktop.as_mut().map(|d|&mut d.0),$stage,$fut).await?}}
+@@ -190,7 +190,7 @@ async fn type_command(args:&[String])->Result<(),String>{
+     }
+     let mut shape:Shape=serde_json::from_str(DEFAULT_SHAPE).map_err(|_|"Invalid built-in type shape")?;
+     shape.capture_type=1;
+-    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),auth::BASE_URL);
++    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),&auth::base_url());
+     let room=api.join(device,false,true).await.map_err(|e|e.to_string())?;
+     let mac=api.target_is_mac(&room,Some(device)).await.map_err(|e|e.to_string())?;
+     let actions=viewer::secure_input::expand(secret.as_str(),mac)?;
+@@ -207,7 +207,7 @@ async fn type_command(args:&[String])->Result<(),String>{
+ }
+ 
+ fn credentials()->Result<auth::Credentials,String> {auth::Credentials::load(config::read_fresh().map_err(|_|"Cannot read credential configuration")?.as_ref())}
+-fn api()->Result<Api,String> {Ok(Api::new(auth::UUAuthClient::new(credentials()?),auth::BASE_URL))}
++fn api()->Result<Api,String> {Ok(Api::new(auth::UUAuthClient::new(credentials()?),&auth::base_url()))}
+ 
+ async fn login_command(executable:&std::path::Path,options:&[String])->Result<(),String> {
+     let status=tokio::process::Command::new(executable).arg("login").args(options).status().await.map_err(|_|"Build sibling uuremote-server to reuse QR login")?;
+@@ -265,7 +265,7 @@ async fn tool_command(args:&[String])->Result<(),String>{
+     let mut shape:Shape=serde_json::from_str(DEFAULT_SHAPE).map_err(|_|"Invalid built-in tool shape")?;
+     shape.capture_type=capture;shape.feature_flag.clear();
+     if capture!=5{shape.decoders.clear();shape.display_modes.clear();shape.displays.clear();shape.codecs.clear();}
+-    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),auth::BASE_URL);
++    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),&auth::base_url());
+     let room=api.join(&args[1],false,true).await.map_err(|e|e.to_string())?;
+     // Match the existing UI connection framing (9bb42d5); the host tolerates this prefix.
+     let options=Options{timeout:Duration::from_secs(12),legacy_prefix:true,ready_policy:ReadyPolicy::EchoOnly,clipboard:clipboard::Bridge::new(false)};
+@@ -295,7 +295,7 @@ async fn power_command(args:&[String])->Result<(),String>{
+     let mut shape:Shape=serde_json::from_str(DEFAULT_SHAPE).map_err(|_|"Invalid built-in power shape")?;
+     // File-tool peers carry CONTROL without starting desktop capture or clipboard.
+     shape.capture_type=5;shape.feature_flag.clear();
+-    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),auth::BASE_URL);
++    let creds=credentials()?;let api=Api::new(auth::UUAuthClient::new(creds.clone()),&auth::base_url());
+     let room=api.join(&args[1],false,true).await.map_err(|e|e.to_string())?;
+     let options=Options{timeout:Duration::from_secs(12),legacy_prefix:true,ready_policy:ReadyPolicy::EchoOnly,clipboard:clipboard::Bridge::new(false)};
+     let mut session=Session::open(&room,&shape,&creds.device_id,&creds.client_id,options,Default::default()).await?;
+diff --git a/src/wallpaper.rs b/src/wallpaper.rs
+index 18060f2..bf67214 100644
+--- a/src/wallpaper.rs
++++ b/src/wallpaper.rs
+@@ -224,7 +224,7 @@ fn api_data(status: u16, body: &serde_json::Value) -> Result<&serde_json::Value,
+ 
+ async fn publish(auth: &UUAuthClient, image: Vec<u8>) -> Result<(), &'static str> {
+     let http = crate::auth::http_client_builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|_| "http-client")?;
+-    publish_to(auth, image, crate::auth::BASE_URL, &http).await
++    publish_to(auth, image, &crate::auth::base_url(), &http).await
+ }
+ 
+ async fn json(request: reqwest::RequestBuilder) -> Result<(u16, serde_json::Value), ()> {
+diff --git a/src/wol.rs b/src/wol.rs
+index 876c2fe..38d2bb8 100644
+--- a/src/wol.rs
++++ b/src/wol.rs
+@@ -95,7 +95,7 @@ fn report_body(mac: &str, ip: &str, subnet_mask: &str) -> serde_json::Value {
+ pub async fn report(auth: &crate::auth::UUAuthClient) {
+     let Some((mac, ip, subnet_mask)) = lan_info() else { log::warn!("WOL helper: no IPv4 default-route interface"); return; };
+     let body = report_body(&mac, &ip, &subnet_mask);
+-    match auth.post_json_url("https://api-ipv4.nrd.nie.163.com", "/api/v1/device/wake_on_lan/info", &body).await {
++    match auth.post_json_url(&crate::auth::base_url(), "/api/v1/device/wake_on_lan/info", &body).await {
+         Ok((status, value)) => log::info!("WOL helper: LAN info reported: status={status} code={:?} turn_on_wol={:?}",
+             value.get("code").and_then(serde_json::Value::as_i64),
+             value.get("data").and_then(|d| d.get("turn_on_wol")).or_else(|| value.get("turn_on_wol"))),

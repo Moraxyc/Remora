@@ -34,6 +34,7 @@
           rustfmt
           rust-analyzer
           nodejs
+          (callPackage (inputs.fetchrix + "/nix/package.nix") { })
         ];
       };
     };

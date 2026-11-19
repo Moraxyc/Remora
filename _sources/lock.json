@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "packages": {
+    "uu-remote-linux": {
+      "version": "0.2.61",
+      "rawVersion": "0.2.61",
+      "date": "2026-11-18",
+      "src": {
+        "fetcher": "github",
+        "owner": "VallierDev",
+        "repo": "uu-remote-linux",
+        "tag": "v0.2.61",
+        "hash": "sha256-x+2L9jT+Dkp4qXnIz5GvM+NTm470NVvIwIhmRzKRCm0="
+      },
+      "derived": {
+        "cargoLock": {
+          "lockfile": "uu-remote-linux/src/Cargo.lock"
+        }
+      },
+      "fingerprint": "sha256-WjJRgQwYTZ4h0L6w4Y4FcRC9T1oFN4xQgkq5AkzFu/o="
+    }
+  }
+}

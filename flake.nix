@@ -28,11 +28,12 @@
         { config, final, ... }:
         {
           overlayAttrs = {
-            inherit (config.packages) remora remora-web;
+            inherit (config.packages) remora remora-web uu-remote-linux;
           };
           packages = {
             remora = final.callPackage ./nix/package.nix { };
             remora-web = final.callPackage ./nix/web.nix { };
+            uu-remote-linux = final.callPackage ./nix/uu-remote-linux.nix { };
             default = config.packages.remora;
           };
         };
