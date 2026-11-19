@@ -1,0 +1,6 @@
+# Packages come from pkgs.moraxyc.com, not the Debian archive, so no upload closes a bug.
+remora: initial-upload-closes-no-bugs [usr/share/doc/remora/changelog.Debian.gz:1]
+# `remora --help` documents the command line; there is no manual page.
+remora: no-manual-page [usr/bin/remora]
+# A static-pie executable: it has no interpreter, and no libraries to declare.
+remora: shared-library-lacks-prerequisites [usr/bin/remora]

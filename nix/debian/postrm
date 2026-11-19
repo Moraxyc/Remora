@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload > /dev/null || true
+fi
+
+# init-system-helpers may already be gone when this runs.
+if command -v deb-systemd-helper > /dev/null; then
+    if [ "$1" = remove ]; then
+        # Keeps a leftover enablement from starting a service whose binary is gone.
+        deb-systemd-helper mask remora.service > /dev/null || true
+    fi
+    if [ "$1" = purge ]; then
+        deb-systemd-helper purge remora.service > /dev/null || true
+        deb-systemd-helper unmask remora.service > /dev/null || true
+    fi
+fi
+
+if [ "$1" = purge ]; then
+    # The database holds the key that signs tokens. /etc/remora is the administrator's.
+    rm -rf /var/lib/remora /var/lib/private/remora
+fi

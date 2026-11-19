@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = configure ]; then
+    adduser --system --group --quiet --no-create-home --home /nonexistent remora
+    # Settings and secrets stay root's; the group lets the service read them.
+    if [ ! -e /etc/remora ]; then
+        install -d -m 0750 -g remora /etc/remora
+    fi
+fi
+
+# The service is not enabled or started until it has settings. An upgrade restarts it if it runs.
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] ||
+    [ "$1" = abort-remove ]; then
+    # Undoes the mask a removal left.
+    deb-systemd-helper unmask remora.service > /dev/null || true
+    deb-systemd-helper update-state remora.service > /dev/null || true
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload > /dev/null || true
+        if [ -n "$2" ]; then
+            deb-systemd-invoke try-restart remora.service > /dev/null || true
+        fi
+    fi
+fi

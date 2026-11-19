@@ -3,6 +3,7 @@ Version: @version@
 Architecture: @architecture@
 Maintainer: Moraxyc <i@qaq.li>
 Installed-Size: @installedSize@
+Depends: adduser, init-system-helpers (>= 1.54~)
 Suggests: coturn
 Section: net
 Priority: optional

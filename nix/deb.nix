@@ -47,8 +47,14 @@ stdenvNoCC.mkDerivation {
      -- Moraxyc <i@qaq.li>  $(date --utc --rfc-email --date=@$SOURCE_DATE_EPOCH)
     EOF
     gzip -9n < changelog.Debian > root/usr/share/doc/${pname}/changelog.Debian.gz
-    install -Dm644 -t root/usr/share/doc/${pname}/examples contrib/*
+    install -Dm644 -t root/usr/share/doc/${pname}/examples contrib/remora.toml contrib/turnserver.conf
+    install -Dm644 -t root/usr/lib/systemd/system contrib/remora.service
+    install -Dm644 ${./debian/lintian-overrides} root/usr/share/lintian/overrides/${pname}
     install -Dm644 ${control} root/DEBIAN/control
+    for script in postinst prerm postrm; do
+      install -Dm755 ${./debian}/$script root/DEBIAN/$script
+    done
+    (cd root && find usr -type f -print0 | sort -z | xargs -0 md5sum) > root/DEBIAN/md5sums
     substituteInPlace root/DEBIAN/control \
       --replace-fail @installedSize@ "$(du -sk --exclude=DEBIAN root | cut -f1)"
     dpkg-deb --root-owner-group -Zxz --build root ${pname}_${debVersion}_${architecture}.deb

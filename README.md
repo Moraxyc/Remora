@@ -54,6 +54,25 @@ Clients have to be pointed at Remora. The flake also packages a patched
 `overlays.default`) that reads `UU_BASE_URL` or `"base_url"` in its config file (and `UU_SIGN_KEY`
 / `"sign_key"` when `sign_key_file` is set).
 
+### Debian and Ubuntu
+
+Each release carries a `.deb` for amd64 and arm64. It installs `remora.service`, which reads
+`/etc/remora/remora.toml` and keeps its database in `/var/lib/remora`, and a `remora` group that
+may read the settings and secrets there while they stay root's. The example settings name files
+that do not exist yet; keep at least one way to confirm logins (`login.password_file`, `[oidc]`
+or `login.auto_confirm`) and make the files it names:
+
+```sh
+sudo cp /usr/share/doc/remora/examples/remora.toml /etc/remora/
+# Edit it, then give it and every secret file it names to the group.
+sudo chgrp remora /etc/remora/*
+sudo chmod 0640 /etc/remora/*
+sudo systemctl enable --now remora
+```
+
+Purging the package deletes the database, which holds the key that signs tokens, and keeps
+`/etc/remora`.
+
 ### NixOS
 
 The flake provides a module that runs Remora and, optionally, coturn next to it:
