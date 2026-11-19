@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::request::Builder;
 use http_body_util::BodyExt;
-use remora_cloud::{Config, Database, Ping};
+use remora_cloud::{Config, Database, Ping, ReconnectGrace};
 use remora_proto::cloud::{ApiError, parse_response};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ pub fn config() -> Config {
         public_url: PUBLIC_URL.parse().unwrap(),
         sign_key: None,
         ping: Ping::default(),
+        reconnect_grace: ReconnectGrace::default(),
         ice: Default::default(),
         database: Database::in_memory(),
     }

@@ -51,6 +51,26 @@ impl Default for Ping {
     }
 }
 
+/// How long the sessions of a host that left signaling wait for it to reconnect before they
+/// end. Hosts wait a few seconds and ask for a new room before reconnecting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectGrace(pub Duration);
+
+impl Default for ReconnectGrace {
+    fn default() -> Self {
+        Self(Duration::from_secs(30))
+    }
+}
+
+/// What admitted connections are served with.
+#[derive(Clone)]
+pub struct Switchboard {
+    pub rooms: Rooms,
+    pub ping: Ping,
+    pub reconnect_grace: ReconnectGrace,
+    pub ice: Arc<Ice>,
+}
+
 /// Checks the room token a connection brings.
 #[derive(Clone)]
 pub struct Admission {
@@ -85,9 +105,7 @@ pub async fn connect(
     upgrade: WebSocketUpgrade,
     Query(query): Query<EngineQuery>,
     State(admission): State<Admission>,
-    State(rooms): State<Rooms>,
-    State(ping): State<Ping>,
-    State(ice): State<Arc<Ice>>,
+    State(switchboard): State<Switchboard>,
     headers: HeaderMap,
 ) -> Response {
     if query.eio != "4" || query.transport != "websocket" {
@@ -102,10 +120,16 @@ pub async fn connect(
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(error) => return ApiError::from(error).into_response(),
     };
-    upgrade.on_upgrade(move |socket| serve(socket, room, rooms, ping, ice))
+    upgrade.on_upgrade(move |socket| serve(socket, room, switchboard))
 }
 
-async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping, ice: Arc<Ice>) {
+async fn serve(socket: WebSocket, room: Room, switchboard: Switchboard) {
+    let Switchboard {
+        rooms,
+        ping,
+        reconnect_grace,
+        ice,
+    } = switchboard;
     let id = hex::encode(random::<16>());
     let (outbox, mut inbox) = mpsc::channel(OUTBOX_CAPACITY);
     rooms.join(
@@ -134,8 +158,12 @@ async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping, ice: Arc
     };
     let reason = session.run(open, &mut inbox, ping).await;
 
-    rooms.leave(&session.room, &id);
+    let departure = rooms.leave(&session.room, &id);
     tracing::info!(%device_id, ?role, reason, "signaling closed");
+    if let Some(departure) = departure {
+        tokio::time::sleep(reconnect_grace.0).await;
+        rooms.expire(&departure);
+    }
 }
 
 struct Session {

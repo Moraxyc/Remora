@@ -27,7 +27,7 @@ use serde::Deserialize;
 pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
-pub use signaling::Ping;
+pub use signaling::{Ping, ReconnectGrace};
 
 pub struct Config {
     /// Where clients reach this server.
@@ -37,6 +37,8 @@ pub struct Config {
     pub sign_key: Option<SignKey>,
     /// Signaling heartbeat.
     pub ping: Ping,
+    /// How long sessions wait for their host to reconnect to signaling.
+    pub reconnect_grace: ReconnectGrace,
     /// STUN and TURN servers for sessions.
     pub ice: Ice,
     /// Where the token key, registered devices and user sessions are kept.
@@ -111,6 +113,7 @@ struct Cloud {
     public_url: PublicUrl,
     rooms: rooms::Rooms,
     ping: Ping,
+    reconnect_grace: ReconnectGrace,
     ice: Arc<Ice>,
 }
 
@@ -119,6 +122,17 @@ impl FromRef<Cloud> for room::Tickets {
         Self {
             tokens: cloud.tokens.clone(),
             public_url: cloud.public_url.clone(),
+        }
+    }
+}
+
+impl FromRef<Cloud> for signaling::Switchboard {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            rooms: cloud.rooms.clone(),
+            ping: cloud.ping,
+            reconnect_grace: cloud.reconnect_grace,
+            ice: cloud.ice.clone(),
         }
     }
 }
@@ -142,6 +156,7 @@ pub fn router(config: Config) -> Router {
         public_url: config.public_url,
         rooms: Default::default(),
         ping: config.ping,
+        reconnect_grace: config.reconnect_grace,
         ice: Arc::new(config.ice),
     };
     let api = Router::new()

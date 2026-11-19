@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
-use crate::{Config, Database, DatabaseError, Ice, IceError, IceUrl, Ping, PublicUrl, TurnSecret};
+use crate::{
+    Config, Database, DatabaseError, Ice, IceError, IceUrl, Ping, PublicUrl, ReconnectGrace,
+    TurnSecret,
+};
 
 /// What the settings file says. Secrets stay in their own files, named here and read by
 /// [`Settings::into_config`].
@@ -138,6 +141,7 @@ impl Settings {
             public_url,
             sign_key,
             ping: Ping::default(),
+            reconnect_grace: ReconnectGrace::default(),
             ice,
             database,
         })

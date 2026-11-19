@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use remora_cloud::{Config, Ice, Ping, TurnSecret};
+use remora_cloud::{Config, Ice, Ping, ReconnectGrace, TurnSecret};
 use remora_proto::cloud::{ApiError, SignKey};
 use remora_proto::socketio::{Decoder, Event, Packet};
 use serde_json::{Value, json};
@@ -423,6 +423,63 @@ async fn control_fails_once_the_host_is_gone() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("control kept succeeding without a host");
+}
+
+/// An online host and a viewer in a desktop session with it; returns both, the user token, the
+/// device id and the session's `ice_id`.
+async fn in_session(app: &Router, addr: SocketAddr) -> (Client, Client, String, String, String) {
+    let (mut host, token, device_id) = online_host(app, addr).await;
+    let joined = join(app, &token, &device_id).await.unwrap();
+    let (viewer, ice_id) = control_desktop(addr, &joined).await;
+    assert_eq!(host.event().await.name, "be-controlled");
+    (host, viewer, token, device_id, ice_id)
+}
+
+#[tokio::test]
+async fn sessions_survive_the_host_renewing_its_room() {
+    let (app, addr) = start(common::config()).await;
+    let (host, mut viewer, token, device_id, ice_id) = in_session(&app, addr).await;
+    drop(host);
+
+    let room = common::create_room(&app, &token, &device_id).await;
+    let mut host = Client::connect(addr, &room).await.unwrap();
+    host.handshake().await;
+    let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
+    viewer
+        .send(&format!("42{}", json!(["soac", candidate])))
+        .await;
+    let candidate = host.event().await;
+    assert_eq!(
+        (
+            candidate.name.as_str(),
+            &candidate.args[0]["data"]["ice_id"]
+        ),
+        ("soac", &json!(ice_id))
+    );
+
+    drop(viewer);
+    let released = host.event().await;
+    assert_eq!(
+        (released.name.as_str(), &released.args[0]["ice_id"]),
+        ("released", &json!(ice_id))
+    );
+}
+
+#[tokio::test]
+async fn sessions_end_when_the_host_does_not_come_back() {
+    let (app, addr) = start(Config {
+        reconnect_grace: ReconnectGrace(Duration::from_millis(100)),
+        ..common::config()
+    })
+    .await;
+    let (host, mut viewer, _, _, ice_id) = in_session(&app, addr).await;
+    drop(host);
+
+    let left = viewer.event().await;
+    assert_eq!(
+        (left.name.as_str(), &left.args[0]["ice_id"]),
+        ("left", &json!(ice_id))
+    );
 }
 
 #[tokio::test]

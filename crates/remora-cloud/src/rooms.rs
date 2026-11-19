@@ -7,6 +7,11 @@
 //!
 //! Only one viewer device at a time controls the desktop. Tool sessions (files, terminal, port
 //! mapping) and further sessions from the controlling device are not limited.
+//!
+//! Sessions outlive the host's signaling connection: their media flows between host and viewer
+//! directly, and hosts keep it up while they reconnect, which they also do to renew the room.
+//! A host connection that replaces the previous one takes over its sessions. If the host left
+//! without a replacement, its sessions wait for one until [`Rooms::expire`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,6 +32,8 @@ pub struct Rooms(Arc<Mutex<HashMap<String, Members>>>);
 #[derive(Debug, Default)]
 struct Members {
     host: Option<Peer>,
+    /// The host connection that left its sessions behind, while they wait for a new one.
+    departed: Option<String>,
     viewers: HashMap<String, Peer>,
     /// Open sessions, by `ice_id`.
     sessions: HashMap<String, Session>,
@@ -82,6 +89,14 @@ impl Peer {
     }
 }
 
+/// A host connection that left sessions behind; see [`Rooms::expire`].
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the sessions left behind wait until expired"]
+pub struct Departure {
+    device_id: String,
+    host_id: String,
+}
+
 /// Why a `control` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
@@ -99,7 +114,14 @@ impl Rooms {
                 if let Some(previous) = members.host.replace(peer) {
                     // A full outbox means that connection is stuck; it times out by itself.
                     let _ = previous.outbox.try_send(Outbound::Kicked);
-                    members.end_sessions_with_host(&previous.id);
+                }
+                members.departed = None;
+                if !members.sessions.is_empty() {
+                    tracing::info!(
+                        device_id = %room.device_id,
+                        sessions = members.sessions.len(),
+                        "host reconnected to its sessions"
+                    );
                 }
             }
             Role::Viewer { .. } => {
@@ -108,16 +130,22 @@ impl Rooms {
         }
     }
 
-    /// Removes a connection and tells the other side of each of its sessions.
-    pub fn leave(&self, room: &Room, id: &str) {
+    /// Removes a connection. A viewer's sessions end, and the host is told. A host's sessions
+    /// are left behind for the next host connection, unless they expire first.
+    pub fn leave(&self, room: &Room, id: &str) -> Option<Departure> {
         let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let Some(members) = rooms.get_mut(&room.device_id) else {
-            return;
-        };
+        let members = rooms.get_mut(&room.device_id)?;
+        let mut departure = None;
         match room.role {
             Role::Host if members.host.as_ref().is_some_and(|host| host.id == id) => {
                 members.host = None;
-                members.end_sessions_with_host(id);
+                if !members.sessions.is_empty() {
+                    members.departed = Some(id.to_owned());
+                    departure = Some(Departure {
+                        device_id: room.device_id.clone(),
+                        host_id: id.to_owned(),
+                    });
+                }
             }
             Role::Host => {}
             Role::Viewer { .. } => {
@@ -134,9 +162,30 @@ impl Rooms {
                 });
             }
         }
+        // Sessions belong to viewers, so a room without viewers has none to keep.
         if members.host.is_none() && members.viewers.is_empty() {
             rooms.remove(&room.device_id);
         }
+        departure
+    }
+
+    /// Ends the sessions a host connection left behind, unless another took them over since.
+    /// Each viewer is told the host left.
+    pub fn expire(&self, departure: &Departure) {
+        let mut rooms = self.0.lock().expect("rooms lock poisoned");
+        let Some(members) = rooms.get_mut(&departure.device_id) else {
+            return;
+        };
+        if members.departed.as_ref() != Some(&departure.host_id) {
+            return;
+        }
+        members.departed = None;
+        tracing::info!(
+            device_id = %departure.device_id,
+            sessions = members.sessions.len(),
+            "host did not reconnect to its sessions"
+        );
+        members.end_sessions_with_host(&departure.host_id);
     }
 
     /// Whether a device other than `from_device` controls the desktop of `device_id`.
@@ -150,16 +199,25 @@ impl Rooms {
         })
     }
 
-    /// Drops the device's host from signaling; its connection closes and leaves the room.
+    /// Drops the device's host from signaling and ends its sessions; its connection closes
+    /// and leaves the room.
     pub fn kick_host(&self, device_id: &str) {
-        let rooms = self.0.lock().expect("rooms lock poisoned");
-        if let Some(host) = rooms
-            .get(device_id)
-            .and_then(|members| members.host.as_ref())
-        {
-            // A full outbox means that connection is stuck; it times out by itself.
-            let _ = host.outbox.try_send(Outbound::Kicked);
-        }
+        let mut rooms = self.0.lock().expect("rooms lock poisoned");
+        let Some(members) = rooms.get_mut(device_id) else {
+            return;
+        };
+        let host_id = match &members.host {
+            Some(host) => {
+                // A full outbox means that connection is stuck; it times out by itself.
+                let _ = host.outbox.try_send(Outbound::Kicked);
+                host.id.clone()
+            }
+            None => match members.departed.take() {
+                Some(departed) => departed,
+                None => return,
+            },
+        };
+        members.end_sessions_with_host(&host_id);
     }
 
     pub fn is_online(&self, device_id: &str) -> bool {
@@ -283,7 +341,7 @@ impl Rooms {
 }
 
 impl Members {
-    /// The host went away: every viewer in a session with it is told the host left.
+    /// The host is gone for good: every viewer in a session with it is told the host left.
     fn end_sessions_with_host(&mut self, host_id: &str) {
         for (ice_id, session) in self.sessions.drain() {
             if let Some(viewer) = self.viewers.get(&session.viewer) {
@@ -496,60 +554,122 @@ mod tests {
         assert!(viewer.idle() && other.idle());
     }
 
-    #[test]
-    fn leaving_ends_the_other_sides_sessions() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let viewer = member(&rooms, viewer_on(None), "viewer");
+    /// Opens a session from `viewer`, and returns its `ice_id`.
+    fn open_session(rooms: &Rooms, host: &mut Member, viewer: &Member) -> Value {
         let ice_id = rooms
             .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
             .unwrap()["ice_id"]
             .clone();
-        host.event();
+        assert_eq!(host.event().name, "be-controlled");
+        ice_id
+    }
 
-        rooms.leave(&viewer.room, &viewer.id);
+    #[test]
+    fn a_viewer_leaving_releases_its_sessions() {
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
+        let viewer = member(&rooms, viewer_on(None), "viewer");
+        let ice_id = open_session(&rooms, &mut host, &viewer);
+
+        assert_eq!(rooms.leave(&viewer.room, &viewer.id), None);
         let released = host.event();
         assert_eq!(released.name, "released");
         assert_eq!(
             released.args[0],
             json!({ "ice_id": ice_id, "client_id": "viewer" })
         );
+        assert!(!rooms.controlled_elsewhere("d", None));
+    }
 
+    #[test]
+    fn a_host_that_does_not_reconnect_ends_its_sessions() {
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
         let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let ice_id = rooms
-            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
-            .unwrap()["ice_id"]
-            .clone();
-        host.event();
-        rooms.leave(&host.room, &host.id);
+        let ice_id = open_session(&rooms, &mut host, &viewer);
+
+        let departure = rooms.leave(&host.room, &host.id).unwrap();
+        assert!(!rooms.is_online("d"));
+        assert!(viewer.idle(), "the session waits for the host");
+        assert!(rooms.controlled_elsewhere("d", None));
+
+        rooms.expire(&departure);
         let left = viewer.event();
         assert_eq!(left.name, "left");
         assert_eq!(
             left.args[0],
             json!({ "ice_id": ice_id, "client_id": "host" })
         );
-        assert!(!rooms.is_online("d"));
+        assert!(!rooms.controlled_elsewhere("d", None));
     }
 
     #[test]
-    fn a_newer_host_kicks_the_older_one() {
+    fn a_host_without_sessions_leaves_nothing_behind() {
+        let rooms = Rooms::default();
+        let host = member(&rooms, Role::Host, "host");
+        assert_eq!(rooms.leave(&host.room, &host.id), None);
+    }
+
+    #[test]
+    fn a_reconnecting_host_takes_its_sessions_back() {
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
+        let ice_id = open_session(&rooms, &mut host, &viewer);
+        let departure = rooms.leave(&host.room, &host.id).unwrap();
+
+        let mut back = member(&rooms, Role::Host, "back");
+        rooms.expire(&departure);
+        assert!(
+            viewer.idle(),
+            "expiring a departure taken over does nothing"
+        );
+
+        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
+        assert!(rooms.relay(&viewer.room, &viewer.id, "soac", candidate));
+        assert_eq!(back.event().name, "soac");
+        assert!(rooms.leave(&viewer.room, &viewer.id).is_none());
+        assert_eq!(back.event().name, "released");
+    }
+
+    #[test]
+    fn a_newer_host_kicks_the_older_one_and_takes_its_sessions() {
         let rooms = Rooms::default();
         let mut older = member(&rooms, Role::Host, "older");
         let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        rooms
-            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
-            .unwrap();
-        older.event();
+        let ice_id = open_session(&rooms, &mut older, &viewer);
 
-        let _newer = member(&rooms, Role::Host, "newer");
+        let mut newer = member(&rooms, Role::Host, "newer");
         assert_eq!(older.inbox.try_recv(), Ok(Outbound::Kicked));
-        assert_eq!(viewer.event().name, "left");
+        assert!(viewer.idle());
 
-        rooms.leave(&older.room, &older.id);
+        assert_eq!(rooms.leave(&older.room, &older.id), None);
         assert!(
             rooms.is_online("d"),
             "the older host leaving keeps the newer one"
         );
+        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
+        assert!(rooms.relay(&viewer.room, &viewer.id, "soac", candidate));
+        assert_eq!(newer.event().name, "soac");
+    }
+
+    #[test]
+    fn kicking_the_host_ends_its_sessions_at_once() {
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
+        open_session(&rooms, &mut host, &viewer);
+
+        rooms.kick_host("d");
+        assert_eq!(host.inbox.try_recv(), Ok(Outbound::Kicked));
+        assert_eq!(viewer.event().name, "left");
+        assert_eq!(rooms.leave(&host.room, &host.id), None);
+
+        let mut host = member(&rooms, Role::Host, "host");
+        open_session(&rooms, &mut host, &viewer);
+        let _departure = rooms.leave(&host.room, &host.id).unwrap();
+        rooms.kick_host("d");
+        assert_eq!(viewer.event().name, "left", "also while the host is away");
     }
 
     fn options(capture_type: i32) -> Vec<u8> {
