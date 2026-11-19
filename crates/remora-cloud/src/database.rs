@@ -1,4 +1,4 @@
-//! What survives a restart, kept in SQLite.
+//! What survives a restart, kept in SQLite: the token key, registered devices and user sessions.
 
 use std::fmt;
 use std::path::Path;
@@ -10,7 +10,8 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::token::{TokenKey, random};
 
 /// Schema changes, applied in order. `PRAGMA user_version` counts those already applied.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE secrets (
         name TEXT PRIMARY KEY,
         value BLOB NOT NULL
@@ -22,7 +23,17 @@ const MIGRATIONS: &[&str] = &["
         platform INTEGER NOT NULL,
         owner TEXT
     ) STRICT;
-"];
+",
+    "
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        -- The device whose host logged in with it, once that host has created a room.
+        device_id TEXT
+    ) STRICT;
+    CREATE INDEX sessions_by_device ON sessions (device_id);
+",
+];
 
 /// What `PRAGMA user_version` says once every migration is applied.
 const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -151,9 +162,13 @@ mod tests {
     #[test]
     fn the_token_key_outlives_a_restart() {
         let path = temp_file("key");
-        let token = Database::open(&path).unwrap().tokens().issue_user("1");
+        let user = crate::token::UserToken {
+            user_id: "1".into(),
+            session_id: "s".into(),
+        };
+        let token = Database::open(&path).unwrap().tokens().issue_user(&user);
         let reopened = Database::open(&path).unwrap();
-        assert_eq!(reopened.tokens().verify_user(&token).as_deref(), Some("1"));
+        assert_eq!(reopened.tokens().verify_user(&token), Some(user));
         assert_eq!(Database::in_memory().tokens().verify_user(&token), None);
     }
 

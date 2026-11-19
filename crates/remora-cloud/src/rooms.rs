@@ -60,7 +60,7 @@ pub struct Peer {
 #[derive(Debug, PartialEq)]
 pub enum Outbound {
     Frames(Vec<Frame>),
-    /// Another connection took over this device.
+    /// The connection lost the room: another took over the device, or the device was unbound.
     Kicked,
 }
 
@@ -148,6 +148,18 @@ impl Rooms {
                 .values()
                 .any(|session| session.holds_desktop_against(from_device))
         })
+    }
+
+    /// Drops the device's host from signaling; its connection closes and leaves the room.
+    pub fn kick_host(&self, device_id: &str) {
+        let rooms = self.0.lock().expect("rooms lock poisoned");
+        if let Some(host) = rooms
+            .get(device_id)
+            .and_then(|members| members.host.as_ref())
+        {
+            // A full outbox means that connection is stuck; it times out by itself.
+            let _ = host.outbox.try_send(Outbound::Kicked);
+        }
     }
 
     pub fn is_online(&self, device_id: &str) -> bool {

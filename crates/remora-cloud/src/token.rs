@@ -1,7 +1,7 @@
 //! Tokens the cloud issues: HS256 JWTs, because clients read claims out of them.
 //!
 //! - User tokens carry the `csrf` claim clients send back, and no `exp`: like UU's, they are
-//!   used until rejected.
+//!   used until rejected. Each names its session (`sid`), which can be revoked.
 //! - Room tokens authenticate one signaling connection, as a device's host or as a viewer
 //!   joining it, and expire.
 //!
@@ -37,8 +37,16 @@ enum Kind {
 struct UserClaims {
     kind: Kind,
     sub: String,
+    sid: String,
     csrf: String,
     iat: u64,
+}
+
+/// What a user token says: who, and in which session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserToken {
+    pub user_id: String,
+    pub session_id: String,
 }
 
 /// What a room token grants: signaling for the room of `device_id`, on behalf of user `sub`.
@@ -78,19 +86,24 @@ impl TokenKey {
         Self(key)
     }
 
-    pub fn issue_user(&self, user_id: &str) -> String {
+    pub fn issue_user(&self, token: &UserToken) -> String {
         self.sign(&UserClaims {
             kind: Kind::User,
-            sub: user_id.to_owned(),
+            sub: token.user_id.clone(),
+            sid: token.session_id.clone(),
             csrf: hex::encode(random::<16>()),
             iat: now(),
         })
     }
 
-    /// The user id of a user token this key issued.
-    pub fn verify_user(&self, token: &str) -> Option<String> {
+    /// What a user token this key issued says. Whether its session is still open is for the
+    /// caller to check.
+    pub fn verify_user(&self, token: &str) -> Option<UserToken> {
         let claims: UserClaims = self.verify(token)?;
-        (claims.kind == Kind::User).then_some(claims.sub)
+        (claims.kind == Kind::User).then_some(UserToken {
+            user_id: claims.sub,
+            session_id: claims.sid,
+        })
     }
 
     pub fn issue_room(&self, room: Room) -> String {
@@ -168,6 +181,13 @@ mod tests {
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
     }
 
+    fn user() -> UserToken {
+        UserToken {
+            user_id: "1".into(),
+            session_id: "s".into(),
+        }
+    }
+
     fn room() -> Room {
         Room {
             sub: "1".into(),
@@ -178,7 +198,7 @@ mod tests {
 
     #[test]
     fn user_tokens_are_jwts_with_a_csrf_claim() {
-        let token = TokenKey::generate().issue_user("1");
+        let token = TokenKey::generate().issue_user(&user());
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(
@@ -188,6 +208,7 @@ mod tests {
 
         let claims = payload(&token);
         assert_eq!(claims["sub"], "1");
+        assert_eq!(claims["sid"], "s");
         assert_eq!(claims["csrf"].as_str().unwrap().len(), 32);
         assert!(claims.get("exp").is_none());
     }
@@ -195,7 +216,7 @@ mod tests {
     #[test]
     fn every_user_token_gets_its_own_csrf() {
         let key = TokenKey::generate();
-        let csrf = || payload(&key.issue_user("1"))["csrf"].clone();
+        let csrf = || payload(&key.issue_user(&user()))["csrf"].clone();
         assert_ne!(csrf(), csrf());
     }
 
@@ -218,19 +239,19 @@ mod tests {
     #[test]
     fn kinds_are_not_interchangeable() {
         let key = TokenKey::generate();
-        assert_eq!(key.verify_room(&key.issue_user("1")), None);
+        assert_eq!(key.verify_room(&key.issue_user(&user())), None);
         assert_eq!(key.verify_user(&key.issue_room(room())), None);
     }
 
     #[test]
     fn rejects_foreign_or_tampered_tokens() {
         let key = TokenKey::generate();
-        let token = key.issue_user("1");
-        assert_eq!(key.verify_user(&token).as_deref(), Some("1"));
+        let token = key.issue_user(&user());
+        assert_eq!(key.verify_user(&token), Some(user()));
         assert_eq!(TokenKey::generate().verify_user(&token), None);
 
         let parts: Vec<&str> = token.split('.').collect();
-        let forged = json!({ "kind": "user", "sub": "2", "csrf": "x", "iat": 0 });
+        let forged = json!({ "kind": "user", "sub": "2", "sid": "s", "csrf": "x", "iat": 0 });
         let forged = URL_SAFE_NO_PAD.encode(forged.to_string());
         assert_eq!(
             key.verify_user(&format!("{}.{forged}.{}", parts[0], parts[2])),

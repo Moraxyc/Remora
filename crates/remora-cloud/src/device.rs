@@ -2,7 +2,7 @@
 
 use std::convert::Infallible;
 
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -85,13 +85,41 @@ impl Devices {
         )
     }
 
-    /// Makes `user_id` the owner of a registered device; `false` if there is no such device.
-    pub fn bind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
-        let changed = self.0.connection().execute(
+    /// Makes `user` the owner of a registered device whose host logged in as them, and ties
+    /// the host's session to the device; `false` if there is no such device.
+    pub fn bind(&self, device_id: &str, user: &User) -> rusqlite::Result<bool> {
+        let mut connection = self.0.connection();
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
             "UPDATE devices SET owner = ?2 WHERE id = ?1",
+            [device_id, &user.id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE sessions SET device_id = ?1 WHERE id = ?2",
+            [device_id, &user.session_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Takes one of `user_id`'s devices off them and closes its host's sessions; `false` if it
+    /// is not theirs.
+    fn unbind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
+        let mut connection = self.0.connection();
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE devices SET owner = NULL WHERE id = ?1 AND owner = ?2",
             [device_id, user_id],
         )?;
-        Ok(changed > 0)
+        if changed == 0 {
+            return Ok(false);
+        }
+        transaction.execute("DELETE FROM sessions WHERE device_id = ?1", [device_id])?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// The platform of `device_id`, if it belongs to `user_id`.
@@ -217,3 +245,23 @@ pub async fn list(
         others_shared_devices: [],
     }))
 }
+
+/// `POST /api/v1/device/{device_id}/unbind`, with an empty body: removes one of the user's
+/// devices from the account. Its host is logged out and dropped from signaling, so it has to
+/// log in again to come back.
+pub async fn unbind(
+    user: User,
+    Path(device_id): Path<String>,
+    State(devices): State<Devices>,
+    State(rooms): State<Rooms>,
+) -> Result<api::Ok<Empty>, ApiError> {
+    if !devices.unbind(&device_id, &user.id)? {
+        return Err(ApiError::UNKNOWN_DEVICE);
+    }
+    rooms.kick_host(&device_id);
+    tracing::info!(user_id = %user.id, %device_id, "device unbound");
+    Ok(api::Ok(Empty {}))
+}
+
+#[derive(Serialize)]
+pub struct Empty {}

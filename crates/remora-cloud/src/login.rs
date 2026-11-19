@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{self, ApiError, Body};
 use crate::token::{TokenKey, random};
-use crate::user::{OWNER_ID, OWNER_NICKNAME};
+use crate::user::{OWNER_ID, OWNER_NICKNAME, Sessions};
 
 /// How long a generated QR code can be used to log in.
 const QR_LIFETIME: Duration = Duration::from_secs(180);
@@ -126,14 +126,16 @@ pub struct LoginResponse {
 pub async fn by_qrcode(
     State(logins): State<Logins>,
     State(tokens): State<Arc<TokenKey>>,
+    State(sessions): State<Sessions>,
     Body(qr): Body<QrRef>,
 ) -> Result<api::Ok<LoginResponse>, ApiError> {
     let Lookup::Valid = logins.lookup(&qr, true) else {
         return Err(ApiError::QR_EXPIRED);
     };
+    let session = sessions.start(OWNER_ID)?;
     tracing::info!(user_id = OWNER_ID, "logged in by QR code");
     Ok(api::Ok(LoginResponse {
-        token: tokens.issue_user(OWNER_ID),
+        token: tokens.issue_user(&session),
         user_id: OWNER_ID,
         nickname: OWNER_NICKNAME,
     }))

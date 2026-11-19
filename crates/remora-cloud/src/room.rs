@@ -46,7 +46,7 @@ pub async fn create(
     CallerDevice(device_id): CallerDevice,
 ) -> Result<api::Ok<CreateResponse>, ApiError> {
     let device_id = device_id.ok_or(ApiError::INVALID_REQUEST)?;
-    if !devices.bind(&device_id, &user.id)? {
+    if !devices.bind(&device_id, &user)? {
         return Err(ApiError::INVALID_REQUEST);
     }
 

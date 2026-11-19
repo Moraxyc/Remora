@@ -39,7 +39,7 @@ pub struct Config {
     pub ping: Ping,
     /// STUN and TURN servers for sessions.
     pub ice: Ice,
-    /// Where registered devices and the token key are kept.
+    /// Where the token key, registered devices and user sessions are kept.
     pub database: Database,
 }
 
@@ -105,6 +105,7 @@ impl std::error::Error for InvalidPublicUrl {}
 #[derive(Clone, FromRef)]
 struct Cloud {
     devices: device::Devices,
+    sessions: user::Sessions,
     logins: login::Logins,
     tokens: Arc<token::TokenKey>,
     public_url: PublicUrl,
@@ -122,10 +123,20 @@ impl FromRef<Cloud> for room::Tickets {
     }
 }
 
+impl FromRef<Cloud> for signaling::Admission {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            tokens: cloud.tokens.clone(),
+            devices: cloud.devices.clone(),
+        }
+    }
+}
+
 /// The REST API and signaling.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
+        sessions: config.database.clone().into(),
         logins: Default::default(),
         tokens: config.database.tokens(),
         public_url: config.public_url,
@@ -136,6 +147,7 @@ pub fn router(config: Config) -> Router {
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
         .route("/api/v1/device/list", get(device::list))
+        .route("/api/v1/device/{device_id}/unbind", post(device::unbind))
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))

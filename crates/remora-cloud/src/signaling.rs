@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
+use crate::api::ApiError;
+use crate::device::Devices;
 use crate::ice::Ice;
 use crate::rooms::{Frame, Outbound, Peer, Refused, Rooms};
 use crate::token::{Role, Room, TokenKey, random};
@@ -49,6 +51,28 @@ impl Default for Ping {
     }
 }
 
+/// Checks the room token a connection brings.
+#[derive(Clone)]
+pub struct Admission {
+    pub tokens: Arc<TokenKey>,
+    pub devices: Devices,
+}
+
+impl Admission {
+    /// The room an unexpired token grants, unless its device has been unbound from the token's
+    /// user since.
+    fn admit(&self, token: &str) -> rusqlite::Result<Option<Room>> {
+        let Some(room) = self.tokens.verify_room(token) else {
+            return Ok(None);
+        };
+        let owned = self
+            .devices
+            .platform_of_owned(&room.device_id, &room.sub)?
+            .is_some();
+        Ok(owned.then_some(room))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct EngineQuery {
     #[serde(rename = "EIO")]
@@ -60,7 +84,7 @@ pub struct EngineQuery {
 pub async fn connect(
     upgrade: WebSocketUpgrade,
     Query(query): Query<EngineQuery>,
-    State(tokens): State<Arc<TokenKey>>,
+    State(admission): State<Admission>,
     State(rooms): State<Rooms>,
     State(ping): State<Ping>,
     State(ice): State<Arc<Ice>>,
@@ -69,12 +93,14 @@ pub async fn connect(
     if query.eio != "4" || query.transport != "websocket" {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let room = headers
+    let token = headers
         .get(AUTH_HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|token| tokens.verify_room(token));
-    let Some(room) = room else {
-        return StatusCode::UNAUTHORIZED.into_response();
+        .unwrap_or_default();
+    let room = match admission.admit(token) {
+        Ok(Some(room)) => room,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(error) => return ApiError::from(error).into_response(),
     };
     upgrade.on_upgrade(move |socket| serve(socket, room, rooms, ping, ice))
 }
@@ -173,7 +199,7 @@ impl Session {
                         // `left` without an `ice_id` tells the host it lost the room.
                         let left = encode_event("left", &[json!({})], None);
                         let _ = self.send(Frame::Text(left)).await;
-                        return "replaced by a newer connection";
+                        return "kicked";
                     }
                 },
                 () = sleep_until(pong_deadline.unwrap_or(next_ping)) => {

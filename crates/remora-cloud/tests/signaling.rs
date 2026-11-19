@@ -518,3 +518,58 @@ async fn another_device_needs_force_join_to_take_the_desktop_over() {
     let refused = join_from(&app, &token, &device_id, Some(&phone), false).await;
     assert_eq!(refused.map(drop), busy, "now the laptop holds the desktop");
 }
+
+#[tokio::test]
+async fn unbinding_a_device_logs_its_host_out() {
+    let (app, addr) = start(common::config()).await;
+    let (mut host, host_token, device_id) = online_host(&app, addr).await;
+    let viewer_token = common::log_in(&app).await;
+    let unbind = format!("/api/v1/device/{device_id}/unbind");
+
+    let unbound: Result<Value, _> = common::post_as(&app, &unbind, &viewer_token, None, "").await;
+    assert_eq!(unbound, Ok(json!({})));
+    let Some(Packet::Event(left)) = host.recv().await else {
+        panic!("expected left");
+    };
+    assert_eq!(
+        (left.name.as_str(), &left.args[..]),
+        ("left", &[json!({})][..])
+    );
+    assert_eq!(host.recv().await, None);
+
+    let host_info: Result<Value, _> =
+        common::get(&app, "/api/v1/user/info", Some(&host_token)).await;
+    assert_eq!(
+        host_info,
+        Err(ApiError::TokenExpired),
+        "the host is logged out"
+    );
+    let list: Value = common::get(&app, "/api/v1/device/list", Some(&viewer_token))
+        .await
+        .unwrap();
+    assert_eq!(list["my_binded_devices"], json!([]));
+
+    let again: Result<Value, _> = common::post_as(&app, &unbind, &viewer_token, None, "").await;
+    let unknown = Err(ApiError::Rejected {
+        http_status: 400,
+        code: 2003,
+    });
+    assert_eq!(again, unknown);
+}
+
+#[tokio::test]
+async fn room_tokens_of_unbound_devices_are_refused() {
+    let (app, addr) = start(common::config()).await;
+    let device_id = common::register(&app, "client-host").await;
+    let token = common::log_in(&app).await;
+    let room = common::create_room(&app, &token, &device_id).await;
+    let unbind = format!("/api/v1/device/{device_id}/unbind");
+    let _: Value = common::post_as(&app, &unbind, &token, None, "")
+        .await
+        .unwrap();
+
+    let Err(Error::Http(response)) = Client::connect(addr, &room).await else {
+        panic!("expected the upgrade to be refused");
+    };
+    assert_eq!(response.status(), 401);
+}
