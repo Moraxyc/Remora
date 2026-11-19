@@ -4,6 +4,7 @@ mod api;
 mod device;
 mod login;
 mod room;
+mod signaling;
 mod signing;
 mod token;
 mod user;
@@ -18,12 +19,16 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
 
+pub use signaling::Ping;
+
 pub struct Config {
     /// Where clients reach this server.
     pub public_url: PublicUrl,
     /// With a key, every request must carry a valid `x-param-sign`; without one, signatures
     /// are not checked.
     pub sign_key: Option<SignKey>,
+    /// Signaling heartbeat.
+    pub ping: Ping,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -82,31 +87,40 @@ struct Cloud {
     logins: login::Logins,
     tokens: Arc<token::TokenKey>,
     public_url: PublicUrl,
+    hosts: signaling::Hosts,
+    ping: Ping,
 }
 
-/// All REST endpoints, with fresh state.
+/// The REST API and signaling, with fresh state.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: Default::default(),
         logins: Default::default(),
         tokens: Arc::new(token::TokenKey::generate()),
         public_url: config.public_url,
+        hosts: Default::default(),
+        ping: config.ping,
     };
-    let app = Router::new()
+    let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))
         .route("/api/v1/user/info", get(user::info))
         .route("/api/v1/room/create", post(room::create))
-        .with_state(cloud);
-    match config.sign_key {
-        Some(key) => app.layer(from_fn_with_state(
+        .with_state(cloud.clone());
+    let api = match config.sign_key {
+        Some(key) => api.layer(from_fn_with_state(
             Arc::new(key),
             signing::require_signature,
         )),
-        None => app,
-    }
+        None => api,
+    };
+    // Signaling requests carry the room token instead of a signature.
+    let signaling = Router::new()
+        .route("/socket.io/", get(signaling::connect))
+        .with_state(cloud);
+    api.merge(signaling)
 }
 
 #[cfg(test)]

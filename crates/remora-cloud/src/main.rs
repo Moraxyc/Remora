@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use remora_cloud::{Config, PublicUrl};
+use remora_cloud::{Config, Ping, PublicUrl};
 use remora_proto::cloud::SignKey;
 use tracing_subscriber::EnvFilter;
 
@@ -59,6 +59,7 @@ async fn main() -> io::Result<()> {
     let config = Config {
         public_url,
         sign_key,
+        ping: Ping::default(),
     };
     axum::serve(listener, remora_cloud::router(config))
         .with_graceful_shutdown(async {

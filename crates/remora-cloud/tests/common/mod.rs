@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::request::Builder;
 use http_body_util::BodyExt;
-use remora_cloud::Config;
+use remora_cloud::{Config, Ping};
 use remora_proto::cloud::{ApiError, parse_response};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -18,6 +18,7 @@ pub fn config() -> Config {
     Config {
         public_url: PUBLIC_URL.parse().unwrap(),
         sign_key: None,
+        ping: Ping::default(),
     }
 }
 
