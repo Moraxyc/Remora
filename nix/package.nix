@@ -3,6 +3,7 @@
   rustPlatform,
   pkg-config,
   sqlite,
+  web,
 }:
 
 let
@@ -22,6 +23,9 @@ rustPlatform.buildRustPackage {
     ];
   };
   cargoLock.lockFile = ../Cargo.lock;
+
+  # The web app the binary embeds.
+  env.REMORA_WEB_DIR = web;
 
   # Links nixpkgs' SQLite instead of the copy rusqlite bundles: the cargo setup hook asks
   # libsqlite3-sys for pkg-config.

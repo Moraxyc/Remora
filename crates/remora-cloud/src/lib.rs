@@ -1,6 +1,7 @@
 //! Self-hostable stand-in for the UU Remote cloud.
 
 mod api;
+mod app;
 mod database;
 mod device;
 mod ice;
@@ -222,7 +223,7 @@ pub fn router(config: Config) -> Router {
         .route("/login/{id}", get(web::show_login).post(web::decide_login))
         .route("/signin", post(web::sign_in))
         .with_state(cloud);
-    api.merge(unsigned)
+    api.merge(unsigned).fallback(app::serve)
 }
 
 #[cfg(test)]

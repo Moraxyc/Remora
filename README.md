@@ -67,11 +67,17 @@ The flake provides a module that runs Remora and, optionally, coturn next to it:
 
 ```sh
 nix develop
+(cd web && npm ci && npm run build)   # the binary embeds the web app's build
 cargo build
 cargo test
 nix fmt
 nix flake check   # includes a NixOS VM test
 ```
+
+The web app in `web/` is a SvelteKit single-page app. `npm run dev` there serves it with live
+reloading and passes `/api` on to a Remora at `REMORA_URL` (default `http://127.0.0.1:8080`);
+`npm run check` type-checks it. After changing its dependencies, update `npmDepsHash` in
+`nix/web.nix`.
 
 ## Acknowledgements
 
@@ -86,6 +92,6 @@ Remora is a separate implementation and contains no code from it.
 |---|---|
 | `crates/remora-proto` | MIT OR Apache-2.0 |
 | `crates/remora-cloud` | GPL-3.0-or-later |
-| everything else | MIT |
+| everything else, including `web` | MIT |
 
 See the license files in each directory.

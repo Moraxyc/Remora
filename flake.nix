@@ -22,9 +22,12 @@
       };
 
       perSystem =
-        { pkgs, ... }:
+        { config, pkgs, ... }:
         {
-          packages.default = pkgs.callPackage ./nix/package.nix { };
+          packages = {
+            default = pkgs.callPackage ./nix/package.nix { inherit (config.packages) web; };
+            web = pkgs.callPackage ./nix/web.nix { };
+          };
         };
 
       flake.nixosModules.default =

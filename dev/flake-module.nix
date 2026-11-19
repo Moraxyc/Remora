@@ -33,6 +33,7 @@
           clippy
           rustfmt
           rust-analyzer
+          nodejs
         ];
       };
     };

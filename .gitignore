@@ -4,3 +4,8 @@
 result
 result-*
 .direnv/
+
+# Web app
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
