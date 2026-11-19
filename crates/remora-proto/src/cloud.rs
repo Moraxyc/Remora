@@ -41,6 +41,37 @@ pub fn sign<'a>(
     headers: impl IntoIterator<Item = (&'a str, &'a str)>,
     body: &[u8],
 ) -> String {
+    hex::encode(
+        mac(key, method, path, headers, body)
+            .finalize()
+            .into_bytes(),
+    )
+}
+
+/// Whether `signature`, a hex [`SIGN_HEADER`] value, matches the request as [`sign`] would sign
+/// it. Compares in constant time.
+pub fn verify<'a>(
+    key: &SignKey,
+    method: &str,
+    path: &str,
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    body: &[u8],
+    signature: &str,
+) -> bool {
+    hex::decode(signature).is_ok_and(|tag| {
+        mac(key, method, path, headers, body)
+            .verify_slice(&tag)
+            .is_ok()
+    })
+}
+
+fn mac<'a>(
+    key: &SignKey,
+    method: &str,
+    path: &str,
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    body: &[u8],
+) -> Hmac<Sha256> {
     let mut params: Vec<(String, &str)> = headers
         .into_iter()
         .map(|(name, value)| (name.to_ascii_lowercase(), value))
@@ -60,7 +91,7 @@ pub fn sign<'a>(
         mac.update(value.as_bytes());
     }
     mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
+    mac
 }
 
 /// Result of one cloud call, from the HTTP status and the `{code, msg, data}` body.
@@ -160,6 +191,23 @@ mod tests {
     fn empty_and_braces_bodies_differ() {
         let sign_body = |body| sign(&key(), "POST", "/p", [("x-param-plat", "1")], body);
         assert_ne!(sign_body(b""), sign_body(b"{}"));
+    }
+
+    #[test]
+    fn verifies_own_signatures_only() {
+        let headers = [("x-param-plat", "1"), ("x-param-ts", "1700000000")];
+        let signature = sign(&key(), "POST", "/p", headers, b"{}");
+        let check = |key: &SignKey, body: &[u8], signature: &str| {
+            verify(key, "POST", "/p", headers, body, signature)
+        };
+
+        assert!(check(&key(), b"{}", &signature));
+        assert!(check(&key(), b"{}", &signature.to_ascii_uppercase()));
+        assert!(!check(&key(), b"{ }", &signature));
+        assert!(!check(&SignKey::new("other"), b"{}", &signature));
+        assert!(!check(&key(), b"{}", &signature[..62]));
+        assert!(!check(&key(), b"{}", "not hex"));
+        assert!(!check(&key(), b"{}", ""));
     }
 
     #[test]
