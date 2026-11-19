@@ -4,6 +4,7 @@ mod api;
 mod device;
 mod login;
 mod room;
+mod rooms;
 mod signaling;
 mod signing;
 mod token;
@@ -87,7 +88,7 @@ struct Cloud {
     logins: login::Logins,
     tokens: Arc<token::TokenKey>,
     public_url: PublicUrl,
-    hosts: signaling::Hosts,
+    rooms: rooms::Rooms,
     ping: Ping,
 }
 
@@ -98,7 +99,7 @@ pub fn router(config: Config) -> Router {
         logins: Default::default(),
         tokens: Arc::new(token::TokenKey::generate()),
         public_url: config.public_url,
-        hosts: Default::default(),
+        rooms: Default::default(),
         ping: config.ping,
     };
     let api = Router::new()
@@ -109,6 +110,10 @@ pub fn router(config: Config) -> Router {
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))
         .route("/api/v1/user/info", get(user::info))
         .route("/api/v1/room/create", post(room::create))
+        .route(
+            "/api/v1/room/join/by_device/{device_id}",
+            post(room::join_by_device),
+        )
         .with_state(cloud.clone());
     let api = match config.sign_key {
         Some(key) => api.layer(from_fn_with_state(

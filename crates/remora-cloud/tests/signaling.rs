@@ -6,8 +6,8 @@ use std::time::Duration;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use remora_cloud::{Config, Ping};
-use remora_proto::cloud::SignKey;
-use remora_proto::socketio::{Decoder, Packet};
+use remora_proto::cloud::{ApiError, SignKey};
+use remora_proto::socketio::{Decoder, Event, Packet};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -30,12 +30,12 @@ async fn room_token(app: &Router, client_id: &str) -> String {
     common::create_room(app, &token, &device_id).await
 }
 
-struct Host {
+struct Client {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     decoder: Decoder,
 }
 
-impl Host {
+impl Client {
     async fn connect(addr: SocketAddr, token: &str) -> Result<Self, Error> {
         let url = format!("ws://{addr}/socket.io/?transport=websocket&EIO=4");
         let mut request = url.into_client_request().unwrap();
@@ -53,6 +53,24 @@ impl Host {
         self.socket.send(Message::text(frame)).await.unwrap();
     }
 
+    async fn send_binary(&mut self, bytes: &[u8]) {
+        self.socket
+            .send(Message::binary(bytes.to_vec()))
+            .await
+            .unwrap();
+    }
+
+    /// The next event, skipping pings.
+    async fn event(&mut self) -> Event {
+        loop {
+            match self.recv().await {
+                Some(Packet::Event(event)) => return event,
+                Some(Packet::Ping) => self.send("3").await,
+                other => panic!("expected an event, got {other:?}"),
+            }
+        }
+    }
+
     /// The next packet, or `None` once the server closed the connection.
     async fn recv(&mut self) -> Option<Packet> {
         loop {
@@ -61,6 +79,7 @@ impl Host {
                 .expect("server answered in time");
             let packet = match frame {
                 Some(Ok(Message::Text(text))) => self.decoder.text(&text).unwrap(),
+                Some(Ok(Message::Binary(bytes))) => self.decoder.binary(&bytes).unwrap(),
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
                 Some(Ok(_)) => continue,
             };
@@ -82,7 +101,7 @@ impl Host {
 async fn host_comes_online() {
     let (app, addr) = start(common::config()).await;
     let token = room_token(&app, "client-a").await;
-    let mut host = Host::connect(addr, &token).await.unwrap();
+    let mut host = Client::connect(addr, &token).await.unwrap();
 
     let Some(Packet::Open(open)) = host.recv().await else {
         panic!("expected the open packet");
@@ -133,7 +152,7 @@ async fn the_device_list_shows_hosts_on_signaling_as_connected() {
     };
     assert_eq!(status().await, "DISCONNECTED");
 
-    let mut host = Host::connect(addr, &room).await.unwrap();
+    let mut host = Client::connect(addr, &room).await.unwrap();
     host.handshake().await;
     assert_eq!(status().await, "CONNECTED");
 
@@ -153,7 +172,7 @@ async fn needs_a_valid_room_token() {
     let user_token = common::log_in(&app).await;
 
     for token in ["bogus", &user_token] {
-        let Err(Error::Http(response)) = Host::connect(addr, token).await else {
+        let Err(Error::Http(response)) = Client::connect(addr, token).await else {
             panic!("expected the upgrade to be refused");
         };
         assert_eq!(response.status(), 401);
@@ -169,7 +188,7 @@ async fn signaling_is_not_subject_to_request_signing() {
     let (_, addr) = start(config).await;
 
     // Refused for the token, not for a missing signature.
-    let Err(Error::Http(response)) = Host::connect(addr, "bogus").await else {
+    let Err(Error::Http(response)) = Client::connect(addr, "bogus").await else {
         panic!("expected the upgrade to be refused");
     };
     assert_eq!(response.status(), 401);
@@ -187,7 +206,7 @@ async fn hosts_that_stop_answering_pings_are_dropped() {
     })
     .await;
     let token = room_token(&app, "client-a").await;
-    let mut host = Host::connect(addr, &token).await.unwrap();
+    let mut host = Client::connect(addr, &token).await.unwrap();
     host.handshake().await;
 
     assert_eq!(host.recv().await, Some(Packet::Ping));
@@ -200,10 +219,10 @@ async fn hosts_that_stop_answering_pings_are_dropped() {
 async fn a_newer_connection_kicks_the_older_one() {
     let (app, addr) = start(common::config()).await;
     let token = room_token(&app, "client-a").await;
-    let mut older = Host::connect(addr, &token).await.unwrap();
+    let mut older = Client::connect(addr, &token).await.unwrap();
     older.handshake().await;
 
-    let mut newer = Host::connect(addr, &token).await.unwrap();
+    let mut newer = Client::connect(addr, &token).await.unwrap();
     newer.handshake().await;
 
     let Some(Packet::Event(left)) = older.recv().await else {
@@ -217,4 +236,159 @@ async fn a_newer_connection_kicks_the_older_one() {
 
     newer.send(r#"421["room_info"]"#).await;
     assert!(matches!(newer.recv().await, Some(Packet::Ack(_))));
+}
+
+/// Logs a host in, registers it, and brings it online; returns the user token and device id.
+async fn online_host(app: &Router, addr: SocketAddr) -> (Client, String, String) {
+    let device_id = common::register(app, "client-host").await;
+    let token = common::log_in(app).await;
+    let room = common::create_room(app, &token, &device_id).await;
+    let mut host = Client::connect(addr, &room).await.unwrap();
+    host.handshake().await;
+    host.send(r#"421["room_info"]"#).await;
+    assert!(matches!(host.recv().await, Some(Packet::Ack(_))));
+    assert_eq!(host.event().await.name, "bmsg_push");
+    (host, token, device_id)
+}
+
+async fn join(app: &Router, token: &str, device_id: &str) -> Result<Value, ApiError> {
+    let path = format!("/api/v1/room/join/by_device/{device_id}");
+    common::post_as(app, &path, token, None, r#"{"force_join":false}"#).await
+}
+
+#[tokio::test]
+async fn joining_needs_an_own_online_device() {
+    let (app, addr) = start(common::config()).await;
+    let device_id = common::register(&app, "client-host").await;
+    let token = common::log_in(&app).await;
+
+    let unknown = Err(ApiError::Rejected {
+        http_status: 400,
+        code: 2003,
+    });
+    assert_eq!(join(&app, &token, "unknown").await.map(drop), unknown);
+    assert_eq!(
+        join(&app, &token, &device_id).await.map(drop),
+        unknown,
+        "never created a room"
+    );
+
+    let room = common::create_room(&app, &token, &device_id).await;
+    let offline = Err(ApiError::Rejected {
+        http_status: 400,
+        code: 2001,
+    });
+    assert_eq!(join(&app, &token, &device_id).await.map(drop), offline);
+
+    let mut host = Client::connect(addr, &room).await.unwrap();
+    host.handshake().await;
+    let joined = join(&app, &token, &device_id).await.unwrap();
+    assert_eq!(joined["signaling_list"], json!(["wss://remora.test"]));
+    assert_eq!(joined["publisher_platform"], 1);
+    assert_eq!(
+        (&joined["report_token"], &joined["report_url"]),
+        (&json!(""), &json!(""))
+    );
+    assert!(
+        joined["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+
+    assert_eq!(
+        join(&app, "bogus", &device_id).await.map(drop),
+        Err(ApiError::TokenExpired)
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_controls_the_host_through_the_cloud() {
+    let (app, addr) = start(common::config()).await;
+    let (mut host, token, device_id) = online_host(&app, addr).await;
+    let joined = join(&app, &token, &device_id).await.unwrap();
+    let mut viewer = Client::connect(addr, joined["token"].as_str().unwrap())
+        .await
+        .unwrap();
+    viewer.handshake().await;
+
+    // ConnectOptions { capture_type: CT_DESKTOP, client_type: Client_WINDOWS }.
+    let connect_options = [0x08, 0x01, 0x40, 0x03];
+    let header = json!({
+        "app_control_id": "app",
+        "app_data": { "_placeholder": true, "num": 0 },
+        "streamer_data": "{}",
+    });
+    viewer
+        .send(&format!("451-11{}", json!(["control", header])))
+        .await;
+    viewer.send_binary(&connect_options).await;
+
+    let Some(Packet::Ack(ack)) = viewer.recv().await else {
+        panic!("expected the control ack");
+    };
+    assert_eq!((ack.id, &ack.args[0]), (11, &json!("success")));
+    let granted = &ack.args[1];
+    let ice_id = granted["ice_id"].as_str().unwrap();
+    let host_id = granted["client_id"].as_str().unwrap();
+    assert_eq!(granted["app_control_id"], "app");
+    assert!(granted["iceServers"].is_array());
+
+    let be_controlled = host.event().await;
+    assert_eq!(be_controlled.name, "be-controlled");
+    let request = &be_controlled.args[0];
+    assert_eq!(request["ice_id"], ice_id);
+    assert_eq!(request["controller_platform"], 1);
+    assert_eq!(
+        be_controlled.attachment(&request["app_data"]),
+        Some(&connect_options[..])
+    );
+    let viewer_id = request["client_id"].as_str().unwrap();
+
+    let offer = json!({ "client_id": host_id, "data": { "type": "offer", "sdp": "v=0", "ice_id": ice_id, "app_control_id": "app" } });
+    viewer.send(&format!("42{}", json!(["soac", offer]))).await;
+    let offer = host.event().await;
+    assert_eq!(offer.name, "soac");
+    assert_eq!(offer.args[0]["client_id"], viewer_id);
+    assert_eq!(offer.args[0]["data"]["sdp"], "v=0");
+
+    let answer = json!({ "client_id": viewer_id, "data": { "type": "answer", "sdp": "v=0", "ice_id": ice_id, "client_id": viewer_id, "app_control_id": "app" } });
+    host.send(&format!("42{}", json!(["soac", answer]))).await;
+    let answer = viewer.event().await;
+    assert_eq!(answer.args[0]["client_id"], host_id);
+    assert_eq!(answer.args[0]["data"]["type"], "answer");
+
+    drop(viewer);
+    let released = host.event().await;
+    assert_eq!(released.name, "released");
+    assert_eq!(released.args[0]["ice_id"], ice_id);
+}
+
+#[tokio::test]
+async fn control_fails_once_the_host_is_gone() {
+    let (app, addr) = start(common::config()).await;
+    let (host, token, device_id) = online_host(&app, addr).await;
+    let joined = join(&app, &token, &device_id).await.unwrap();
+    drop(host);
+
+    let mut viewer = Client::connect(addr, joined["token"].as_str().unwrap())
+        .await
+        .unwrap();
+    viewer.handshake().await;
+    for _ in 0..50 {
+        viewer
+            .send(&format!(
+                "451-7{}",
+                json!(["control", { "app_data": { "_placeholder": true, "num": 0 } }])
+            ))
+            .await;
+        viewer.send_binary(&[]).await;
+        let Some(Packet::Ack(ack)) = viewer.recv().await else {
+            panic!("expected the control ack");
+        };
+        if ack.args[0] == "failure" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("control kept succeeding without a host");
 }

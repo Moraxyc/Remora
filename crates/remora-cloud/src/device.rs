@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::api::{self, ApiError, Body};
-use crate::signaling::Hosts;
+use crate::rooms::Rooms;
 use crate::user::User;
 
 /// Identifies the calling installation once it has registered.
@@ -61,6 +61,13 @@ impl Devices {
         device.owner = Some(user_id.to_owned());
         true
     }
+
+    /// The platform of `device_id`, if it belongs to `user_id`.
+    pub fn platform_of_owned(&self, device_id: &str, user_id: &str) -> Option<u8> {
+        let devices = self.0.lock().expect("device lock poisoned");
+        let device = devices.get(device_id)?;
+        (device.owner.as_deref() == Some(user_id)).then_some(device.platform)
+    }
 }
 
 /// Body of `POST /api/v1/device/windows/init`. The hardware summary that clients also send is
@@ -89,12 +96,12 @@ pub async fn windows_init(
     Ok(api::Ok(InitResponse { device_id }))
 }
 
-fn entry(id: &str, device: &Device, hosts: &Hosts) -> Entry {
+fn entry(id: &str, device: &Device, rooms: &Rooms) -> Entry {
     Entry {
         device_id: id.to_owned(),
         alias: (!device.name.is_empty()).then(|| device.name.clone()),
         platform: device.platform,
-        status: if hosts.is_online(id) {
+        status: if rooms.is_online(id) {
             Status::Connected
         } else {
             Status::Disconnected
@@ -132,7 +139,7 @@ pub struct ListResponse {
 pub async fn list(
     user: User,
     State(devices): State<Devices>,
-    State(hosts): State<Hosts>,
+    State(rooms): State<Rooms>,
     headers: HeaderMap,
 ) -> api::Ok<ListResponse> {
     let caller = headers
@@ -141,11 +148,11 @@ pub async fn list(
     let registry = devices.0.lock().expect("device lock poisoned");
     let current_device = caller
         .and_then(|id| registry.get_key_value(id))
-        .map(|(id, device)| entry(id, device, &hosts));
+        .map(|(id, device)| entry(id, device, &rooms));
     let mut my_binded_devices: Vec<Entry> = registry
         .iter()
         .filter(|(_, device)| device.owner.as_deref() == Some(user.id.as_str()))
-        .map(|(id, device)| entry(id, device, &hosts))
+        .map(|(id, device)| entry(id, device, &rooms))
         .collect();
     my_binded_devices.sort_unstable_by(|a, b| a.device_id.cmp(&b.device_id));
     api::Ok(ListResponse {

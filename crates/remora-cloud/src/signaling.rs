@@ -1,10 +1,10 @@
-//! Socket.IO signaling for hosts.
+//! Socket.IO signaling.
 //!
-//! A host connects with its room token in `X-NRD-AUTH`, asks for `room_info`, and from then on
-//! counts as online. One connection per device: a newer one kicks the older one out.
+//! Hosts and viewers connect with a room token in `X-NRD-AUTH`. A host asks for `room_info`
+//! and from then on counts as online; a viewer sends `control` to open a session with it.
+//! Routing between them lives in [`crate::rooms`].
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -19,9 +19,16 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
-use crate::token::{Room, TokenKey, random};
+use crate::rooms::{Frame, Outbound, Peer, Refused, Rooms};
+use crate::token::{Role, Room, TokenKey, random};
 
 const AUTH_HEADER: &str = "x-nrd-auth";
+
+/// Room for bursts of relayed candidates before a slow connection starts losing frames.
+const OUTBOX_CAPACITY: usize = 256;
+
+/// Events passed between the host and a viewer in session with it.
+const RELAYED_EVENTS: [&str; 2] = ["soac", "forward_setting"];
 
 /// Engine.IO heartbeat: the server pings every `interval` and drops a client that has not
 /// answered within `timeout`.
@@ -41,51 +48,6 @@ impl Default for Ping {
     }
 }
 
-/// Hosts with a live signaling connection, by device id.
-#[derive(Debug, Default, Clone)]
-pub struct Hosts(Arc<Mutex<HashMap<String, Host>>>);
-
-#[derive(Debug)]
-struct Host {
-    connection: u64,
-    outbox: mpsc::Sender<Outbound>,
-}
-
-#[derive(Debug)]
-enum Outbound {
-    /// Another connection took over this device.
-    Kicked,
-}
-
-impl Hosts {
-    fn join(&self, device_id: &str, connection: u64, outbox: mpsc::Sender<Outbound>) {
-        let previous = self
-            .0
-            .lock()
-            .expect("hosts lock poisoned")
-            .insert(device_id.to_owned(), Host { connection, outbox });
-        if let Some(previous) = previous {
-            // A full outbox means that connection is stuck; it will time out by itself.
-            let _ = previous.outbox.try_send(Outbound::Kicked);
-        }
-    }
-
-    pub fn is_online(&self, device_id: &str) -> bool {
-        let hosts = self.0.lock().expect("hosts lock poisoned");
-        hosts.contains_key(device_id)
-    }
-
-    fn leave(&self, device_id: &str, connection: u64) {
-        let mut hosts = self.0.lock().expect("hosts lock poisoned");
-        if hosts
-            .get(device_id)
-            .is_some_and(|host| host.connection == connection)
-        {
-            hosts.remove(device_id);
-        }
-    }
-}
-
 #[derive(Deserialize)]
 pub struct EngineQuery {
     #[serde(rename = "EIO")]
@@ -98,7 +60,7 @@ pub async fn connect(
     upgrade: WebSocketUpgrade,
     Query(query): Query<EngineQuery>,
     State(tokens): State<Arc<TokenKey>>,
-    State(hosts): State<Hosts>,
+    State(rooms): State<Rooms>,
     State(ping): State<Ping>,
     headers: HeaderMap,
 ) -> Response {
@@ -112,37 +74,48 @@ pub async fn connect(
     let Some(room) = room else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    upgrade.on_upgrade(move |socket| serve(socket, room, hosts, ping))
+    upgrade.on_upgrade(move |socket| serve(socket, room, rooms, ping))
 }
 
-async fn serve(socket: WebSocket, room: Room, hosts: Hosts, ping: Ping) {
-    let device_id = room.device_id;
-    let connection = u64::from_le_bytes(random());
-    let sid = hex::encode(random::<16>());
-    let (outbox, mut inbox) = mpsc::channel(4);
-    hosts.join(&device_id, connection, outbox);
-    tracing::info!(%device_id, "host signaling connected");
+async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping) {
+    let id = hex::encode(random::<16>());
+    let (outbox, mut inbox) = mpsc::channel(OUTBOX_CAPACITY);
+    rooms.join(
+        &room,
+        Peer {
+            id: id.clone(),
+            outbox,
+        },
+    );
+    let device_id = room.device_id.clone();
+    let role = room.role;
+    tracing::info!(%device_id, ?role, "signaling connected");
 
     let open = Handshake {
-        sid: sid.clone(),
+        sid: id.clone(),
         ping_interval: millis(ping.interval),
         ping_timeout: millis(ping.timeout),
     };
     let mut session = Session {
         socket,
         decoder: Decoder::new(),
-        sid,
+        id: id.clone(),
+        room,
+        rooms: rooms.clone(),
     };
     let reason = session.run(open, &mut inbox, ping).await;
 
-    hosts.leave(&device_id, connection);
-    tracing::info!(%device_id, reason, "host signaling closed");
+    rooms.leave(&session.room, &id);
+    tracing::info!(%device_id, ?role, reason, "signaling closed");
 }
 
 struct Session {
     socket: WebSocket,
     decoder: Decoder,
-    sid: String,
+    /// This connection's `client_id`, also its Engine.IO session id.
+    id: String,
+    room: Room,
+    rooms: Rooms,
 }
 
 impl Session {
@@ -153,7 +126,7 @@ impl Session {
         inbox: &mut mpsc::Receiver<Outbound>,
         ping: Ping,
     ) -> &'static str {
-        if self.send(open.encode()).await.is_err() {
+        if self.send(Frame::Text(open.encode())).await.is_err() {
             return "send failed";
         }
         let mut next_ping = Instant::now() + ping.interval;
@@ -165,7 +138,7 @@ impl Session {
                         Some(Ok(Message::Text(text))) => self.decoder.text(&text),
                         Some(Ok(Message::Binary(bytes))) => self.decoder.binary(&bytes),
                         Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                        Some(Ok(Message::Close(_))) | None => return "closed by host",
+                        Some(Ok(Message::Close(_))) | None => return "closed by peer",
                         Some(Err(_)) => return "receive failed",
                     };
                     let reply = match packet {
@@ -173,21 +146,29 @@ impl Session {
                             pong_deadline = None;
                             continue;
                         }
-                        Ok(Some(Packet::Close)) => return "closed by host",
+                        Ok(Some(Packet::Close)) => return "closed by peer",
                         Ok(Some(packet)) => self.answer(packet),
                         Ok(None) => continue,
                         Err(_) => return "protocol error",
                     };
                     for frame in reply {
-                        if self.send(frame).await.is_err() {
+                        if self.send(Frame::Text(frame)).await.is_err() {
                             return "send failed";
                         }
                     }
                 }
                 outbound = inbox.recv() => match outbound {
+                    Some(Outbound::Frames(frames)) => {
+                        for frame in frames {
+                            if self.send(frame).await.is_err() {
+                                return "send failed";
+                            }
+                        }
+                    }
                     Some(Outbound::Kicked) | None => {
                         // `left` without an `ice_id` tells the host it lost the room.
-                        let _ = self.send(encode_event("left", &[json!({})], None)).await;
+                        let left = encode_event("left", &[json!({})], None);
+                        let _ = self.send(Frame::Text(left)).await;
                         return "replaced by a newer connection";
                     }
                 },
@@ -195,7 +176,7 @@ impl Session {
                     if pong_deadline.is_some() {
                         return "ping timeout";
                     }
-                    if self.send(PING.to_owned()).await.is_err() {
+                    if self.send(Frame::Text(PING.to_owned())).await.is_err() {
                         return "send failed";
                     }
                     let now = Instant::now();
@@ -206,41 +187,72 @@ impl Session {
         }
     }
 
-    /// Frames to send in answer to one packet from the host.
+    /// Frames to send back in answer to one packet.
     fn answer(&self, packet: Packet) -> Vec<String> {
         match packet {
-            Packet::Connected => vec![encode_connected(&self.sid)],
-            Packet::Event(event) => answer_event(event),
+            Packet::Connected => vec![encode_connected(&self.id)],
+            Packet::Event(event) => self.answer_event(event),
             _ => Vec::new(),
         }
     }
 
-    async fn send(&mut self, frame: String) -> Result<(), axum::Error> {
-        self.socket.send(Message::Text(frame.into())).await
+    fn answer_event(&self, mut event: Event) -> Vec<String> {
+        let ack = |args: &[Value]| event.ack_id.map(|id| encode_ack(id, args));
+        match (self.room.role, event.name.as_str()) {
+            (Role::Host, "room_info") => {
+                let ready = json!({ "data": { "status": "online", "publisher_availability_status": "ready" } });
+                ack(&[json!({})])
+                    .into_iter()
+                    .chain([encode_event("bmsg_push", &[ready], None)])
+                    .collect()
+            }
+            (_, "refresh_reconnect_key") => {
+                let key = hex::encode(random::<16>());
+                ack(&[json!("success"), json!({ "reconnect_key": key })])
+                    .into_iter()
+                    .collect()
+            }
+            (Role::Viewer, "control") => {
+                let header = event.args.first().cloned().unwrap_or_default();
+                let options = header
+                    .get("app_data")
+                    .and_then(|value| event.attachment(value))
+                    .unwrap_or_default();
+                let result = self
+                    .rooms
+                    .control(&self.room.device_id, &self.id, &header, options);
+                let reply = match result {
+                    Ok(granted) => {
+                        tracing::info!(device_id = %self.room.device_id, "control granted");
+                        [json!("success"), granted]
+                    }
+                    Err(Refused::HostOffline) => {
+                        tracing::info!(device_id = %self.room.device_id, "control refused: host offline");
+                        [json!("failure"), json!({ "reason": "host offline" })]
+                    }
+                };
+                ack(&reply).into_iter().collect()
+            }
+            (_, name) if RELAYED_EVENTS.contains(&name) => {
+                let body = event.args.drain(..).next().unwrap_or_default();
+                if !self.rooms.relay(&self.room, &self.id, name, body) {
+                    tracing::debug!(event = name, "dropped an event outside any session");
+                }
+                Vec::new()
+            }
+            (_, name) => {
+                tracing::debug!(event = name, "ignored event");
+                Vec::new()
+            }
+        }
     }
-}
 
-fn answer_event(event: Event) -> Vec<String> {
-    let ack = |args: &[Value]| event.ack_id.map(|id| encode_ack(id, args));
-    match event.name.as_str() {
-        "room_info" => {
-            let ready =
-                json!({ "data": { "status": "online", "publisher_availability_status": "ready" } });
-            ack(&[json!({})])
-                .into_iter()
-                .chain([encode_event("bmsg_push", &[ready], None)])
-                .collect()
-        }
-        "refresh_reconnect_key" => {
-            let key = hex::encode(random::<16>());
-            ack(&[json!("success"), json!({ "reconnect_key": key })])
-                .into_iter()
-                .collect()
-        }
-        name => {
-            tracing::debug!(event = name, "ignored host event");
-            Vec::new()
-        }
+    async fn send(&mut self, frame: Frame) -> Result<(), axum::Error> {
+        let message = match frame {
+            Frame::Text(text) => Message::Text(text.into()),
+            Frame::Binary(bytes) => Message::Binary(bytes.into()),
+        };
+        self.socket.send(message).await
     }
 }
 

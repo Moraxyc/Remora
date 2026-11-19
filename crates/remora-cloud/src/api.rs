@@ -17,11 +17,12 @@ impl<T: Serialize> IntoResponse for Ok<T> {
     }
 }
 
-/// Failure with a wire-level status and code. `msg` stays generic; clients do not read it.
+/// Failure with a wire-level status and code. Some clients show `msg` to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiError {
     status: StatusCode,
     code: i64,
+    msg: &'static str,
 }
 
 impl ApiError {
@@ -29,18 +30,21 @@ impl ApiError {
     pub const INVALID_REQUEST: Self = Self {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: 1001,
+        msg: "invalid request",
     };
 
     /// The user token is missing, invalid or expired: clients log in again.
     pub const TOKEN_INVALID: Self = Self {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: 1120,
+        msg: "login expired",
     };
 
     /// The QR login is unknown, expired or already used.
     pub const QR_EXPIRED: Self = Self {
         status: StatusCode::BAD_REQUEST,
         code: 1190,
+        msg: "QR code expired",
     };
 
     /// `x-param-sign` is missing or wrong. NetEase's code for this is unknown; clients treat any
@@ -48,12 +52,27 @@ impl ApiError {
     pub const INVALID_SIGNATURE: Self = Self {
         status: StatusCode::FORBIDDEN,
         code: 1002,
+        msg: "invalid signature",
+    };
+
+    /// The device is not one of the user's. This code and the next are Remora's own.
+    pub const UNKNOWN_DEVICE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: 2003,
+        msg: "no such device",
+    };
+
+    /// The device's host is not on signaling.
+    pub const DEVICE_OFFLINE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: 2001,
+        msg: "device is offline",
     };
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "code": self.code, "msg": "error", "data": [] });
+        let body = json!({ "code": self.code, "msg": self.msg, "data": {} });
         (self.status, Json(body)).into_response()
     }
 }

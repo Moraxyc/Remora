@@ -1027,6 +1027,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "prost",
  "remora-proto",
  "serde",
  "serde_json",

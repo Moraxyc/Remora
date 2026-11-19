@@ -2,7 +2,8 @@
 //!
 //! - User tokens carry the `csrf` claim clients send back, and no `exp`: like UU's, they are
 //!   used until rejected.
-//! - Room tokens authenticate one device's signaling connection and expire.
+//! - Room tokens authenticate one signaling connection, as a device's host or as a viewer
+//!   joining it, and expire.
 //!
 //! Each token names its kind, so one kind is never accepted as the other.
 
@@ -40,11 +41,22 @@ struct UserClaims {
     iat: u64,
 }
 
-/// What a room token grants: signaling for `device_id`, on behalf of user `sub`.
+/// What a room token grants: signaling for the room of `device_id`, on behalf of user `sub`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Room {
     pub sub: String,
     pub device_id: String,
+    pub role: Role,
+}
+
+/// Which side of the room a connection is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// The device's own host.
+    Host,
+    /// A viewer that joined the room to control the host.
+    Viewer,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,6 +160,7 @@ mod tests {
         Room {
             sub: "1".into(),
             device_id: "d".into(),
+            role: Role::Host,
         }
     }
 
