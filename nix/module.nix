@@ -62,6 +62,14 @@ in
               addresses.
             '';
           };
+          database = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = "/var/lib/remora/remora.db";
+            description = ''
+              SQLite database for registered devices and the key that signs tokens. With
+              `null`, they are kept in memory and lost on every restart.
+            '';
+          };
           ice = lib.mkOption {
             default = { };
             description = "How host and viewer reach each other.";
@@ -139,6 +147,7 @@ in
             ExecStart = "${lib.getExe cfg.package} --config ${configFile}";
             Restart = "on-failure";
             DynamicUser = true;
+            StateDirectory = "remora";
             LoadCredential =
               lib.optional (cfg.signKeyFile != null) "sign-key:${cfg.signKeyFile}"
               ++ lib.optional (cfg.turnSecretFile != null) "turn-secret:${cfg.turnSecretFile}";

@@ -69,6 +69,13 @@ impl ApiError {
         msg: "被控端正在被远控中，无法发起连接",
     };
 
+    /// Something on the server failed, such as the database. Remora's own code.
+    pub const INTERNAL: Self = Self {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: 1000,
+        msg: "internal error",
+    };
+
     /// The device's host is not on signaling.
     pub const DEVICE_OFFLINE: Self = Self {
         status: StatusCode::BAD_REQUEST,
@@ -81,6 +88,13 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = json!({ "code": self.code, "msg": self.msg, "data": {} });
         (self.status, Json(body)).into_response()
+    }
+}
+
+impl From<rusqlite::Error> for ApiError {
+    fn from(error: rusqlite::Error) -> Self {
+        tracing::error!(%error, "database query failed");
+        Self::INTERNAL
     }
 }
 

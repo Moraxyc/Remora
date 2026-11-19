@@ -105,3 +105,30 @@ async fn rejects_invalid_bodies_with_an_envelope() {
     let not_json = common::post::<Value>(&app, PATH, Some("{")).await;
     assert_eq!(not_json.map(drop), invalid);
 }
+
+#[tokio::test]
+async fn devices_and_logins_outlive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("remora-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("remora.db");
+    let _ = std::fs::remove_file(&path);
+    let start = || {
+        remora_cloud::router(remora_cloud::Config {
+            database: remora_cloud::Database::open(&path).unwrap(),
+            ..common::config()
+        })
+    };
+
+    let app = start();
+    let host = common::register(&app, "client-host").await;
+    let token = common::log_in(&app).await;
+    common::create_room(&app, &token, &host).await;
+    drop(app);
+
+    let app = start();
+    let list: Value = common::get(&app, LIST, Some(&token)).await.unwrap();
+    assert_eq!(list["my_binded_devices"][0]["device_id"], host.as_str());
+    let again = init(&app, registration("client-host")).await.unwrap();
+    assert_eq!(again.device_id, host);
+    std::fs::remove_dir_all(dir).unwrap();
+}

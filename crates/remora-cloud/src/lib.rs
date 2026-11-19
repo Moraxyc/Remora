@@ -1,6 +1,7 @@
 //! Self-hostable stand-in for the UU Remote cloud.
 
 mod api;
+mod database;
 mod device;
 mod ice;
 mod login;
@@ -23,6 +24,7 @@ use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
+pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
 pub use signaling::Ping;
@@ -37,6 +39,8 @@ pub struct Config {
     pub ping: Ping,
     /// STUN and TURN servers for sessions.
     pub ice: Ice,
+    /// Where registered devices and the token key are kept.
+    pub database: Database,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -97,7 +101,7 @@ impl fmt::Display for InvalidPublicUrl {
 
 impl std::error::Error for InvalidPublicUrl {}
 
-/// Everything the endpoints share. All of it lives in memory for now.
+/// Everything the endpoints share.
 #[derive(Clone, FromRef)]
 struct Cloud {
     devices: device::Devices,
@@ -118,12 +122,12 @@ impl FromRef<Cloud> for room::Tickets {
     }
 }
 
-/// The REST API and signaling, with fresh state.
+/// The REST API and signaling.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
-        devices: Default::default(),
+        devices: config.database.clone().into(),
         logins: Default::default(),
-        tokens: Arc::new(token::TokenKey::generate()),
+        tokens: config.database.tokens(),
         public_url: config.public_url,
         rooms: Default::default(),
         ping: config.ping,

@@ -1,7 +1,10 @@
-"""Plays a host and a viewer against Remora up to the point where a session starts, and prints
-the TURN server the viewer was given, as JSON.
+"""Talks to Remora like a client.
 
-Usage: session.py BASE_URL SIGN_KEY_FILE
+session.py BASE_URL SIGN_KEY_FILE session
+    Plays a host and a viewer up to the point where a session starts. Prints, as JSON, the
+    user token, the host's device id, and the TURN server the viewer was given.
+session.py BASE_URL SIGN_KEY_FILE devices TOKEN
+    Prints the ids of the user's devices, as JSON.
 """
 
 import hashlib
@@ -73,30 +76,45 @@ def recv(socket, prefix):
         return frame[len(prefix) :]
 
 
-assert call("POST", "/api/v1/qrcode/gen/login", sign=False)[0] == 1002, "unsigned calls fail"
+def session():
+    assert call("POST", "/api/v1/qrcode/gen/login", sign=False)[0] == 1002, "unsigned calls fail"
 
-device = ok("POST", "/api/v1/device/windows/init", {"name": "vm", "client_id": "vm-host"})[
-    "device_id"
-]
-qr = ok("POST", "/api/v1/qrcode/gen/login")
-login = {"token": qr["status_query_ticket"], "qrcode_jump_url": qr["qrcode_jump_url"]}
-user = ok("POST", "/api/v1/login/by_qrcode", login)["token"]
+    device = ok("POST", "/api/v1/device/windows/init", {"name": "vm", "client_id": "vm-host"})[
+        "device_id"
+    ]
+    qr = ok("POST", "/api/v1/qrcode/gen/login")
+    login = {"token": qr["status_query_ticket"], "qrcode_jump_url": qr["qrcode_jump_url"]}
+    user = ok("POST", "/api/v1/login/by_qrcode", login)["token"]
 
-room = ok("POST", "/api/v1/room/create", {}, token=user, device=device)
-host = open_socket(room["token"])
-host.send('421["room_info"]')
-recv(host, "431")
-recv(host, '42["bmsg_push"')
+    room = ok("POST", "/api/v1/room/create", {}, token=user, device=device)
+    host = open_socket(room["token"])
+    host.send('421["room_info"]')
+    recv(host, "431")
+    recv(host, '42["bmsg_push"')
 
-joined = ok(
-    "POST", f"/api/v1/room/join/by_device/{device}", {"force_join": False}, token=user
-)
-viewer = open_socket(joined["token"])
-viewer.send('451-5["control",{"app_data":{"_placeholder":true,"num":0}}]')
-viewer.send(b"\x08\x01")  # ConnectOptions { capture_type: CT_DESKTOP }
-outcome, grant = json.loads(recv(viewer, "435"))
-assert outcome == "success", grant
-recv(host, '451-["be-controlled"')
+    joined = ok(
+        "POST", f"/api/v1/room/join/by_device/{device}", {"force_join": False}, token=user
+    )
+    viewer = open_socket(joined["token"])
+    viewer.send('451-5["control",{"app_data":{"_placeholder":true,"num":0}}]')
+    viewer.send(b"\x08\x01")  # ConnectOptions { capture_type: CT_DESKTOP }
+    outcome, grant = json.loads(recv(viewer, "435"))
+    assert outcome == "success", grant
+    recv(host, '451-["be-controlled"')
 
-turn = next(server for server in grant["iceServers"] if "username" in server)
-print(json.dumps({"force_relay": grant["force_relay"], **turn}))
+    turn = next(server for server in grant["iceServers"] if "username" in server)
+    return {"token": user, "device": device, "force_relay": grant["force_relay"], "turn": turn}
+
+
+def devices(token):
+    listed = ok("GET", "/api/v1/device/list", token=token)["my_binded_devices"]
+    return [entry["device_id"] for entry in listed]
+
+
+match sys.argv[3:]:
+    case ["session"]:
+        print(json.dumps(session()))
+    case ["devices", token]:
+        print(json.dumps(devices(token)))
+    case _:
+        sys.exit(__doc__)

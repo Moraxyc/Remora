@@ -35,6 +35,7 @@ The flake provides a module that runs Remora and, optionally, coturn next to it:
 
   services.remora = {
     enable = true;
+    # Devices and logins are kept in /var/lib/remora/remora.db.
     settings = {
       public_url = "https://remora.example";
       login.auto_confirm = true;

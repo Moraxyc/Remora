@@ -23,7 +23,7 @@ const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 /// How long a room token can be used to connect to signaling.
 const ROOM_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// Secret that signs every token. Generated per process for now, so a restart logs everyone out.
+/// Secret that signs every token.
 pub struct TokenKey([u8; 32]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,8 +74,8 @@ struct RoomClaims {
 }
 
 impl TokenKey {
-    pub fn generate() -> Self {
-        Self(random())
+    pub fn new(key: [u8; 32]) -> Self {
+        Self(key)
     }
 
     pub fn issue_user(&self, user_id: &str) -> String {
@@ -156,6 +156,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    impl TokenKey {
+        fn generate() -> Self {
+            Self(random())
+        }
+    }
 
     fn payload(token: &str) -> Value {
         let payload = token.split('.').nth(1).unwrap();

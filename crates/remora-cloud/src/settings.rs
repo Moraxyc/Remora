@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
-use crate::{Config, Ice, IceError, IceUrl, Ping, PublicUrl, TurnSecret};
+use crate::{Config, Database, DatabaseError, Ice, IceError, IceUrl, Ping, PublicUrl, TurnSecret};
 
 /// What the settings file says. Secrets stay in their own files, named here and read by
 /// [`Settings::into_config`].
@@ -22,6 +22,10 @@ pub struct Settings {
     pub public_url: Option<PublicUrl>,
     /// File holding the request signing key. Without it, signatures are not checked.
     pub sign_key_file: Option<PathBuf>,
+    /// SQLite database for what outlives a restart: registered devices and the key that signs
+    /// tokens. Without it, they live in memory, so a restart logs everyone out and forgets
+    /// every device.
+    pub database: Option<PathBuf>,
     /// Log filter, such as `info` or `info,remora_cloud=debug`.
     #[serde(default = "default_log")]
     pub log: String,
@@ -78,6 +82,7 @@ impl Settings {
         for file in [
             &mut settings.sign_key_file,
             &mut settings.ice.turn_secret_file,
+            &mut settings.database,
         ]
         .into_iter()
         .flatten()
@@ -87,7 +92,7 @@ impl Settings {
         Ok(settings)
     }
 
-    /// Reads the secret files and checks that the settings fit together.
+    /// Reads the secret files, opens the database and checks that the settings fit together.
     pub fn into_config(self) -> Result<Config, SettingsError> {
         if !self.login.auto_confirm {
             return Err(SettingsError::LoginsUnconfirmable);
@@ -122,11 +127,19 @@ impl Settings {
                 .parse()
                 .expect("a socket address is a valid authority"),
         };
+        let database = match &self.database {
+            Some(path) => Database::open(path).map_err(|source| SettingsError::Database {
+                path: path.clone(),
+                source,
+            })?,
+            None => Database::in_memory(),
+        };
         Ok(Config {
             public_url,
             sign_key,
             ping: Ping::default(),
             ice,
+            database,
         })
     }
 }
@@ -151,10 +164,17 @@ fn read_secret(path: &Path) -> Result<Vec<u8>, SettingsError> {
 
 #[derive(Debug)]
 pub enum SettingsError {
-    Read { path: PathBuf, source: io::Error },
+    Read {
+        path: PathBuf,
+        source: io::Error,
+    },
     Parse(toml::de::Error),
     EmptySecret(PathBuf),
     Ice(IceError),
+    Database {
+        path: PathBuf,
+        source: DatabaseError,
+    },
     PublicUrlRequired,
     LoginsUnconfirmable,
 }
@@ -166,6 +186,9 @@ impl fmt::Display for SettingsError {
             Self::Parse(error) => write!(f, "invalid settings: {error}"),
             Self::EmptySecret(path) => write!(f, "{} is empty", path.display()),
             Self::Ice(error) => error.fmt(f),
+            Self::Database { path, source } => {
+                write!(f, "cannot open {}: {source}", path.display())
+            }
             Self::PublicUrlRequired => {
                 f.write_str("public_url is required when listening on all addresses")
             }
@@ -232,19 +255,24 @@ mod tests {
     }
 
     #[test]
-    fn secret_files_are_relative_to_the_settings_file() {
+    fn paths_are_relative_to_the_settings_file() {
         let dir = temp_dir("relative");
         std::fs::write(dir.join("turn.secret"), "s3cret\n").unwrap();
         let path = dir.join("remora.toml");
         std::fs::write(
             &path,
-            format!("[ice]\nservers = [\"turn:turn.example\"]\nturn_secret_file = \"turn.secret\"\n{CONFIRMING}"),
+            format!(
+                "database = \"remora.db\"\n\
+                 [ice]\nservers = [\"turn:turn.example\"]\nturn_secret_file = \"turn.secret\"\n\
+                 {CONFIRMING}"
+            ),
         )
         .unwrap();
 
         let settings = Settings::load(&path).unwrap();
         assert_eq!(settings.ice.turn_secret_file, Some(dir.join("turn.secret")));
         assert!(settings.into_config().is_ok());
+        assert!(dir.join("remora.db").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

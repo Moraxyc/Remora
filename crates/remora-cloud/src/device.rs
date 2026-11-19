@@ -1,16 +1,14 @@
 //! Devices: registration, ownership and the device list.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use axum::extract::State;
 use std::convert::Infallible;
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
+use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::Database;
 use crate::api::{self, ApiError, Body};
 use crate::rooms::Rooms;
 use crate::user::User;
@@ -39,55 +37,96 @@ impl<S: Send + Sync> FromRequestParts<S> for CallerDevice {
 /// What `device/windows/init` registers as, in UU's platform numbering.
 const PLATFORM_WINDOWS: u8 = 1;
 
-/// Registered devices, by device id.
-#[derive(Debug, Default, Clone)]
-pub struct Devices(Arc<Mutex<HashMap<String, Device>>>);
+/// Registered devices. Each is registered by one installation (its `client_id`) and, once its
+/// host has created a room, owned by that host's user.
+#[derive(Debug, Clone)]
+pub struct Devices(Database);
 
-#[derive(Debug)]
+impl From<Database> for Devices {
+    fn from(database: Database) -> Self {
+        Self(database)
+    }
+}
+
+/// A device as listed.
 struct Device {
-    /// The installation that registered it.
-    client_id: String,
+    id: String,
     name: String,
     platform: u8,
-    /// The user whose host runs on it, once it has created a room.
-    owner: Option<String>,
+}
+
+impl Device {
+    const COLUMNS: &str = "id, name, platform";
+
+    fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            platform: row.get(2)?,
+        })
+    }
 }
 
 impl Devices {
     /// Registering the same installation again returns its existing device instead of a new
     /// one, renamed to `name`.
-    fn register(&self, client_id: String, name: String, platform: u8) -> String {
-        let mut devices = self.0.lock().expect("device lock poisoned");
-        if let Some((id, device)) = devices.iter_mut().find(|(_, d)| d.client_id == client_id) {
-            device.name = name;
-            return id.clone();
-        }
-        let id = Uuid::new_v4().simple().to_string();
-        let device = Device {
-            client_id,
-            name,
-            platform,
-            owner: None,
-        };
-        devices.insert(id.clone(), device);
-        id
+    fn register(&self, client_id: &str, name: &str, platform: u8) -> rusqlite::Result<String> {
+        self.0.connection().query_row(
+            "INSERT INTO devices (id, client_id, name, platform) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (client_id) DO UPDATE SET name = excluded.name
+             RETURNING id",
+            params![
+                Uuid::new_v4().simple().to_string(),
+                client_id,
+                name,
+                platform
+            ],
+            |row| row.get(0),
+        )
     }
 
     /// Makes `user_id` the owner of a registered device; `false` if there is no such device.
-    pub fn bind(&self, device_id: &str, user_id: &str) -> bool {
-        let mut devices = self.0.lock().expect("device lock poisoned");
-        let Some(device) = devices.get_mut(device_id) else {
-            return false;
-        };
-        device.owner = Some(user_id.to_owned());
-        true
+    pub fn bind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
+        let changed = self.0.connection().execute(
+            "UPDATE devices SET owner = ?2 WHERE id = ?1",
+            [device_id, user_id],
+        )?;
+        Ok(changed > 0)
     }
 
     /// The platform of `device_id`, if it belongs to `user_id`.
-    pub fn platform_of_owned(&self, device_id: &str, user_id: &str) -> Option<u8> {
-        let devices = self.0.lock().expect("device lock poisoned");
-        let device = devices.get(device_id)?;
-        (device.owner.as_deref() == Some(user_id)).then_some(device.platform)
+    pub fn platform_of_owned(
+        &self,
+        device_id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Option<u8>> {
+        self.0
+            .connection()
+            .query_row(
+                "SELECT platform FROM devices WHERE id = ?1 AND owner = ?2",
+                [device_id, user_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    fn get(&self, device_id: &str) -> rusqlite::Result<Option<Device>> {
+        let query = format!("SELECT {} FROM devices WHERE id = ?1", Device::COLUMNS);
+        self.0
+            .connection()
+            .query_row(&query, [device_id], Device::from_row)
+            .optional()
+    }
+
+    /// `user_id`'s devices, ordered by id.
+    fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<Device>> {
+        let query = format!(
+            "SELECT {} FROM devices WHERE owner = ?1 ORDER BY id",
+            Device::COLUMNS
+        );
+        let connection = self.0.connection();
+        let mut statement = connection.prepare_cached(&query)?;
+        statement.query_map([user_id], Device::from_row)?.collect()
     }
 }
 
@@ -112,21 +151,21 @@ pub async fn windows_init(
     if request.client_id.is_empty() {
         return Err(ApiError::INVALID_REQUEST);
     }
-    let device_id = devices.register(request.client_id, request.name, PLATFORM_WINDOWS);
+    let device_id = devices.register(&request.client_id, &request.name, PLATFORM_WINDOWS)?;
     tracing::info!(%device_id, "device registered");
     Ok(api::Ok(InitResponse { device_id }))
 }
 
-fn entry(id: &str, device: &Device, rooms: &Rooms) -> Entry {
+fn entry(device: Device, rooms: &Rooms) -> Entry {
     Entry {
-        device_id: id.to_owned(),
-        alias: (!device.name.is_empty()).then(|| device.name.clone()),
-        platform: device.platform,
-        status: if rooms.is_online(id) {
+        status: if rooms.is_online(&device.id) {
             Status::Connected
         } else {
             Status::Disconnected
         },
+        alias: (!device.name.is_empty()).then_some(device.name),
+        platform: device.platform,
+        device_id: device.id,
     }
 }
 
@@ -162,20 +201,19 @@ pub async fn list(
     State(devices): State<Devices>,
     State(rooms): State<Rooms>,
     CallerDevice(caller): CallerDevice,
-) -> api::Ok<ListResponse> {
-    let registry = devices.0.lock().expect("device lock poisoned");
-    let current_device = caller
-        .and_then(|id| registry.get_key_value(&id))
-        .map(|(id, device)| entry(id, device, &rooms));
-    let mut my_binded_devices: Vec<Entry> = registry
-        .iter()
-        .filter(|(_, device)| device.owner.as_deref() == Some(user.id.as_str()))
-        .map(|(id, device)| entry(id, device, &rooms))
+) -> Result<api::Ok<ListResponse>, ApiError> {
+    let current_device = match caller {
+        Some(id) => devices.get(&id)?.map(|device| entry(device, &rooms)),
+        None => None,
+    };
+    let my_binded_devices = devices
+        .owned_by(&user.id)?
+        .into_iter()
+        .map(|device| entry(device, &rooms))
         .collect();
-    my_binded_devices.sort_unstable_by(|a, b| a.device_id.cmp(&b.device_id));
-    api::Ok(ListResponse {
+    Ok(api::Ok(ListResponse {
         current_device,
         my_binded_devices,
         others_shared_devices: [],
-    })
+    }))
 }

@@ -34,7 +34,13 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let listen = settings.listen;
+    let in_memory = settings.database.is_none();
     let config = settings.into_config()?;
+    if in_memory {
+        tracing::warn!(
+            "no database configured; a restart logs everyone out and forgets every device"
+        );
+    }
     tracing::warn!(
         "every QR login is confirmed automatically; anyone who can reach this server can log in"
     );

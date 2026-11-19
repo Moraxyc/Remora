@@ -45,9 +45,10 @@ pub async fn create(
     State(tickets): State<Tickets>,
     CallerDevice(device_id): CallerDevice,
 ) -> Result<api::Ok<CreateResponse>, ApiError> {
-    let device_id = device_id
-        .filter(|id| devices.bind(id, &user.id))
-        .ok_or(ApiError::INVALID_REQUEST)?;
+    let device_id = device_id.ok_or(ApiError::INVALID_REQUEST)?;
+    if !devices.bind(&device_id, &user.id)? {
+        return Err(ApiError::INVALID_REQUEST);
+    }
 
     tracing::info!(user_id = %user.id, %device_id, "room created");
     let (token, signaling_server) = tickets.issue(Room {
@@ -94,7 +95,7 @@ pub async fn join_by_device(
     Body(request): Body<JoinRequest>,
 ) -> Result<api::Ok<JoinResponse>, ApiError> {
     let publisher_platform = devices
-        .platform_of_owned(&device_id, &user.id)
+        .platform_of_owned(&device_id, &user.id)?
         .ok_or(ApiError::UNKNOWN_DEVICE)?;
     if !rooms.is_online(&device_id) {
         return Err(ApiError::DEVICE_OFFLINE);

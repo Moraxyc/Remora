@@ -8,6 +8,9 @@ public_url = "https://remora.example"
 # File holding the request signing key that clients are configured with. Without it, request
 # signatures are not checked; tokens are what authenticates users.
 # sign_key_file = "/etc/remora/sign.key"
+# SQLite database for registered devices and the key that signs tokens. Without it they are
+# kept in memory: a restart logs everyone out and forgets every device.
+database = "/var/lib/remora/remora.db"
 # Log filter: a level, or directives such as "info,remora_cloud=debug".
 log = "info"
 

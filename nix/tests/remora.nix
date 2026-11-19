@@ -68,16 +68,17 @@ in
       server.wait_for_open_port(8080)
       server.wait_for_open_port(3478, "${serverAddress}")
 
+      remora = "python3 ${./session.py} http://server:8080 ${signKey}"
+
       with subtest("a host and a viewer start a session"):
-          grant = json.loads(client.succeed(
-              "python3 ${./session.py} http://server:8080 ${signKey}"
-          ))
-          assert grant["force_relay"], grant
-          assert grant["urls"] == ["turn:server:3478"], grant
+          session = json.loads(client.succeed(f"{remora} session"))
+          assert session["force_relay"], session
+          turn = session["turn"]
+          assert turn["urls"] == ["turn:server:3478"], turn
 
       with subtest("coturn accepts the credentials Remora handed out"):
-          user = shlex.quote(grant["username"])
-          password = shlex.quote(grant["credential"])
+          user = shlex.quote(turn["username"])
+          password = shlex.quote(turn["credential"])
           report = client.succeed(
               f"turnutils_uclient -y -n 10 -u {user} -w {password} ${serverAddress}"
           )
@@ -86,9 +87,18 @@ in
               f"turnutils_uclient -y -n 10 -u {user} -w wrong ${serverAddress}"
           )
 
+      with subtest("devices and logins outlive a restart"):
+          server.systemctl("restart remora.service")
+          server.wait_for_open_port(8080)
+          listed = json.loads(client.succeed(
+              f"{remora} devices {shlex.quote(session['token'])}"
+          ))
+          assert listed == [session["device"]], listed
+
       with subtest("no secret reaches the log"):
           journal = server.succeed("journalctl -u remora.service -o cat")
-          for secret in ["vm-turn-secret", "vm-sign-key", grant["credential"]]:
+          secrets = ["vm-turn-secret", "vm-sign-key", turn["credential"], session["token"]]
+          for secret in secrets:
               assert secret not in journal, "a secret was logged"
     '';
 }
