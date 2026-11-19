@@ -1,14 +1,12 @@
 {
   lib,
   buildNpmPackage,
+  importNpmLock,
 }:
 
-let
-  manifest = lib.importJSON ../web/package.json;
-in
-buildNpmPackage {
-  pname = manifest.name;
-  inherit (manifest) version;
+buildNpmPackage (finalAttrs: {
+  pname = finalAttrs.passthru.manifest.name;
+  inherit (finalAttrs.passthru.manifest) version;
 
   src = lib.fileset.toSource {
     root = ../web;
@@ -20,7 +18,12 @@ buildNpmPackage {
       ../web/src
     ];
   };
-  npmDepsHash = "sha256-YF8Dpu6Cw7oXv3jY1Sxk81JpVzri3Ivxht0Tl9KL9Tk=";
+  # Each dependency is fetched by the hash in the lock file, so there is no hash to update.
+  npmDeps = importNpmLock {
+    package = finalAttrs.passthru.manifest;
+    packageLock = lib.importJSON ../web/package-lock.json;
+  };
+  inherit (importNpmLock) npmConfigHook;
 
   doCheck = true;
   checkPhase = ''
@@ -35,8 +38,10 @@ buildNpmPackage {
     runHook postInstall
   '';
 
+  passthru.manifest = lib.importJSON ../web/package.json;
+
   meta = {
     description = "Remora's web app";
     license = lib.licenses.mit;
   };
-}
+})

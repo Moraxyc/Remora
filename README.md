@@ -76,8 +76,8 @@ nix flake check   # includes a NixOS VM test
 
 The web app in `web/` is a SvelteKit single-page app. `npm run dev` there serves it with live
 reloading and passes `/api` on to a Remora at `REMORA_URL` (default `http://127.0.0.1:8080`);
-`npm run check` type-checks it. After changing its dependencies, update `npmDepsHash` in
-`nix/web.nix`.
+`npm run check` type-checks it. Nix fetches its dependencies as `web/package-lock.json` lists
+them.
 
 ## Acknowledgements
 

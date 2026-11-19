@@ -11,7 +11,10 @@
   outputs =
     inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = [ flake-parts.flakeModules.partitions ];
+      imports = [
+        flake-parts.flakeModules.easyOverlay
+        flake-parts.flakeModules.partitions
+      ];
 
       systems = import inputs.systems;
 
@@ -22,11 +25,15 @@
       };
 
       perSystem =
-        { config, pkgs, ... }:
+        { config, final, ... }:
         {
+          overlayAttrs = {
+            inherit (config.packages) remora remora-web;
+          };
           packages = {
-            default = pkgs.callPackage ./nix/package.nix { inherit (config.packages) web; };
-            web = pkgs.callPackage ./nix/web.nix { };
+            remora = final.callPackage ./nix/package.nix { };
+            remora-web = final.callPackage ./nix/web.nix { };
+            default = config.packages.remora;
           };
         };
 
