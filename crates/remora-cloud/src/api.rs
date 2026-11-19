@@ -30,6 +30,13 @@ impl ApiError {
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: 1001,
     };
+
+    /// `x-param-sign` is missing or wrong. NetEase's code for this is unknown; clients treat any
+    /// non-zero code as a rejection.
+    pub const INVALID_SIGNATURE: Self = Self {
+        status: StatusCode::FORBIDDEN,
+        code: 1002,
+    };
 }
 
 impl IntoResponse for ApiError {

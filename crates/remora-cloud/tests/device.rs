@@ -38,7 +38,7 @@ fn registration(client_id: &str) -> Value {
 
 #[tokio::test]
 async fn registration_is_stable_per_installation() {
-    let app = remora_cloud::router(Default::default());
+    let app = remora_cloud::router(Default::default(), None);
     let first = init(&app, registration("client-a")).await.unwrap();
     let again = init(&app, registration("client-a")).await.unwrap();
     let other = init(&app, registration("client-b")).await.unwrap();
@@ -50,7 +50,7 @@ async fn registration_is_stable_per_installation() {
 
 #[tokio::test]
 async fn rejects_invalid_bodies_with_an_envelope() {
-    let app = remora_cloud::router(Default::default());
+    let app = remora_cloud::router(Default::default(), None);
     let invalid = Err(ApiError::Rejected {
         http_status: 422,
         code: 1001,

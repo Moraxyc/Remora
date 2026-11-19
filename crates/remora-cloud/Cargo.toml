@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["macros"] }
-clap = { version = "4.6.8", features = ["derive"] }
+clap = { version = "4.6.8", features = ["derive", "env"] }
+remora-proto = { path = "../remora-proto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
@@ -23,5 +24,4 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
-remora-proto = { path = "../remora-proto" }
 tower = { version = "0.5.3", features = ["util"] }
