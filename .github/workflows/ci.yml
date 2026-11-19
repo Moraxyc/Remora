@@ -23,8 +23,11 @@ jobs:
         include:
           - system: x86_64-linux
             runner: ubuntu-24.04
+            vm-test: true
+          # Arm runners have no KVM, which the NixOS VM test requires.
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
+            vm-test: false
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -52,7 +55,16 @@ jobs:
           inputs-from: .
           skip-use: true
 
-      - run: nix flake check --print-build-logs --keep-going
+      - if: matrix.vm-test
+        run: nix flake check --print-build-logs --keep-going
+
+      - if: '!matrix.vm-test'
+        env:
+          checks: .#checks.${{ matrix.system }}
+        run: |
+          nix flake check --no-build
+          read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" ]))')"
+          nix build --no-link --print-build-logs --keep-going "${names[@]/#/$checks.}"
 
   # The runner is a real Ubuntu, booted by systemd, so the package goes through apt, dpkg and
   # systemd as it would on a user's machine.
