@@ -1,4 +1,4 @@
-# Remora settings. Apart from a way to confirm logins (`login.password_file` or
+# Remora settings. Apart from a way to confirm logins (`login.password_file`, `oidc` or
 # `login.auto_confirm`), every setting is optional; the values here are examples.
 
 # Address to serve the REST API and signaling on. Put a TLS proxy in front of it.
@@ -35,3 +35,14 @@ password_file = "owner.password"
 # Confirm every QR login without asking anyone instead, so that anyone who can reach Remora
 # logs in as its user. Only for a private network.
 # auto_confirm = true
+
+[oidc]
+# An OpenID Connect provider (Authelia, Authentik, Keycloak, …) that users sign in with. Each
+# identity it vouches for is a Remora user; the provider decides who may sign in. Register
+# Remora there as a client with the redirect URI `{public_url}/api/web/oidc/callback`.
+issuer = "https://auth.example"
+client_id = "remora"
+# File holding the client secret. Without it, Remora signs in as a public client with PKCE.
+client_secret_file = "oidc.secret"
+# What the sign-in button calls the provider; by default its host name.
+# name = "Example SSO"

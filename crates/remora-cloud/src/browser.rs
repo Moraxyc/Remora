@@ -114,7 +114,7 @@ impl SignedIn {
         browsers: &Browsers,
         headers: &HeaderMap,
     ) -> rusqlite::Result<Option<Self>> {
-        match cookie(headers) {
+        match read_cookie(headers, COOKIE) {
             Some(cookie) => browsers.find(cookie),
             None => Ok(None),
         }
@@ -147,14 +147,15 @@ where
     }
 }
 
-fn cookie(headers: &HeaderMap) -> Option<&str> {
+/// The value of cookie `name` in a request.
+pub fn read_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|cookies| cookies.split(';'))
         .filter_map(|cookie| cookie.trim().split_once('='))
-        .find(|(name, _)| *name == COOKIE)
+        .find(|(found, _)| *found == name)
         .map(|(_, value)| value)
 }
 

@@ -9,6 +9,8 @@ export interface Session {
 	signed_in: { user: Profile; csrf: string } | null;
 	/** Whether signing in with the owner password is possible. */
 	password: boolean;
+	/** The name of the OpenID Connect provider to sign in with, if there is one. */
+	oidc: string | null;
 	/** Whether Remora is reached over https. */
 	secure: boolean;
 }
@@ -63,6 +65,11 @@ export async function session(fetch: Fetch): Promise<Session> {
 
 export async function signInWithPassword(password: string): Promise<void> {
 	await call(fetch, 'POST', 'session', { body: { password } });
+}
+
+/** Where to send the browser to sign in with the OpenID Connect provider, returning to `next`. */
+export function oidcSignInUrl(next: string): string {
+	return `/api/web/oidc/start?next=${encodeURIComponent(next)}`;
 }
 
 export async function signOut(csrf: string): Promise<void> {

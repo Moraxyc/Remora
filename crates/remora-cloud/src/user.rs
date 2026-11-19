@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::Database;
 use crate::api::{self, ApiError, Empty};
+use crate::oidc::Identity;
 use crate::token::{TokenKey, UserToken, random};
 
 /// The user who signs in with the password.
@@ -33,6 +34,39 @@ pub struct Profile {
 }
 
 impl Users {
+    /// The user of an OpenID Connect identity, made the first time it signs in. Their name
+    /// follows the provider's.
+    pub fn of_identity(&self, identity: &Identity) -> rusqlite::Result<Profile> {
+        let mut connection = self.0.connection();
+        let transaction = connection.transaction()?;
+        let profile = |row: &rusqlite::Row| {
+            Ok(Profile {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        };
+        let known = transaction
+            .query_row(
+                "UPDATE users SET name = ?3 WHERE issuer = ?1 AND subject = ?2
+                 RETURNING id, name",
+                [&identity.issuer, &identity.subject, &identity.name],
+                profile,
+            )
+            .optional()?;
+        let user = match known {
+            Some(user) => user,
+            None => transaction.query_row(
+                "INSERT INTO users (id, issuer, subject, name)
+                 SELECT CAST(MAX(CAST(id AS INTEGER)) + 1 AS TEXT), ?1, ?2, ?3 FROM users
+                 RETURNING id, name",
+                [&identity.issuer, &identity.subject, &identity.name],
+                profile,
+            )?,
+        };
+        transaction.commit()?;
+        Ok(user)
+    }
+
     pub fn get(&self, id: &str) -> rusqlite::Result<Option<Profile>> {
         self.0
             .connection()
@@ -151,4 +185,43 @@ pub async fn logout(
     sessions.end(&user.session_id)?;
     tracing::info!(user_id = %user.id, "logged out");
     Ok(api::Ok(Empty {}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(issuer: &str, subject: &str, name: &str) -> Identity {
+        Identity {
+            issuer: issuer.into(),
+            subject: subject.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn an_identity_is_one_user_named_as_its_provider_says() {
+        let users = Users::from(Database::in_memory());
+        let alice = users
+            .of_identity(&identity("https://a", "alice", "Alice"))
+            .unwrap();
+        assert_eq!(alice.id, "2", "after the owner");
+        let renamed = users
+            .of_identity(&identity("https://a", "alice", "Al"))
+            .unwrap();
+        assert_eq!(
+            renamed,
+            Profile {
+                id: "2".into(),
+                name: "Al".into()
+            }
+        );
+        assert_eq!(users.get("2").unwrap(), Some(renamed));
+
+        let elsewhere = users
+            .of_identity(&identity("https://b", "alice", "Alice"))
+            .unwrap();
+        assert_eq!(elsewhere.id, "3", "the subject is only unique per issuer");
+        assert_eq!(users.get("1").unwrap().unwrap().name, "Owner");
+    }
 }

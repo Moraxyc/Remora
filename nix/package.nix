@@ -2,6 +2,8 @@
   lib,
   rustPlatform,
   pkg-config,
+  aws-lc,
+  cacert,
   sqlite,
   remora-web,
 }:
@@ -24,16 +26,21 @@ rustPlatform.buildRustPackage (finalAttrs: {
   # The web app the binary embeds.
   env.REMORA_WEB_DIR = finalAttrs.passthru.web;
 
-  # Links nixpkgs' SQLite instead of the copy rusqlite bundles: the cargo setup hook asks
-  # libsqlite3-sys for pkg-config.
+  # Links nixpkgs' SQLite and AWS-LC (TLS to OpenID Connect providers) instead of the copies
+  # rusqlite and aws-lc-sys bundle: the cargo setup hook asks both for system libraries.
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [ sqlite ];
+  buildInputs = [
+    aws-lc
+    sqlite
+  ];
 
   cargoBuildFlags = [
     "--package"
     "remora-cloud"
   ];
   cargoTestFlags = [ "--workspace" ];
+  # HTTP clients load the system's CA certificates even when tests only talk to localhost.
+  nativeCheckInputs = [ cacert ];
 
   passthru = {
     workspace = lib.importTOML ../Cargo.toml;

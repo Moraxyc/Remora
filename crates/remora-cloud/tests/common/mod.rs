@@ -24,6 +24,7 @@ pub fn config() -> Config {
         database: Database::in_memory(),
         auto_confirm: true,
         owner_password: None,
+        oidc: None,
     }
 }
 

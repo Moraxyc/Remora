@@ -20,8 +20,10 @@ getrandom = "0.4.3"
 hex = "0.4.3"
 hmac = "0.13.0"
 httpdate = "1.0.3"
+openidconnect = { version = "4.1.0", default-features = false }
 prost = "0.14.6"
 remora-proto = { path = "../remora-proto" }
+reqwest = "0.13.5"
 rpassword = "7.5.5"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 rust-embed = { version = "8.14.0", features = ["interpolate-folder-path", "mime-guess"] }

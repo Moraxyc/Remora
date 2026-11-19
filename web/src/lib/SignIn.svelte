@@ -1,12 +1,15 @@
 <script lang="ts">
 	import { invalidate } from '$app/navigation';
-	import { ApiError, signInWithPassword, type Session } from '#lib/api.ts';
+	import { page } from '$app/state';
+	import { ApiError, oidcSignInUrl, signInWithPassword, type Session } from '#lib/api.ts';
 
 	let { session }: { session: Session } = $props();
 
 	let password = $state('');
 	let busy = $state(false);
-	let failure = $state<string | null>(null);
+	let failure = $state<string | null>(
+		page.url.searchParams.get('sign_in') === 'failed' ? 'Signing in failed. Try again.' : null
+	);
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -27,11 +30,17 @@
 	}
 </script>
 
+{#if failure}
+	<p class="notice error" role="alert">{failure}</p>
+{/if}
+{#if session.oidc}
+	<p><a class="button" href={oidcSignInUrl(page.url.pathname)}>Sign in with {session.oidc}</a></p>
+{/if}
 {#if session.password}
+	{#if session.oidc}
+		<p class="muted">Or, as the owner:</p>
+	{/if}
 	<form onsubmit={submit}>
-		{#if failure}
-			<p class="notice error" role="alert">{failure}</p>
-		{/if}
 		<label>
 			Password
 			<!-- svelte-ignore a11y_autofocus -->
@@ -39,12 +48,13 @@
 				type="password"
 				autocomplete="current-password"
 				required
-				autofocus
+				autofocus={!session.oidc}
 				bind:value={password}
 			/>
 		</label>
 		<button disabled={busy}>Sign in</button>
 	</form>
-{:else}
+{/if}
+{#if !session.oidc && !session.password}
 	<p>This Remora has no way to sign in.</p>
 {/if}

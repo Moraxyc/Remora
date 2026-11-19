@@ -13,17 +13,25 @@ let
   signKeyFile = cfg.settings.sign_key_file;
   turnSecretFile = cfg.settings.ice.turn_secret_file;
   passwordFile = cfg.settings.login.password_file;
+  oidcSecretFile = cfg.settings.oidc.client_secret_file or null;
   # Remora runs as a dynamic user, so secret files reach it as systemd credentials, and the
   # generated settings name those instead.
   secrets =
     lib.optional (signKeyFile != null) "sign-key:${signKeyFile}"
     ++ lib.optional (turnSecretFile != null) "turn-secret:${turnSecretFile}"
-    ++ lib.optional (passwordFile != null) "owner-password:${passwordFile}";
-  settings = lib.recursiveUpdate cfg.settings {
-    sign_key_file = if signKeyFile != null then "${credentials}/sign-key" else null;
-    ice.turn_secret_file = if turnSecretFile != null then "${credentials}/turn-secret" else null;
-    login.password_file = if passwordFile != null then "${credentials}/owner-password" else null;
-  };
+    ++ lib.optional (passwordFile != null) "owner-password:${passwordFile}"
+    ++ lib.optional (oidcSecretFile != null) "oidc-secret:${oidcSecretFile}";
+  settings =
+    lib.recursiveUpdate cfg.settings {
+      sign_key_file = if signKeyFile != null then "${credentials}/sign-key" else null;
+      ice.turn_secret_file = if turnSecretFile != null then "${credentials}/turn-secret" else null;
+      login.password_file = if passwordFile != null then "${credentials}/owner-password" else null;
+    }
+    // lib.optionalAttrs (cfg.settings.oidc != null) {
+      oidc = cfg.settings.oidc // {
+        client_secret_file = if oidcSecretFile != null then "${credentials}/oidc-secret" else null;
+      };
+    };
   # TOML has no null: unset settings are left out.
   configFile = format.generate "remora.toml" (
     lib.filterAttrsRecursive (_: value: value != null) settings
@@ -113,6 +121,38 @@ in
                 };
               };
             };
+          };
+          oidc = lib.mkOption {
+            default = null;
+            description = ''
+              The OpenID Connect provider users sign in with. Register Remora there with the
+              redirect URI `{public_url}/api/web/oidc/callback`.
+            '';
+            type = lib.types.nullOr (
+              lib.types.submodule {
+                freeformType = format.type;
+                options = {
+                  issuer = lib.mkOption {
+                    type = lib.types.str;
+                    example = "https://auth.example";
+                    description = "The provider's issuer URL.";
+                  };
+                  client_id = lib.mkOption {
+                    type = lib.types.str;
+                    description = "Remora's client id at the provider.";
+                  };
+                  client_secret_file = lib.mkOption {
+                    type = lib.types.nullOr lib.types.path;
+                    default = null;
+                    example = "/run/secrets/remora-oidc";
+                    description = ''
+                      File holding the client secret. Without it, Remora is a public client and
+                      relies on PKCE.
+                    '';
+                  };
+                };
+              }
+            );
           };
           ice = lib.mkOption {
             default = { };

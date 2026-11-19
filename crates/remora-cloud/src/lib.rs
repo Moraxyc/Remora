@@ -7,6 +7,7 @@ mod database;
 mod device;
 mod ice;
 mod login;
+mod oidc;
 mod password;
 mod room;
 mod rooms;
@@ -30,6 +31,7 @@ use serde::Deserialize;
 
 pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
+pub use oidc::{InvalidOidc, OidcProvider, OidcRegistration};
 pub use password::{InvalidPasswordHash, OwnerPassword};
 pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
 pub use signaling::{Ping, ReconnectGrace};
@@ -53,6 +55,8 @@ pub struct Config {
     /// What the owner signs in to the web app with. Without it, nobody can sign in as the
     /// owner.
     pub owner_password: Option<OwnerPassword>,
+    /// The OpenID Connect provider users sign in with.
+    pub oidc: Option<OidcProvider>,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -140,6 +144,7 @@ struct Cloud {
     reconnect_grace: ReconnectGrace,
     ice: Arc<Ice>,
     owner_password: Option<Arc<OwnerPassword>>,
+    oidc: Option<Arc<OidcProvider>>,
 }
 
 impl FromRef<Cloud> for room::Tickets {
@@ -156,7 +161,9 @@ impl FromRef<Cloud> for web::Web {
         Self {
             logins: cloud.logins.clone(),
             browsers: cloud.browsers.clone(),
+            users: cloud.users.clone(),
             password: cloud.owner_password.clone(),
+            oidc: cloud.oidc.clone(),
             public_url: cloud.public_url.clone(),
         }
     }
@@ -199,6 +206,7 @@ pub fn router(config: Config) -> Router {
         reconnect_grace: config.reconnect_grace,
         ice: Arc::new(config.ice),
         owner_password: config.owner_password.map(Arc::new),
+        oidc: config.oidc.map(Arc::new),
     };
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
@@ -229,6 +237,8 @@ pub fn router(config: Config) -> Router {
                 .post(web::sign_in_with_password)
                 .delete(web::sign_out),
         )
+        .route("/api/web/oidc/start", get(web::start_oidc))
+        .route(oidc::CALLBACK_PATH, get(web::finish_oidc))
         .route(
             "/api/web/logins/{id}",
             get(web::login).post(web::decide_login),

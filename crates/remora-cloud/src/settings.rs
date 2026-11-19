@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
+use crate::oidc::{InvalidOidc, OidcProvider, OidcRegistration};
 use crate::{
     Config, Database, DatabaseError, Ice, IceError, IceUrl, InvalidPasswordHash, OwnerPassword,
     Ping, PublicUrl, ReconnectGrace, TurnSecret,
@@ -36,6 +37,22 @@ pub struct Settings {
     pub ice: IceSettings,
     #[serde(default)]
     pub login: LoginSettings,
+    /// The OpenID Connect provider users sign in with, if any.
+    pub oidc: Option<OidcSettings>,
+}
+
+/// An OpenID Connect provider, where Remora is registered as a client whose redirect URI is
+/// `{public_url}/api/web/oidc/callback`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcSettings {
+    /// The provider's issuer URL, where its discovery document is.
+    pub issuer: String,
+    pub client_id: String,
+    /// File holding the client secret. Without it, Remora is a public client and relies on PKCE.
+    pub client_secret_file: Option<PathBuf>,
+    /// What the sign-in button calls the provider; by default its host name.
+    pub name: Option<String>,
 }
 
 /// How QR logins get confirmed: by the owner, signed in with the password, or automatically.
@@ -84,11 +101,16 @@ impl Settings {
         })?;
         let mut settings = Self::parse(&text)?;
         let base = path.parent().unwrap_or(Path::new(""));
+        let oidc_secret = settings
+            .oidc
+            .as_mut()
+            .and_then(|oidc| oidc.client_secret_file.as_mut());
         for file in [
-            &mut settings.sign_key_file,
-            &mut settings.ice.turn_secret_file,
-            &mut settings.login.password_file,
-            &mut settings.database,
+            settings.sign_key_file.as_mut(),
+            settings.ice.turn_secret_file.as_mut(),
+            settings.login.password_file.as_mut(),
+            oidc_secret,
+            settings.database.as_mut(),
         ]
         .into_iter()
         .flatten()
@@ -100,7 +122,7 @@ impl Settings {
 
     /// Reads the secret files, opens the database and checks that the settings fit together.
     pub fn into_config(self) -> Result<Config, SettingsError> {
-        if !self.login.auto_confirm && self.login.password_file.is_none() {
+        if !self.login.auto_confirm && self.login.password_file.is_none() && self.oidc.is_none() {
             return Err(SettingsError::LoginsUnconfirmable);
         }
         let owner_password = self
@@ -146,6 +168,10 @@ impl Settings {
             })?,
             None => Database::in_memory(),
         };
+        let oidc = self
+            .oidc
+            .map(|oidc| oidc.into_provider(&public_url))
+            .transpose()?;
         Ok(Config {
             public_url,
             sign_key,
@@ -155,7 +181,34 @@ impl Settings {
             database,
             auto_confirm: self.login.auto_confirm,
             owner_password,
+            oidc,
         })
+    }
+}
+
+impl OidcSettings {
+    fn into_provider(self, public_url: &PublicUrl) -> Result<OidcProvider, SettingsError> {
+        let client_secret = match &self.client_secret_file {
+            Some(path) => Some(
+                String::from_utf8(read_secret(path)?)
+                    .map_err(|_| SettingsError::NotText(path.clone()))?,
+            ),
+            None => None,
+        };
+        let name = match self.name {
+            Some(name) => name,
+            None => openidconnect::url::Url::parse(&self.issuer)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| self.issuer.clone()),
+        };
+        let registration = OidcRegistration {
+            issuer: self.issuer,
+            client_id: self.client_id,
+            client_secret,
+            name,
+        };
+        OidcProvider::new(registration, &public_url.to_string()).map_err(SettingsError::Oidc)
     }
 }
 
@@ -194,6 +247,8 @@ pub enum SettingsError {
     },
     Parse(toml::de::Error),
     EmptySecret(PathBuf),
+    NotText(PathBuf),
+    Oidc(InvalidOidc),
     PasswordHash {
         path: PathBuf,
         source: InvalidPasswordHash,
@@ -213,6 +268,8 @@ impl fmt::Display for SettingsError {
             Self::Read { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Self::Parse(error) => write!(f, "invalid settings: {error}"),
             Self::EmptySecret(path) => write!(f, "{} is empty", path.display()),
+            Self::NotText(path) => write!(f, "{} is not UTF-8 text", path.display()),
+            Self::Oidc(error) => error.fmt(f),
             Self::PasswordHash { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Ice(error) => error.fmt(f),
             Self::Database { path, source } => {
@@ -222,7 +279,7 @@ impl fmt::Display for SettingsError {
                 f.write_str("public_url is required when listening on all addresses")
             }
             Self::LoginsUnconfirmable => f.write_str(
-                "nobody can confirm logins: set login.password_file, or login.auto_confirm = true",
+                "nobody can confirm logins: set login.password_file or oidc, or login.auto_confirm = true",
             ),
         }
     }
@@ -346,6 +403,30 @@ mod tests {
         };
         let error = settings.into_config().err().unwrap().to_string();
         assert!(error.ends_with("key is empty"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_oidc_provider_confirms_logins_too() {
+        let dir = temp_dir("oidc");
+        std::fs::write(dir.join("oidc.secret"), "s3cret\n").unwrap();
+        let path = dir.join("remora.toml");
+        std::fs::write(
+            &path,
+            "[oidc]\nissuer = \"https://auth.example/realm\"\nclient_id = \"remora\"\n\
+             client_secret_file = \"oidc.secret\"\n",
+        )
+        .unwrap();
+        let config = Settings::load(&path).unwrap().into_config().unwrap();
+        let provider = config.oidc.unwrap();
+        assert_eq!(provider.name, "auth.example", "named after its host");
+        assert!(!format!("{provider:?}").contains("s3cret"));
+
+        let unnamed = Settings::parse("[oidc]\nissuer = \"not a url\"\nclient_id = \"r\"");
+        assert!(matches!(
+            unnamed.unwrap().into_config(),
+            Err(SettingsError::Oidc(InvalidOidc::Issuer))
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

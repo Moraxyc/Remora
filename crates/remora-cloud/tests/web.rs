@@ -261,7 +261,7 @@ async fn signing_in_and_out() {
         .await;
     assert_eq!(
         session.body,
-        json!({ "signed_in": null, "password": true, "secure": true })
+        json!({ "signed_in": null, "password": true, "oidc": null, "secure": true })
     );
     assert_eq!(session.headers[header::CACHE_CONTROL], "no-store");
 
