@@ -1,0 +1,14 @@
+Package: @pname@
+Version: @version@
+Architecture: @architecture@
+Maintainer: Moraxyc <i@qaq.li>
+Installed-Size: @installedSize@
+Suggests: coturn
+Section: net
+Priority: optional
+Homepage: @homepage@
+Description: @description@
+ Serves the login, device list, rooms and signaling that UU Remote hosts and
+ viewers expect from NetEase's cloud, so that they can run against a server
+ you control. Sessions are relayed through an external TURN server such as
+ coturn.

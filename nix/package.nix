@@ -49,6 +49,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   meta = {
     description = "Self-hostable stand-in for the NetEase UU Remote cloud";
+    homepage = "https://github.com/Moraxyc/Remora";
     license = lib.licenses.gpl3Plus;
     mainProgram = "remora";
     platforms = lib.platforms.unix;
