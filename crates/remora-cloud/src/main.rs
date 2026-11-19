@@ -11,9 +11,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(version)]
 struct Args {
-    /// Settings file (TOML). Without one, every setting takes its default.
+    /// Settings file (TOML).
     #[arg(long, short, value_name = "PATH")]
-    config: Option<PathBuf>,
+    config: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -28,16 +28,16 @@ fn main() -> ExitCode {
 
 #[tokio::main]
 async fn run(args: Args) -> Result<(), Box<dyn Error>> {
-    let settings = match &args.config {
-        Some(path) => Settings::load(path)?,
-        None => Settings::default(),
-    };
+    let settings = Settings::load(&args.config)?;
     let filter =
         EnvFilter::try_new(&settings.log).map_err(|error| format!("invalid log: {error}"))?;
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let listen = settings.listen;
     let config = settings.into_config()?;
+    tracing::warn!(
+        "every QR login is confirmed automatically; anyone who can reach this server can log in"
+    );
     if config.sign_key.is_none() {
         tracing::warn!("no signing key configured; request signatures are not checked");
     }

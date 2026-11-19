@@ -24,7 +24,7 @@ use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
-pub use settings::{IceSettings, Settings, SettingsError};
+pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
 pub use signaling::Ping;
 
 pub struct Config {

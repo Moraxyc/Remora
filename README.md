@@ -20,7 +20,7 @@ remora --config remora.toml
 
 [`contrib/remora.toml`](contrib/remora.toml) describes every setting, and
 [`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
-Without `--config`, Remora serves on `127.0.0.1:8080` with no STUN or TURN server. Serve it over
+For now the settings must include `login.auto_confirm = true`. Serve it over
 TLS through a reverse proxy that passes WebSocket upgrades through.
 
 Clients have to be pointed at Remora. uu-remote-linux has its API base URL in `src/auth.rs`.
@@ -35,7 +35,10 @@ The flake provides a module that runs Remora and, optionally, coturn next to it:
 
   services.remora = {
     enable = true;
-    settings.public_url = "https://remora.example";
+    settings = {
+      public_url = "https://remora.example";
+      login.auto_confirm = true;
+    };
     # Shared by Remora and coturn; it only needs to be readable by root.
     turnSecretFile = "/run/secrets/remora-turn";
     coturn = {

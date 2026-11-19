@@ -1,4 +1,5 @@
-# Remora settings. Every setting is optional; the values here are examples.
+# Remora settings. Apart from `login.auto_confirm`, every setting is optional; the values here
+# are examples.
 
 # Address to serve the REST API and signaling on. Put a TLS proxy in front of it.
 listen = "127.0.0.1:8080"
@@ -20,3 +21,9 @@ turn_secret_file = "turn.secret"
 # Relay every session through TURN, so that host and viewer never learn each other's
 # addresses.
 force_relay = true
+
+[login]
+# Confirm every QR login without asking anyone, so that anyone who can reach Remora logs in as
+# its user. Remora has no other way to confirm logins yet, so this must be true; keep Remora on a
+# private network meanwhile.
+auto_confirm = true

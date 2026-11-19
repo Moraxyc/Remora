@@ -27,6 +27,18 @@ pub struct Settings {
     pub log: String,
     #[serde(default)]
     pub ice: IceSettings,
+    #[serde(default)]
+    pub login: LoginSettings,
+}
+
+/// How QR logins get confirmed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginSettings {
+    /// Confirm every QR login without asking anyone, so that anyone who can reach the server
+    /// logs in as its user. It is the only way to confirm logins for now, so it must be on.
+    #[serde(default)]
+    pub auto_confirm: bool,
 }
 
 /// STUN and TURN servers handed to both sides of each session.
@@ -48,12 +60,6 @@ fn default_listen() -> SocketAddr {
 
 fn default_log() -> String {
     "info".to_owned()
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self::parse("").expect("every setting has a default")
-    }
 }
 
 impl Settings {
@@ -83,6 +89,9 @@ impl Settings {
 
     /// Reads the secret files and checks that the settings fit together.
     pub fn into_config(self) -> Result<Config, SettingsError> {
+        if !self.login.auto_confirm {
+            return Err(SettingsError::LoginsUnconfirmable);
+        }
         let sign_key = self
             .sign_key_file
             .as_deref()
@@ -147,6 +156,7 @@ pub enum SettingsError {
     EmptySecret(PathBuf),
     Ice(IceError),
     PublicUrlRequired,
+    LoginsUnconfirmable,
 }
 
 impl fmt::Display for SettingsError {
@@ -159,6 +169,9 @@ impl fmt::Display for SettingsError {
             Self::PublicUrlRequired => {
                 f.write_str("public_url is required when listening on all addresses")
             }
+            Self::LoginsUnconfirmable => f.write_str(
+                "login.auto_confirm must be true: Remora cannot ask anyone to confirm logins yet",
+            ),
         }
     }
 }
@@ -169,6 +182,13 @@ impl std::error::Error for SettingsError {}
 mod tests {
     use super::*;
 
+    const CONFIRMING: &str = "[login]\nauto_confirm = true\n";
+
+    /// `text` plus what every working settings file needs for now.
+    fn parse(text: &str) -> Settings {
+        Settings::parse(&format!("{text}\n{CONFIRMING}")).unwrap()
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("remora-settings-{name}-{}", std::process::id()));
@@ -177,8 +197,16 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_file_serves_on_localhost() {
-        let config = Settings::default().into_config().unwrap();
+    fn logins_must_be_confirmed_automatically_for_now() {
+        assert!(matches!(
+            Settings::parse("").unwrap().into_config(),
+            Err(SettingsError::LoginsUnconfirmable)
+        ));
+    }
+
+    #[test]
+    fn defaults_serve_on_localhost() {
+        let config = parse("").into_config().unwrap();
         assert_eq!(config.public_url, "http://127.0.0.1:8080".parse().unwrap());
         assert!(config.sign_key.is_none());
     }
@@ -187,6 +215,7 @@ mod tests {
     fn the_shipped_example_is_valid() {
         let settings = Settings::parse(include_str!("../../../contrib/remora.toml")).unwrap();
         assert!(settings.ice.force_relay);
+        assert!(settings.login.auto_confirm);
         assert_eq!(settings.ice.servers.len(), 2);
     }
 
@@ -209,7 +238,7 @@ mod tests {
         let path = dir.join("remora.toml");
         std::fs::write(
             &path,
-            "[ice]\nservers = [\"turn:turn.example\"]\nturn_secret_file = \"turn.secret\"\n",
+            format!("[ice]\nservers = [\"turn:turn.example\"]\nturn_secret_file = \"turn.secret\"\n{CONFIRMING}"),
         )
         .unwrap();
 
@@ -229,7 +258,7 @@ mod tests {
         std::fs::write(dir.join("key"), "\n").unwrap();
         let settings = Settings {
             sign_key_file: Some(dir.join("key")),
-            ..Settings::default()
+            ..parse("")
         };
         let error = settings.into_config().err().unwrap().to_string();
         assert!(error.ends_with("key is empty"), "{error}");
@@ -238,19 +267,18 @@ mod tests {
 
     #[test]
     fn listening_on_all_addresses_needs_a_public_url() {
-        let settings = Settings::parse("listen = \"[::]:8080\"").unwrap();
+        let settings = parse("listen = \"[::]:8080\"");
         assert!(matches!(
             settings.into_config(),
             Err(SettingsError::PublicUrlRequired)
         ));
-        let settings =
-            Settings::parse("listen = \"[::]:8080\"\npublic_url = \"https://remora.example\"");
-        assert!(settings.unwrap().into_config().is_ok());
+        let settings = parse("listen = \"[::]:8080\"\npublic_url = \"https://remora.example\"");
+        assert!(settings.into_config().is_ok());
     }
 
     #[test]
     fn relaying_needs_turn() {
-        let settings = Settings::parse("[ice]\nforce_relay = true").unwrap();
+        let settings = parse("[ice]\nforce_relay = true");
         assert!(matches!(
             settings.into_config(),
             Err(SettingsError::Ice(IceError::RelayWithoutTurn))
