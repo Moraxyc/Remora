@@ -1,4 +1,4 @@
-# uu-remote-server
+# Remora
 
 An unofficial, self-hostable stand-in for the NetEase UU Remote (网易 UU 远程) cloud, written in
 Rust. Existing hosts and viewers that speak the UU protocol log in, find each other and exchange

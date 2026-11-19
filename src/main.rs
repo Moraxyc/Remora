@@ -1,3 +1,3 @@
 fn main() {
-    println!("uu-remote-server {}", env!("CARGO_PKG_VERSION"));
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 }
