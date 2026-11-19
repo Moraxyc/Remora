@@ -25,11 +25,13 @@ in
           settings = {
             listen = "0.0.0.0:8080";
             public_url = "http://server:8080";
-            ice.force_relay = true;
+            sign_key_file = signKey;
+            ice = {
+              turn_secret_file = turnSecret;
+              force_relay = true;
+            };
             login.auto_confirm = true;
           };
-          signKeyFile = signKey;
-          turnSecretFile = turnSecret;
           coturn = {
             enable = true;
             domain = "server";

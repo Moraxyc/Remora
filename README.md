@@ -44,11 +44,11 @@ The flake provides a module that runs Remora and, optionally, coturn next to it:
     # Devices and logins are kept in /var/lib/remora/remora.db.
     settings = {
       public_url = "https://remora.example";
+      # Secret files only need to be readable by root. coturn shares the TURN secret.
+      sign_key_file = "/run/secrets/remora-sign";
+      ice.turn_secret_file = "/run/secrets/remora-turn";
       login.auto_confirm = true;
     };
-    # Both only need to be readable by root; the TURN secret is shared with coturn.
-    signKeyFile = "/run/secrets/remora-sign";
-    turnSecretFile = "/run/secrets/remora-turn";
     coturn = {
       enable = true;
       domain = "turn.example";

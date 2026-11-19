@@ -9,9 +9,22 @@ let
   cfg = config.services.remora;
   format = pkgs.formats.toml { };
   credentials = "/run/credentials/remora.service";
+
+  signKeyFile = cfg.settings.sign_key_file;
+  turnSecretFile = cfg.settings.ice.turn_secret_file;
+  # Remora runs as a dynamic user, so secret files reach it as systemd credentials, and the
+  # generated settings name those instead.
+  secrets =
+    lib.optional (signKeyFile != null) "sign-key:${signKeyFile}"
+    ++ lib.optional (turnSecretFile != null) "turn-secret:${turnSecretFile}";
+  settings = lib.recursiveUpdate cfg.settings {
+    sign_key_file = if signKeyFile != null then "${credentials}/sign-key" else null;
+    ice.turn_secret_file = if turnSecretFile != null then "${credentials}/turn-secret" else null;
+  };
   # TOML has no null: unset settings are left out.
-  settings = lib.filterAttrsRecursive (_: value: value != null) cfg.settings;
-  configFile = format.generate "remora.toml" settings;
+  configFile = format.generate "remora.toml" (
+    lib.filterAttrsRecursive (_: value: value != null) settings
+  );
 
   turnPort = toString config.services.coturn.listening-port;
   # Private and special-purpose ranges a relay must not reach on behalf of its clients.
@@ -39,9 +52,8 @@ in
 
     settings = lib.mkOption {
       description = ''
-        Remora's settings file. Name secret files with
-        {option}`services.remora.signKeyFile` and {option}`services.remora.turnSecretFile`
-        instead of here.
+        Remora's settings file. Secret files named here only need to be readable by root: they
+        reach Remora as systemd credentials.
       '';
       default = { };
       type = lib.types.submodule {
@@ -62,6 +74,16 @@ in
               addresses.
             '';
           };
+          sign_key_file = lib.mkOption {
+            type = lib.types.nullOr lib.types.path;
+            default = null;
+            example = "/run/secrets/remora-sign";
+            description = ''
+              File holding the request signing key that clients are configured with. Without
+              it, request signatures are not checked, and anyone who can reach Remora can
+              register devices and start logins.
+            '';
+          };
           database = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = "/var/lib/remora/remora.db";
@@ -75,35 +97,27 @@ in
             description = "How host and viewer reach each other.";
             type = lib.types.submodule {
               freeformType = format.type;
-              options.servers = lib.mkOption {
-                type = lib.types.listOf lib.types.str;
-                default = [ ];
-                example = [ "turn:turn.example:3478" ];
-                description = "STUN and TURN servers handed to both sides of each session.";
+              options = {
+                servers = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [ ];
+                  example = [ "turn:turn.example:3478" ];
+                  description = "STUN and TURN servers handed to both sides of each session.";
+                };
+                turn_secret_file = lib.mkOption {
+                  type = lib.types.nullOr lib.types.path;
+                  default = null;
+                  example = "/run/secrets/remora-turn";
+                  description = ''
+                    File holding the secret shared with the TURN servers (coturn's
+                    `static-auth-secret`).
+                  '';
+                };
               };
             };
           };
         };
       };
-    };
-
-    signKeyFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = ''
-        File holding the request signing key that clients are configured with. Without it,
-        request signatures are not checked, and anyone who can reach Remora can register devices
-        and start logins.
-      '';
-    };
-
-    turnSecretFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = ''
-        File holding the secret shared with the TURN servers (coturn's `static-auth-secret`).
-        It only needs to be readable by root.
-      '';
     };
 
     coturn = {
@@ -135,11 +149,6 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
-        services.remora.settings = {
-          sign_key_file = lib.mkIf (cfg.signKeyFile != null) "${credentials}/sign-key";
-          ice.turn_secret_file = lib.mkIf (cfg.turnSecretFile != null) "${credentials}/turn-secret";
-        };
-
         systemd.services.remora = {
           description = "Remora, a stand-in for the UU Remote cloud";
           wantedBy = [ "multi-user.target" ];
@@ -149,9 +158,7 @@ in
             Restart = "on-failure";
             DynamicUser = true;
             StateDirectory = "remora";
-            LoadCredential =
-              lib.optional (cfg.signKeyFile != null) "sign-key:${cfg.signKeyFile}"
-              ++ lib.optional (cfg.turnSecretFile != null) "turn-secret:${cfg.turnSecretFile}";
+            LoadCredential = secrets;
 
             CapabilityBoundingSet = "";
             LockPersonality = true;
@@ -186,8 +193,8 @@ in
       (lib.mkIf cfg.coturn.enable {
         assertions = [
           {
-            assertion = cfg.turnSecretFile != null;
-            message = "services.remora.coturn needs services.remora.turnSecretFile.";
+            assertion = turnSecretFile != null;
+            message = "services.remora.coturn needs services.remora.settings.ice.turn_secret_file.";
           }
         ];
 
@@ -212,7 +219,7 @@ in
         };
         # coturn reads its secret as its own user; the credential lets the file stay root's.
         systemd.services.coturn.serviceConfig.LoadCredential = [
-          "static-auth-secret:${cfg.turnSecretFile}"
+          "static-auth-secret:${turnSecretFile}"
         ];
 
         networking.firewall = lib.mkIf cfg.coturn.openFirewall {
