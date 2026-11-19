@@ -53,3 +53,38 @@ jobs:
           skip-use: true
 
       - run: nix flake check --print-build-logs --keep-going
+
+  # The runner is a real Ubuntu, booted by systemd, so the package goes through apt, dpkg and
+  # systemd as it would on a user's machine.
+  debian-package:
+    name: Debian package (${{ matrix.system }})
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The check job pushed the package to the cache, so this only downloads it.
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            extra-substituters = https://nix-cache.qaq.li/remora
+            extra-trusted-public-keys = remora:iOVASnJtE6oEaK6QW9cHYAL/GIN0Ieh+zeV80XCa7D8=
+
+      - run: nix build .#remora-deb --print-build-logs
+
+      - name: Lint
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends lintian
+          lintian --fail-on error,warning --display-info result/*.deb
+
+      - name: Install, run, upgrade, remove and purge
+        run: .github/scripts/test-debian-package.sh result/*.deb
