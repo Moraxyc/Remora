@@ -6,7 +6,9 @@ listen = "127.0.0.1:8080"
 # Origin clients reach Remora at. Required when `listen` is an unspecified address.
 public_url = "https://remora.example"
 # File holding the request signing key that clients are configured with. Without it, request
-# signatures are not checked; tokens are what authenticates users.
+# signatures are not checked. Tokens are what authenticates users, but registering a device and
+# starting a login need none, so on a server the internet can reach, use a random key that only
+# your clients know.
 # sign_key_file = "/etc/remora/sign.key"
 # SQLite database for registered devices and the key that signs tokens. Without it they are
 # kept in memory: a restart logs everyone out and forgets every device.

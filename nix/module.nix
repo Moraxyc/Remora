@@ -92,7 +92,8 @@ in
       default = null;
       description = ''
         File holding the request signing key that clients are configured with. Without it,
-        request signatures are not checked.
+        request signatures are not checked, and anyone who can reach Remora can register devices
+        and start logins.
       '';
     };
 

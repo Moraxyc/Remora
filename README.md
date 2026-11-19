@@ -10,7 +10,8 @@ This project is not affiliated with or endorsed by NetEase.
 
 Early development. Hosts and viewers from uu-remote-linux log in, find each other and connect,
 peer to peer or relayed through coturn. Logins are confirmed automatically for now, so anyone
-who can reach the server can log in as its user: run it on a private network only.
+who can reach the server and sign requests can log in as its user: run it on a private network,
+or at least give it a signing key that only your clients know.
 
 ## Running
 
@@ -22,6 +23,11 @@ remora --config remora.toml
 [`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
 For now the settings must include `login.auto_confirm = true`. Serve it over
 TLS through a reverse proxy that passes WebSocket upgrades through.
+
+Registering a device and starting a QR login need no account, and device registrations are kept
+for good, because clients register once and reuse the device id forever. The signing key is what
+keeps strangers from calling them: on a server that the internet can reach, set `sign_key_file`
+to a random key and configure your clients with it.
 
 Clients have to be pointed at Remora. uu-remote-linux has its API base URL in `src/auth.rs`.
 
@@ -40,7 +46,8 @@ The flake provides a module that runs Remora and, optionally, coturn next to it:
       public_url = "https://remora.example";
       login.auto_confirm = true;
     };
-    # Shared by Remora and coturn; it only needs to be readable by root.
+    # Both only need to be readable by root; the TURN secret is shared with coturn.
+    signKeyFile = "/run/secrets/remora-sign";
     turnSecretFile = "/run/secrets/remora-turn";
     coturn = {
       enable = true;
