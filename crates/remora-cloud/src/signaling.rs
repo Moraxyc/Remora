@@ -70,6 +70,11 @@ impl Hosts {
         }
     }
 
+    pub fn is_online(&self, device_id: &str) -> bool {
+        let hosts = self.0.lock().expect("hosts lock poisoned");
+        hosts.contains_key(device_id)
+    }
+
     fn leave(&self, device_id: &str, connection: u64) {
         let mut hosts = self.0.lock().expect("hosts lock poisoned");
         if hosts

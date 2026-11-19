@@ -8,12 +8,9 @@ use serde::Serialize;
 
 use crate::PublicUrl;
 use crate::api::{self, ApiError};
-use crate::device::Devices;
+use crate::device::{DEVICE_ID_HEADER, Devices};
 use crate::token::{Room, TokenKey};
 use crate::user::User;
-
-/// Identifies the calling installation once it has registered.
-const DEVICE_ID_HEADER: &str = "x-param-device-id";
 
 /// How long clients should wait for the signaling connection to come up.
 const WS_CONNECT_TIMEOUT_MS: u32 = 10_000;
@@ -26,8 +23,8 @@ pub struct CreateResponse {
     ws_connect_timeout_ms: u32,
 }
 
-/// `POST /api/v1/room/create`, for a logged-in host on its registered device. The body (`{}`)
-/// carries nothing.
+/// `POST /api/v1/room/create`, for a logged-in host on its registered device, which becomes the
+/// user's. The body (`{}`) carries nothing.
 pub async fn create(
     user: User,
     State(devices): State<Devices>,
@@ -38,7 +35,7 @@ pub async fn create(
     let device_id = headers
         .get(DEVICE_ID_HEADER)
         .and_then(|value| value.to_str().ok())
-        .filter(|id| devices.contains(id))
+        .filter(|id| devices.bind(id, &user.id))
         .ok_or(ApiError::INVALID_REQUEST)?;
 
     tracing::info!(user_id = %user.id, %device_id, "room created");

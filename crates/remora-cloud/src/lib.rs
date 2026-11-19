@@ -103,6 +103,7 @@ pub fn router(config: Config) -> Router {
     };
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
+        .route("/api/v1/device/list", get(device::list))
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))

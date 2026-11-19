@@ -37,6 +37,58 @@ async fn registration_is_stable_per_installation() {
     assert_ne!(first.device_id, other.device_id);
 }
 
+const LIST: &str = "/api/v1/device/list";
+
+#[tokio::test]
+async fn the_list_holds_the_users_hosts() {
+    let app = remora_cloud::router(common::config());
+    let host = common::register_named(&app, "client-host", "studio").await;
+    let viewer = common::register_named(&app, "client-viewer", "laptop").await;
+    let unnamed = common::register_named(&app, "client-unnamed", "").await;
+    let token = common::log_in(&app).await;
+
+    let list: Value = common::get_as(&app, LIST, &token, &viewer).await.unwrap();
+    assert_eq!(
+        list["my_binded_devices"],
+        json!([]),
+        "no host has created a room"
+    );
+    assert_eq!(list["others_shared_devices"], json!([]));
+    assert_eq!(list["current_device"]["device_id"], viewer.as_str());
+
+    common::create_room(&app, &token, &host).await;
+    common::create_room(&app, &token, &unnamed).await;
+    let list: Value = common::get_as(&app, LIST, &token, &viewer).await.unwrap();
+    let mut expected = [
+        json!({ "device_id": host, "alias": "studio", "platform": 1, "status": "DISCONNECTED" }),
+        json!({ "device_id": unnamed, "platform": 1, "status": "DISCONNECTED" }),
+    ];
+    expected.sort_by_key(|entry| entry["device_id"].as_str().unwrap().to_owned());
+    assert_eq!(list["my_binded_devices"], json!(expected));
+}
+
+#[tokio::test]
+async fn re_registering_renames_the_device() {
+    let app = remora_cloud::router(common::config());
+    let host = common::register_named(&app, "client-host", "old").await;
+    let token = common::log_in(&app).await;
+    common::create_room(&app, &token, &host).await;
+    assert_eq!(
+        common::register_named(&app, "client-host", "new").await,
+        host
+    );
+
+    let list: Value = common::get_as(&app, LIST, &token, &host).await.unwrap();
+    assert_eq!(list["my_binded_devices"][0]["alias"], "new");
+}
+
+#[tokio::test]
+async fn the_list_needs_a_user_token() {
+    let app = remora_cloud::router(common::config());
+    let result = common::get_as::<Value>(&app, LIST, "bogus", "device").await;
+    assert_eq!(result.map(drop), Err(ApiError::TokenExpired));
+}
+
 #[tokio::test]
 async fn rejects_invalid_bodies_with_an_envelope() {
     let app = remora_cloud::router(common::config());

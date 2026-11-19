@@ -27,10 +27,7 @@ async fn start(config: Config) -> (Router, SocketAddr) {
 async fn room_token(app: &Router, client_id: &str) -> String {
     let device_id = common::register(app, client_id).await;
     let token = common::log_in(app).await;
-    let room: Value = common::post_as(app, "/api/v1/room/create", &token, Some(&device_id), "{}")
-        .await
-        .unwrap();
-    room["token"].as_str().unwrap().to_owned()
+    common::create_room(app, &token, &device_id).await
 }
 
 struct Host {
@@ -120,6 +117,34 @@ async fn host_comes_online() {
             .as_str()
             .is_some_and(|key| !key.is_empty())
     );
+}
+
+#[tokio::test]
+async fn the_device_list_shows_hosts_on_signaling_as_connected() {
+    let (app, addr) = start(common::config()).await;
+    let device_id = common::register(&app, "client-a").await;
+    let token = common::log_in(&app).await;
+    let room = common::create_room(&app, &token, &device_id).await;
+    let status = async || {
+        let list: Value = common::get_as(&app, "/api/v1/device/list", &token, &device_id)
+            .await
+            .unwrap();
+        list["my_binded_devices"][0]["status"].clone()
+    };
+    assert_eq!(status().await, "DISCONNECTED");
+
+    let mut host = Host::connect(addr, &room).await.unwrap();
+    host.handshake().await;
+    assert_eq!(status().await, "CONNECTED");
+
+    drop(host);
+    for _ in 0..50 {
+        if status().await == "DISCONNECTED" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the host stayed connected after hanging up");
 }
 
 #[tokio::test]

@@ -49,6 +49,17 @@ pub async fn get<T: DeserializeOwned>(
     send(app, request, "").await
 }
 
+/// GETs `path` as the user of `token`, from the registered device `device_id`.
+pub async fn get_as<T: DeserializeOwned>(
+    app: &Router,
+    path: &str,
+    token: &str,
+    device_id: &str,
+) -> Result<T, ApiError> {
+    let request = authenticated(Request::get(path), token).header("x-param-device-id", device_id);
+    send(app, request, "").await
+}
+
 /// POSTs a JSON `body` as the user of `token`, from the registered device `device_id`.
 pub async fn post_as<T: DeserializeOwned>(
     app: &Router,
@@ -77,7 +88,11 @@ fn authenticated(request: Builder, token: &str) -> Builder {
 
 /// Registers an installation and returns its device id.
 pub async fn register(app: &Router, client_id: &str) -> String {
-    let body = json!({ "name": "host", "client_id": client_id });
+    register_named(app, client_id, "host").await
+}
+
+pub async fn register_named(app: &Router, client_id: &str, name: &str) -> String {
+    let body = json!({ "name": name, "client_id": client_id });
     let init: Value = post(app, "/api/v1/device/windows/init", Some(&body.to_string()))
         .await
         .unwrap();
@@ -94,6 +109,15 @@ async fn send<T: DeserializeOwned>(
     let status = response.status().as_u16();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     parse_response(status, &bytes)
+}
+
+/// Creates a room for a host on `device_id`, binding the device to the user, and returns the
+/// room token.
+pub async fn create_room(app: &Router, token: &str, device_id: &str) -> String {
+    let room: Value = post_as(app, "/api/v1/room/create", token, Some(device_id), "{}")
+        .await
+        .unwrap();
+    room["token"].as_str().unwrap().to_owned()
 }
 
 /// Runs the whole QR login and returns the user token.
