@@ -7,3 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
+
+# Unoptimised, argon2 takes a fifth of a second per hash, which slows every test that signs in.
+[profile.dev.package.argon2]
+opt-level = 3

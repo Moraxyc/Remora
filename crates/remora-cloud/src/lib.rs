@@ -5,6 +5,7 @@ mod database;
 mod device;
 mod ice;
 mod login;
+mod password;
 mod room;
 mod rooms;
 mod settings;
@@ -26,6 +27,7 @@ use serde::Deserialize;
 
 pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
+pub use password::{InvalidPasswordHash, OwnerPassword};
 pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
 pub use signaling::{Ping, ReconnectGrace};
 
