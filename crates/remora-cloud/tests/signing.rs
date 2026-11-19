@@ -58,7 +58,7 @@ const INVALID_SIGNATURE: Result<(), ApiError> = Err(ApiError::Rejected {
 
 #[tokio::test]
 async fn accepts_correctly_signed_requests() {
-    let app = remora_cloud::router(Default::default(), Some(key()));
+    let app = remora_cloud::router(Some(key()));
     let signed = signature(PATH, BODY);
     assert_eq!(send(&app, PATH, BODY, Some(&signed)).await, Ok(()));
 
@@ -69,7 +69,7 @@ async fn accepts_correctly_signed_requests() {
 
 #[tokio::test]
 async fn rejects_missing_or_wrong_signatures() {
-    let app = remora_cloud::router(Default::default(), Some(key()));
+    let app = remora_cloud::router(Some(key()));
     let signed = signature(PATH, BODY);
     let tampered = BODY.replace("client-a", "client-b");
     let other_key = sign(
@@ -98,7 +98,7 @@ async fn rejects_missing_or_wrong_signatures() {
 
 #[tokio::test]
 async fn without_a_key_signatures_are_not_checked() {
-    let app = remora_cloud::router(Default::default(), None);
+    let app = remora_cloud::router(None);
     assert_eq!(send(&app, PATH, BODY, None).await, Ok(()));
     assert_eq!(send(&app, PATH, BODY, Some("bogus")).await, Ok(()));
 }

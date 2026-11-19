@@ -37,7 +37,7 @@ async fn main() -> io::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
-    axum::serve(listener, remora_cloud::router(Default::default(), sign_key))
+    axum::serve(listener, remora_cloud::router(sign_key))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

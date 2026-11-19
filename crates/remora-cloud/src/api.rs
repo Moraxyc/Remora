@@ -31,6 +31,12 @@ impl ApiError {
         code: 1001,
     };
 
+    /// The QR login is unknown, expired or already used.
+    pub const QR_EXPIRED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: 1190,
+    };
+
     /// `x-param-sign` is missing or wrong. NetEase's code for this is unknown; clients treat any
     /// non-zero code as a rejection.
     pub const INVALID_SIGNATURE: Self = Self {
