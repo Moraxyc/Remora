@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 pub const PUBLIC_URL: &str = "https://remora.test";
 
-/// Signatures unchecked.
+/// Signatures unchecked, logins confirmed automatically.
 pub fn config() -> Config {
     Config {
         public_url: PUBLIC_URL.parse().unwrap(),
@@ -22,6 +22,8 @@ pub fn config() -> Config {
         reconnect_grace: ReconnectGrace::default(),
         ice: Default::default(),
         database: Database::in_memory(),
+        auto_confirm: true,
+        owner_password: None,
     }
 }
 

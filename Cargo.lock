@@ -1139,6 +1139,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "httpdate",
  "prost",
  "remora-proto",
  "rpassword",

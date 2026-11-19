@@ -12,14 +12,17 @@ let
 
   signKeyFile = cfg.settings.sign_key_file;
   turnSecretFile = cfg.settings.ice.turn_secret_file;
+  passwordFile = cfg.settings.login.password_file;
   # Remora runs as a dynamic user, so secret files reach it as systemd credentials, and the
   # generated settings name those instead.
   secrets =
     lib.optional (signKeyFile != null) "sign-key:${signKeyFile}"
-    ++ lib.optional (turnSecretFile != null) "turn-secret:${turnSecretFile}";
+    ++ lib.optional (turnSecretFile != null) "turn-secret:${turnSecretFile}"
+    ++ lib.optional (passwordFile != null) "owner-password:${passwordFile}";
   settings = lib.recursiveUpdate cfg.settings {
     sign_key_file = if signKeyFile != null then "${credentials}/sign-key" else null;
     ice.turn_secret_file = if turnSecretFile != null then "${credentials}/turn-secret" else null;
+    login.password_file = if passwordFile != null then "${credentials}/owner-password" else null;
   };
   # TOML has no null: unset settings are left out.
   configFile = format.generate "remora.toml" (
@@ -91,6 +94,25 @@ in
               SQLite database for registered devices and the key that signs tokens. With
               `null`, they are kept in memory and lost on every restart.
             '';
+          };
+          login = lib.mkOption {
+            default = { };
+            description = "How QR logins get confirmed.";
+            type = lib.types.submodule {
+              freeformType = format.type;
+              options = {
+                password_file = lib.mkOption {
+                  type = lib.types.nullOr lib.types.path;
+                  default = null;
+                  example = "/run/secrets/remora-owner";
+                  description = ''
+                    File holding the owner's password hash, as `remora hash-password` makes it.
+                    The owner signs in with the password to confirm logins on the page their
+                    QR code opens.
+                  '';
+                };
+              };
+            };
           };
           ice = lib.mkOption {
             default = { };

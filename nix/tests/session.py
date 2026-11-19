@@ -1,7 +1,8 @@
 """Talks to Remora like a client.
 
 session.py BASE_URL SIGN_KEY_FILE session
-    Plays a host and a viewer up to the point where a session starts. Prints, as JSON, the
+    Plays a host and a viewer up to the point where a session starts, and the owner, who
+    confirms the host's login with the password in $REMORA_OWNER_PASSWORD. Prints, as JSON, the
     user token, the host's device id, and the TURN server the viewer was given.
 session.py BASE_URL SIGN_KEY_FILE devices TOKEN
     Prints the ids of the user's devices, as JSON.
@@ -10,8 +11,11 @@ session.py BASE_URL SIGN_KEY_FILE devices TOKEN
 import hashlib
 import hmac
 import json
+import os
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from websockets.sync.client import connect
@@ -56,6 +60,42 @@ def ok(*args, **kwargs):
     return data
 
 
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
+def browse(path, form=None, cookie=None):
+    """Loads a web page like a browser that does not follow redirects; returns
+    (status, headers, body)."""
+    data = None if form is None else urllib.parse.urlencode(form).encode()
+    request = urllib.request.Request(BASE + path, data=data)
+    if cookie:
+        request.add_header("cookie", cookie)
+    try:
+        response = urllib.request.build_opener(NoRedirects).open(request)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.status, response.headers, response.read().decode()
+
+
+def confirm(qr_url):
+    """Opens the QR code's page as the owner, signs in and confirms the login."""
+    assert qr_url.startswith(BASE + "/login/"), "the QR code opens a page on Remora"
+    page = qr_url[len(BASE) :]
+    assert browse(page)[0] == 200
+    password = os.environ["REMORA_OWNER_PASSWORD"]
+    assert browse("/signin", {"password": "wrong", "next": page})[0] == 401
+    status, headers, _ = browse("/signin", {"password": password, "next": page})
+    assert status == 303, status
+    cookie = headers["set-cookie"].split(";")[0]
+    _, _, body = browse(page, cookie=cookie)
+    csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
+    status, _, _ = browse(page, {"csrf": csrf, "decision": "confirm"}, cookie)
+    assert status == 200, status
+
+
 def open_socket(room_token):
     url = BASE.replace("http", "ws", 1) + "/socket.io/?EIO=4&transport=websocket"
     socket = connect(url, additional_headers={"X-NRD-AUTH": room_token})
@@ -82,8 +122,11 @@ def session():
     device = ok("POST", "/api/v1/device/windows/init", {"name": "vm", "client_id": "vm-host"})[
         "device_id"
     ]
-    qr = ok("POST", "/api/v1/qrcode/gen/login")
+    qr = ok("POST", "/api/v1/qrcode/gen/login", device=device)
     login = {"token": qr["status_query_ticket"], "qrcode_jump_url": qr["qrcode_jump_url"]}
+    assert call("POST", "/api/v1/login/by_qrcode", login)[0] == 1190, "not confirmed yet"
+    confirm(qr["qrcode_jump_url"])
+    assert ok("POST", "/api/v1/qrcode/login/status", {**login, "login_status": 2})["status"] == 4
     user = ok("POST", "/api/v1/login/by_qrcode", login)["token"]
 
     room = ok("POST", "/api/v1/room/create", {}, token=user, device=device)

@@ -9,8 +9,8 @@ use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
 use crate::{
-    Config, Database, DatabaseError, Ice, IceError, IceUrl, Ping, PublicUrl, ReconnectGrace,
-    TurnSecret,
+    Config, Database, DatabaseError, Ice, IceError, IceUrl, InvalidPasswordHash, OwnerPassword,
+    Ping, PublicUrl, ReconnectGrace, TurnSecret,
 };
 
 /// What the settings file says. Secrets stay in their own files, named here and read by
@@ -38,12 +38,14 @@ pub struct Settings {
     pub login: LoginSettings,
 }
 
-/// How QR logins get confirmed.
+/// How QR logins get confirmed: by the owner, signed in with the password, or automatically.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginSettings {
+    /// File holding the owner's password hash, as `remora hash-password` makes it.
+    pub password_file: Option<PathBuf>,
     /// Confirm every QR login without asking anyone, so that anyone who can reach the server
-    /// logs in as its user. It is the only way to confirm logins for now, so it must be on.
+    /// logs in as its user.
     #[serde(default)]
     pub auto_confirm: bool,
 }
@@ -85,6 +87,7 @@ impl Settings {
         for file in [
             &mut settings.sign_key_file,
             &mut settings.ice.turn_secret_file,
+            &mut settings.login.password_file,
             &mut settings.database,
         ]
         .into_iter()
@@ -97,9 +100,15 @@ impl Settings {
 
     /// Reads the secret files, opens the database and checks that the settings fit together.
     pub fn into_config(self) -> Result<Config, SettingsError> {
-        if !self.login.auto_confirm {
+        if !self.login.auto_confirm && self.login.password_file.is_none() {
             return Err(SettingsError::LoginsUnconfirmable);
         }
+        let owner_password = self
+            .login
+            .password_file
+            .as_deref()
+            .map(read_password)
+            .transpose()?;
         let sign_key = self
             .sign_key_file
             .as_deref()
@@ -144,8 +153,19 @@ impl Settings {
             reconnect_grace: ReconnectGrace::default(),
             ice,
             database,
+            auto_confirm: self.login.auto_confirm,
+            owner_password,
         })
     }
+}
+
+fn read_password(path: &Path) -> Result<OwnerPassword, SettingsError> {
+    let invalid = |source| SettingsError::PasswordHash {
+        path: path.to_owned(),
+        source,
+    };
+    let hash = String::from_utf8(read_secret(path)?).map_err(|_| invalid(InvalidPasswordHash))?;
+    OwnerPassword::parse(&hash).map_err(invalid)
 }
 
 /// The whole file, minus a trailing newline, is the secret.
@@ -174,6 +194,10 @@ pub enum SettingsError {
     },
     Parse(toml::de::Error),
     EmptySecret(PathBuf),
+    PasswordHash {
+        path: PathBuf,
+        source: InvalidPasswordHash,
+    },
     Ice(IceError),
     Database {
         path: PathBuf,
@@ -189,6 +213,7 @@ impl fmt::Display for SettingsError {
             Self::Read { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Self::Parse(error) => write!(f, "invalid settings: {error}"),
             Self::EmptySecret(path) => write!(f, "{} is empty", path.display()),
+            Self::PasswordHash { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Ice(error) => error.fmt(f),
             Self::Database { path, source } => {
                 write!(f, "cannot open {}: {source}", path.display())
@@ -197,7 +222,7 @@ impl fmt::Display for SettingsError {
                 f.write_str("public_url is required when listening on all addresses")
             }
             Self::LoginsUnconfirmable => f.write_str(
-                "login.auto_confirm must be true: Remora cannot ask anyone to confirm logins yet",
+                "nobody can confirm logins: set login.password_file, or login.auto_confirm = true",
             ),
         }
     }
@@ -211,7 +236,7 @@ mod tests {
 
     const CONFIRMING: &str = "[login]\nauto_confirm = true\n";
 
-    /// `text` plus what every working settings file needs for now.
+    /// `text` plus a way to confirm logins, which every working settings file needs.
     fn parse(text: &str) -> Settings {
         Settings::parse(&format!("{text}\n{CONFIRMING}")).unwrap()
     }
@@ -224,11 +249,37 @@ mod tests {
     }
 
     #[test]
-    fn logins_must_be_confirmed_automatically_for_now() {
+    fn someone_must_confirm_logins() {
         assert!(matches!(
             Settings::parse("").unwrap().into_config(),
             Err(SettingsError::LoginsUnconfirmable)
         ));
+    }
+
+    #[test]
+    fn the_owner_password_is_an_argon2id_hash() {
+        let dir = temp_dir("password");
+        let hash = OwnerPassword::hash("hunter2");
+        std::fs::write(dir.join("good"), format!("{}\n", hash.as_phc())).unwrap();
+        std::fs::write(dir.join("plain"), "hunter2\n").unwrap();
+        let with_password = |file: &str| {
+            Settings::parse(&format!(
+                "[login]\npassword_file = \"{}\"",
+                dir.join(file).display()
+            ))
+            .unwrap()
+            .into_config()
+        };
+
+        let config = with_password("good").unwrap();
+        assert!(!config.auto_confirm);
+        assert!(config.owner_password.unwrap().verify("hunter2"));
+        let error = with_password("plain").err().unwrap().to_string();
+        assert!(
+            error.contains("plain: expected an argon2id hash"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -242,7 +293,8 @@ mod tests {
     fn the_shipped_example_is_valid() {
         let settings = Settings::parse(include_str!("../../../contrib/remora.toml")).unwrap();
         assert!(settings.ice.force_relay);
-        assert!(settings.login.auto_confirm);
+        assert!(!settings.login.auto_confirm);
+        assert!(settings.login.password_file.is_some());
         assert_eq!(settings.ice.servers.len(), 2);
     }
 

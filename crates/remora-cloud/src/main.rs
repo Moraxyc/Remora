@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::io::{BufRead, IsTerminal};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -76,9 +77,14 @@ async fn serve(config: PathBuf) -> Result<(), Box<dyn Error>> {
             "no database configured; a restart logs everyone out and forgets every device"
         );
     }
-    tracing::warn!(
-        "every QR login is confirmed automatically; anyone who can reach this server can log in"
-    );
+    if config.auto_confirm {
+        tracing::warn!(
+            "every QR login is confirmed automatically; anyone who can reach this server can log in"
+        );
+    }
+    if config.owner_password.is_some() && !config.public_url.is_secure() {
+        tracing::warn!("public_url is not https; the owner's password travels unencrypted");
+    }
     if config.sign_key.is_none() {
         tracing::warn!("no signing key configured; request signatures are not checked");
     }
@@ -86,7 +92,8 @@ async fn serve(config: PathBuf) -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
     let mut terminate = signal(SignalKind::terminate())?;
-    axum::serve(listener, remora_cloud::router(config))
+    let app = remora_cloud::router(config).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}

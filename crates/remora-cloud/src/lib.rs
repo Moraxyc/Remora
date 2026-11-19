@@ -13,6 +13,7 @@ mod signaling;
 mod signing;
 mod token;
 mod user;
+mod web;
 
 use std::fmt;
 use std::str::FromStr;
@@ -45,6 +46,10 @@ pub struct Config {
     pub ice: Ice,
     /// Where the token key, registered devices and user sessions are kept.
     pub database: Database,
+    /// Confirm every QR login as soon as it is generated, instead of asking the owner.
+    pub auto_confirm: bool,
+    /// What the owner signs in to the web pages with. Without it, nobody can.
+    pub owner_password: Option<OwnerPassword>,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -57,10 +62,22 @@ pub struct PublicUrl {
 }
 
 impl PublicUrl {
+    /// Whether clients reach this server over TLS.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+
     /// The signaling URL handed to clients: the same origin as `ws://` or `wss://`.
     fn signaling(&self) -> String {
         let scheme = if self.secure { "wss" } else { "ws" };
         format!("{scheme}://{}", self.authority)
+    }
+}
+
+impl fmt::Display for PublicUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scheme = if self.secure { "https" } else { "http" };
+        write!(f, "{scheme}://{}", self.authority)
     }
 }
 
@@ -117,12 +134,24 @@ struct Cloud {
     ping: Ping,
     reconnect_grace: ReconnectGrace,
     ice: Arc<Ice>,
+    owner_password: Option<Arc<OwnerPassword>>,
 }
 
 impl FromRef<Cloud> for room::Tickets {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             tokens: cloud.tokens.clone(),
+            public_url: cloud.public_url.clone(),
+        }
+    }
+}
+
+impl FromRef<Cloud> for web::Web {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            logins: cloud.logins.clone(),
+            tokens: cloud.tokens.clone(),
+            password: cloud.owner_password.clone(),
             public_url: cloud.public_url.clone(),
         }
     }
@@ -148,18 +177,21 @@ impl FromRef<Cloud> for signaling::Admission {
     }
 }
 
-/// The REST API and signaling.
+/// The REST API, signaling and the owner's web pages. Serve it with connection info
+/// (`into_make_service_with_connect_info::<SocketAddr>`) so that login pages can show where a
+/// login came from.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
         sessions: config.database.clone().into(),
-        logins: Default::default(),
+        logins: login::Logins::new(config.public_url.clone(), config.auto_confirm),
         tokens: config.database.tokens(),
         public_url: config.public_url,
         rooms: Default::default(),
         ping: config.ping,
         reconnect_grace: config.reconnect_grace,
         ice: Arc::new(config.ice),
+        owner_password: config.owner_password.map(Arc::new),
     };
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
@@ -183,11 +215,14 @@ pub fn router(config: Config) -> Router {
         )),
         None => api,
     };
-    // Signaling requests carry the room token instead of a signature.
-    let signaling = Router::new()
+    // Signaling requests carry the room token instead of a signature, and browsers sign
+    // nothing.
+    let unsigned = Router::new()
         .route("/socket.io/", get(signaling::connect))
+        .route("/login/{id}", get(web::show_login).post(web::decide_login))
+        .route("/signin", post(web::sign_in))
         .with_state(cloud);
-    api.merge(signaling)
+    api.merge(unsigned)
 }
 
 #[cfg(test)]

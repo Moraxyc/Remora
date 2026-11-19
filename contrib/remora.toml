@@ -1,5 +1,5 @@
-# Remora settings. Apart from `login.auto_confirm`, every setting is optional; the values here
-# are examples.
+# Remora settings. Apart from a way to confirm logins (`login.password_file` or
+# `login.auto_confirm`), every setting is optional; the values here are examples.
 
 # Address to serve the REST API and signaling on. Put a TLS proxy in front of it.
 listen = "127.0.0.1:8080"
@@ -28,7 +28,10 @@ turn_secret_file = "turn.secret"
 force_relay = true
 
 [login]
-# Confirm every QR login without asking anyone, so that anyone who can reach Remora logs in as
-# its user. Remora has no other way to confirm logins yet, so this must be true; keep Remora on a
-# private network meanwhile.
-auto_confirm = true
+# File holding the owner's password hash; make it with `remora hash-password > owner.password`.
+# A client's QR code opens a page on Remora, where the owner signs in with the password and
+# confirms or denies the login. Wrong passwords are not rate limited yet, so pick a long one.
+password_file = "owner.password"
+# Confirm every QR login without asking anyone instead, so that anyone who can reach Remora
+# logs in as its user. Only for a private network.
+# auto_confirm = true

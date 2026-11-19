@@ -7,6 +7,7 @@
 let
   turnSecret = pkgs.writeText "turn-secret" "vm-turn-secret\n";
   signKey = pkgs.writeText "sign-key" "vm-sign-key\n";
+  ownerPassword = "vm-owner-password";
 in
 {
   name = "remora";
@@ -16,6 +17,9 @@ in
       { config, ... }:
       let
         address = config.networking.primaryIPAddress;
+        passwordHash = pkgs.runCommand "owner-password" { } ''
+          echo ${ownerPassword} | ${config.services.remora.package}/bin/remora hash-password > $out
+        '';
       in
       {
         imports = [ module ];
@@ -30,7 +34,7 @@ in
               turn_secret_file = turnSecret;
               force_relay = true;
             };
-            login.auto_confirm = true;
+            login.password_file = passwordHash;
           };
           coturn = {
             enable = true;
@@ -70,7 +74,7 @@ in
       server.wait_for_open_port(8080)
       server.wait_for_open_port(3478, "${serverAddress}")
 
-      remora = "python3 ${./session.py} http://server:8080 ${signKey}"
+      remora = "REMORA_OWNER_PASSWORD=${ownerPassword} python3 ${./session.py} http://server:8080 ${signKey}"
 
       with subtest("a host and a viewer start a session"):
           session = json.loads(client.succeed(f"{remora} session"))
@@ -99,7 +103,13 @@ in
 
       with subtest("no secret reaches the log"):
           journal = server.succeed("journalctl -u remora.service -o cat")
-          secrets = ["vm-turn-secret", "vm-sign-key", turn["credential"], session["token"]]
+          secrets = [
+              "vm-turn-secret",
+              "vm-sign-key",
+              "${ownerPassword}",
+              turn["credential"],
+              session["token"],
+          ]
           for secret in secrets:
               assert secret not in journal, "a secret was logged"
     '';

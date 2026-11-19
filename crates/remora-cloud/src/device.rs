@@ -48,11 +48,12 @@ impl From<Database> for Devices {
     }
 }
 
-/// A device as listed.
-struct Device {
-    id: String,
-    name: String,
-    platform: u8,
+/// A registered device.
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    /// In UU's platform numbering.
+    pub platform: u8,
 }
 
 impl Device {
@@ -138,7 +139,7 @@ impl Devices {
             .optional()
     }
 
-    fn get(&self, device_id: &str) -> rusqlite::Result<Option<Device>> {
+    pub fn get(&self, device_id: &str) -> rusqlite::Result<Option<Device>> {
         let query = format!("SELECT {} FROM devices WHERE id = ?1", Device::COLUMNS);
         self.0
             .connection()
