@@ -19,6 +19,13 @@ cargo test
 nix fmt
 ```
 
+## Acknowledgements
+
+Much of what Remora knows about the UU Remote protocol comes from
+[uu-remote-linux](https://github.com/VallierDev/uu-remote-linux) by VallierDev and contributors
+(GPL-3.0-or-later), a UU Remote host and viewer for Linux and the main client Remora targets.
+Remora is a separate implementation and contains no code from it.
+
 ## License
 
 | Path | License |
