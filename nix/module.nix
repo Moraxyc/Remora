@@ -116,7 +116,8 @@ in
                   description = ''
                     File holding the owner's password hash, as `remora hash-password` makes it.
                     The owner signs in with the password to confirm logins on the page their
-                    QR code opens.
+                    QR code opens. Leave it unset to sign everyone in with
+                    {option}`services.remora.settings.oidc` only.
                   '';
                 };
               };

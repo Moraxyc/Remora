@@ -35,6 +35,8 @@ force_relay = true
 # File holding the owner's password hash; make it with `remora hash-password > owner.password`.
 # A client's QR code opens a page on Remora, where the owner signs in with the password and
 # confirms or denies the login. Each client gets five tries, then one a minute; pick a long one.
+# Leave it unset to sign everyone in with `[oidc]` only; the sign-in page then goes straight to
+# the provider.
 password_file = "owner.password"
 # Confirm every QR login without asking anyone instead, so that anyone who can reach Remora
 # logs in as its user. Only for a private network.

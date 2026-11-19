@@ -35,6 +35,9 @@ Users sign in to the web app in one of two ways:
   capped in total too, which can also keep the owner out while someone is guessing; use a long
   password.
 
+Both can be set. To send everyone to the provider, leave `login.password_file` unset: the
+sign-in page then goes straight to it.
+
 To log a client in, open the address in its QR code (scan it with a phone, or copy it), sign
 in, and confirm: the client logs in as you. A browser stays signed in for 30 days. On a private
 network, `login.auto_confirm = true` instead logs every client in as the owner without asking.
