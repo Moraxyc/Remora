@@ -33,6 +33,10 @@ struct Args {
     /// File holding the secret shared with the TURN servers (coturn's `static-auth-secret`).
     #[arg(long, value_name = "PATH")]
     turn_secret_file: Option<PathBuf>,
+
+    /// Relay every session through TURN, so that peers never learn each other's addresses.
+    #[arg(long)]
+    force_relay: bool,
 }
 
 #[tokio::main]
@@ -56,8 +60,13 @@ async fn main() -> io::Result<()> {
         .map(|path| read_secret(path, "TURN secret"))
         .transpose()?
         .map(TurnSecret::new);
-    let ice = Ice::new(args.ice_servers, turn_secret)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let ice = Ice::new(args.ice_servers, turn_secret);
+    let ice = if args.force_relay {
+        ice.and_then(Ice::force_relay)
+    } else {
+        ice
+    }
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
     let public_url = match args.public_url {
         Some(url) => url,

@@ -25,6 +25,16 @@ const CREDENTIAL_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct Ice {
     stun: Vec<String>,
     turn: Option<Turn>,
+    force_relay: bool,
+}
+
+/// What both sides of one session are told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grant {
+    /// `iceServers`.
+    pub servers: Value,
+    /// Whether peers may only connect through TURN, which keeps their addresses from each other.
+    pub force_relay: bool,
 }
 
 #[derive(Debug)]
@@ -74,6 +84,7 @@ impl IceUrl {
 pub enum IceError {
     TurnWithoutSecret,
     SecretWithoutTurn,
+    RelayWithoutTurn,
 }
 
 impl fmt::Display for IceError {
@@ -81,6 +92,7 @@ impl fmt::Display for IceError {
         f.write_str(match self {
             Self::TurnWithoutSecret => "TURN servers need the secret shared with them",
             Self::SecretWithoutTurn => "a TURN secret was given but no TURN server",
+            Self::RelayWithoutTurn => "relaying every session needs a TURN server",
         })
     }
 }
@@ -102,12 +114,27 @@ impl Ice {
         Ok(Self {
             stun: stun.into_iter().map(|url| url.0).collect(),
             turn,
+            force_relay: false,
         })
     }
 
-    /// `iceServers` for a session of `user_id`, with fresh TURN credentials.
-    pub fn servers(&self, user_id: &str) -> Value {
-        self.servers_at(user_id, SystemTime::now())
+    /// Relays every session through TURN.
+    pub fn force_relay(self) -> Result<Self, IceError> {
+        if self.turn.is_none() {
+            return Err(IceError::RelayWithoutTurn);
+        }
+        Ok(Self {
+            force_relay: true,
+            ..self
+        })
+    }
+
+    /// ICE settings for a session of `user_id`, with fresh TURN credentials.
+    pub fn grant(&self, user_id: &str) -> Grant {
+        Grant {
+            servers: self.servers_at(user_id, SystemTime::now()),
+            force_relay: self.force_relay,
+        }
     }
 
     fn servers_at(&self, user_id: &str, now: SystemTime) -> Value {
@@ -156,7 +183,19 @@ mod tests {
 
     #[test]
     fn without_servers_there_are_none() {
-        assert_eq!(Ice::default().servers("1"), json!([]));
+        let grant = Ice::default().grant("1");
+        assert_eq!(grant.servers, json!([]));
+        assert!(!grant.force_relay);
+    }
+
+    #[test]
+    fn relaying_needs_turn() {
+        assert_eq!(
+            Ice::default().force_relay().unwrap_err(),
+            IceError::RelayWithoutTurn
+        );
+        let turn = Ice::new(urls(&["turn:a"]), Some(TurnSecret::new("s"))).unwrap();
+        assert!(turn.force_relay().unwrap().grant("1").force_relay);
     }
 
     // Expected credential computed independently:

@@ -14,6 +14,7 @@ use remora_proto::socketio::{encode_binary_event, encode_event, placeholder};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::ice::Grant;
 use crate::token::{Role, Room, random};
 
 /// Signaling connections in rooms, by device id.
@@ -131,7 +132,7 @@ impl Rooms {
         viewer_id: &str,
         header: &Value,
         connect_options: &[u8],
-        ice_servers: &Value,
+        ice: &Grant,
     ) -> Result<Value, Refused> {
         let mut rooms = self.0.lock().expect("rooms lock poisoned");
         let members = rooms.get_mut(device_id).ok_or(Refused::HostOffline)?;
@@ -143,8 +144,8 @@ impl Rooms {
             "ice_id": ice_id,
             "client_id": viewer_id,
             "app_control_id": app_control_id,
-            "iceServers": ice_servers,
-            "force_relay": false,
+            "iceServers": ice.servers,
+            "force_relay": ice.force_relay,
             "app_data": placeholder(0),
         });
         if let Some(streamer_data) = header.get("streamer_data") {
@@ -169,8 +170,8 @@ impl Rooms {
             "ice_id": ice_id,
             "client_id": host.id,
             "app_control_id": app_control_id,
-            "iceServers": ice_servers,
-            "force_relay": false,
+            "iceServers": ice.servers,
+            "force_relay": ice.force_relay,
         });
         members.sessions.insert(ice_id, viewer_id.to_owned());
         Ok(ack)
@@ -289,8 +290,11 @@ mod tests {
         }
     }
 
-    fn no_ice() -> Value {
-        json!([])
+    fn no_ice() -> Grant {
+        Grant {
+            servers: json!([]),
+            force_relay: false,
+        }
     }
 
     fn windows_viewer_options() -> Vec<u8> {

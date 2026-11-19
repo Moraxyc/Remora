@@ -222,14 +222,10 @@ impl Session {
                     .get("app_data")
                     .and_then(|value| event.attachment(value))
                     .unwrap_or_default();
-                let ice_servers = self.ice.servers(&self.room.sub);
-                let result = self.rooms.control(
-                    &self.room.device_id,
-                    &self.id,
-                    &header,
-                    options,
-                    &ice_servers,
-                );
+                let ice = self.ice.grant(&self.room.sub);
+                let result =
+                    self.rooms
+                        .control(&self.room.device_id, &self.id, &header, options, &ice);
                 let reply = match result {
                     Ok(granted) => {
                         tracing::info!(device_id = %self.room.device_id, "control granted");

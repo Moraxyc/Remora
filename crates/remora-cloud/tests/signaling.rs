@@ -394,11 +394,12 @@ async fn control_fails_once_the_host_is_gone() {
 }
 
 #[tokio::test]
-async fn both_sides_get_the_same_turn_credentials() {
+async fn both_sides_get_the_same_turn_settings() {
     let ice = Ice::new(
         vec!["turn:turn.test:3478".parse().unwrap()],
         Some(TurnSecret::new("test-turn-secret")),
     )
+    .and_then(Ice::force_relay)
     .unwrap();
     let (app, addr) = start(Config {
         ice,
@@ -433,6 +434,9 @@ async fn both_sides_get_the_same_turn_credentials() {
             .is_some_and(|c| !c.is_empty())
     );
 
+    assert_eq!(ack.args[1]["force_relay"], true);
+
     let be_controlled = host.event().await;
     assert_eq!(&be_controlled.args[0]["iceServers"], servers);
+    assert_eq!(be_controlled.args[0]["force_relay"], true);
 }
