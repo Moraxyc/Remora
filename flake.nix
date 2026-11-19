@@ -1,5 +1,5 @@
 {
-  description = "Unofficial third-party host for NetEase UU Remote";
+  description = "Self-hostable stand-in for the NetEase UU Remote cloud";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -20,6 +20,21 @@
         devShells = "dev";
         formatter = "dev";
       };
+
+      perSystem =
+        { pkgs, ... }:
+        {
+          packages.default = pkgs.callPackage ./nix/package.nix { };
+        };
+
+      flake.nixosModules.default =
+        { lib, pkgs, ... }:
+        {
+          imports = [ ./nix/module.nix ];
+          services.remora.package =
+            lib.mkDefault
+              inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
 
       partitions.dev = {
         extraInputsFlake = ./dev;

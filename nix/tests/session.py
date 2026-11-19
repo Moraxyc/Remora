@@ -1,0 +1,102 @@
+"""Plays a host and a viewer against Remora up to the point where a session starts, and prints
+the TURN server the viewer was given, as JSON.
+
+Usage: session.py BASE_URL SIGN_KEY_FILE
+"""
+
+import hashlib
+import hmac
+import json
+import sys
+import urllib.error
+import urllib.request
+
+from websockets.sync.client import connect
+
+BASE = sys.argv[1]
+with open(sys.argv[2], "rb") as key_file:
+    SIGN_KEY = key_file.read().rstrip(b"\n")
+
+
+def call(method, path, body=None, token=None, device=None, sign=True):
+    """Calls the REST API like a client does; returns (code, data)."""
+    data = b"" if body is None else json.dumps(body).encode()
+    headers = {}
+    if body is not None:
+        headers["content-type"] = "application/json"
+    if device:
+        headers["x-param-device-id"] = device
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    if sign:
+        params = sorted(
+            (name.lower(), value)
+            for name, value in headers.items()
+            if name.lower().startswith("x-param-")
+        )
+        message = method.encode() + path.encode()
+        message += "&".join(f"{name}={value}" for name, value in params).encode()
+        message += data
+        headers["x-param-sign"] = hmac.new(SIGN_KEY, message, hashlib.sha256).hexdigest()
+    request = urllib.request.Request(BASE + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request) as response:
+            envelope = json.load(response)
+    except urllib.error.HTTPError as error:
+        envelope = json.load(error)
+    return envelope["code"], envelope["data"]
+
+
+def ok(*args, **kwargs):
+    code, data = call(*args, **kwargs)
+    assert code == 0, (args[1], code)
+    return data
+
+
+def open_socket(room_token):
+    url = BASE.replace("http", "ws", 1) + "/socket.io/?EIO=4&transport=websocket"
+    socket = connect(url, additional_headers={"X-NRD-AUTH": room_token})
+    assert socket.recv().startswith("0"), "Engine.IO open"
+    socket.send("40")
+    assert socket.recv().startswith("40"), "Socket.IO connect"
+    return socket
+
+
+def recv(socket, prefix):
+    """The next text frame, answering pings, which must start with `prefix`."""
+    while True:
+        frame = socket.recv(timeout=10)
+        if frame == "2":
+            socket.send("3")
+            continue
+        assert isinstance(frame, str) and frame.startswith(prefix), (prefix, frame[:40])
+        return frame[len(prefix) :]
+
+
+assert call("POST", "/api/v1/qrcode/gen/login", sign=False)[0] == 1002, "unsigned calls fail"
+
+device = ok("POST", "/api/v1/device/windows/init", {"name": "vm", "client_id": "vm-host"})[
+    "device_id"
+]
+qr = ok("POST", "/api/v1/qrcode/gen/login")
+login = {"token": qr["status_query_ticket"], "qrcode_jump_url": qr["qrcode_jump_url"]}
+user = ok("POST", "/api/v1/login/by_qrcode", login)["token"]
+
+room = ok("POST", "/api/v1/room/create", {}, token=user, device=device)
+host = open_socket(room["token"])
+host.send('421["room_info"]')
+recv(host, "431")
+recv(host, '42["bmsg_push"')
+
+joined = ok(
+    "POST", f"/api/v1/room/join/by_device/{device}", {"force_join": False}, token=user
+)
+viewer = open_socket(joined["token"])
+viewer.send('451-5["control",{"app_data":{"_placeholder":true,"num":0}}]')
+viewer.send(b"\x08\x01")  # ConnectOptions { capture_type: CT_DESKTOP }
+outcome, grant = json.loads(recv(viewer, "435"))
+assert outcome == "success", grant
+recv(host, '451-["be-controlled"')
+
+turn = next(server for server in grant["iceServers"] if "username" in server)
+print(json.dumps({"force_relay": grant["force_relay"], **turn}))
