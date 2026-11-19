@@ -1,11 +1,13 @@
 //! Self-hostable stand-in for the UU Remote cloud.
 
+mod address;
 mod api;
 mod app;
 mod browser;
 mod database;
 mod device;
 mod ice;
+mod limit;
 mod login;
 mod oidc;
 mod password;
@@ -29,6 +31,7 @@ use axum::routing::{delete, get, post};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
+pub use address::{TrustedProxies, TrustedProxy};
 pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use oidc::{InvalidOidc, OidcProvider, OidcRegistration};
@@ -57,6 +60,8 @@ pub struct Config {
     pub owner_password: Option<OwnerPassword>,
     /// The OpenID Connect provider users sign in with.
     pub oidc: Option<OidcProvider>,
+    /// Reverse proxies whose `X-Forwarded-For` names the client.
+    pub trusted_proxies: TrustedProxies,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -145,6 +150,8 @@ struct Cloud {
     ice: Arc<Ice>,
     owner_password: Option<Arc<OwnerPassword>>,
     oidc: Option<Arc<OidcProvider>>,
+    trusted_proxies: TrustedProxies,
+    limits: Arc<limit::Limits>,
 }
 
 impl FromRef<Cloud> for room::Tickets {
@@ -168,6 +175,7 @@ impl FromRef<Cloud> for web::Web {
             password: cloud.owner_password.clone(),
             oidc: cloud.oidc.clone(),
             public_url: cloud.public_url.clone(),
+            limits: cloud.limits.clone(),
         }
     }
 }
@@ -193,8 +201,8 @@ impl FromRef<Cloud> for signaling::Admission {
 }
 
 /// The REST API, signaling, and the web app with its API. Serve it with connection info
-/// (`into_make_service_with_connect_info::<SocketAddr>`) so that login pages can show where a
-/// login came from.
+/// (`into_make_service_with_connect_info::<SocketAddr>`), so that limits tell clients apart and
+/// login pages can show where a login came from.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
@@ -210,6 +218,8 @@ pub fn router(config: Config) -> Router {
         ice: Arc::new(config.ice),
         owner_password: config.owner_password.map(Arc::new),
         oidc: config.oidc.map(Arc::new),
+        trusted_proxies: config.trusted_proxies,
+        limits: Default::default(),
     };
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))

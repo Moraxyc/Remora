@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::PublicUrl;
+use crate::address::ClientAddress;
 use crate::browser::{self, Browsers, SignedIn, read_cookie};
 use crate::device::Devices;
+use crate::limit::Limits;
 use crate::login::{Logins, Progress};
 use crate::oidc::OidcProvider;
 use crate::password::OwnerPassword;
@@ -46,6 +48,7 @@ pub struct Web {
     pub password: Option<Arc<OwnerPassword>>,
     pub oidc: Option<Arc<OidcProvider>>,
     pub public_url: PublicUrl,
+    pub limits: Arc<Limits>,
 }
 
 /// Why a request failed, as `{"error": "<code>"}` with a matching HTTP status.
@@ -59,6 +62,8 @@ pub enum WebError {
     WrongPassword,
     /// This server has no password to sign in with.
     PasswordOff,
+    /// The browser tried too often and has to wait.
+    TooManyRequests,
     Internal,
 }
 
@@ -71,6 +76,7 @@ impl IntoResponse for WebError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::WrongPassword => (StatusCode::UNAUTHORIZED, "wrong_password"),
             Self::PasswordOff => (StatusCode::NOT_FOUND, "password_off"),
+            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (status, Json(json!({ "error": code }))).into_response()
@@ -143,13 +149,17 @@ pub struct PasswordSignIn {
     password: String,
 }
 
-/// `POST /api/web/session`: signs the browser in as the owner with the password. Failed
-/// attempts are not limited yet.
+/// `POST /api/web/session`: signs the browser in as the owner with the password. Attempts are
+/// limited per client and in total.
 pub async fn sign_in_with_password(
     State(web): State<Web>,
+    ClientAddress(address): ClientAddress,
     Body(request): Body<PasswordSignIn>,
 ) -> Result<Response, WebError> {
     let password = web.password.clone().ok_or(WebError::PasswordOff)?;
+    if !web.limits.password(address) {
+        return Err(WebError::TooManyRequests);
+    }
     let correct = tokio::task::spawn_blocking(move || password.verify(&request.password))
         .await
         .unwrap_or(false);

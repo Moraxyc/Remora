@@ -5,6 +5,10 @@
 listen = "127.0.0.1:8080"
 # Origin clients reach Remora at. Required when `listen` is an unspecified address.
 public_url = "https://remora.example"
+# Reverse proxies, by address or network, whose X-Forwarded-For header names the client. Rate
+# limits and login pages go by the client's address; without this, connections through a proxy
+# all come from the proxy and share one limit.
+trusted_proxies = ["127.0.0.1", "::1"]
 # File holding the request signing key that clients are configured with. Without it, request
 # signatures are not checked. Tokens are what authenticates users, but registering a device and
 # starting a login need none, so on a server the internet can reach, use a random key that only
@@ -30,7 +34,7 @@ force_relay = true
 [login]
 # File holding the owner's password hash; make it with `remora hash-password > owner.password`.
 # A client's QR code opens a page on Remora, where the owner signs in with the password and
-# confirms or denies the login. Wrong passwords are not rate limited yet, so pick a long one.
+# confirms or denies the login. Each client gets five tries, then one a minute; pick a long one.
 password_file = "owner.password"
 # Confirm every QR login without asking anyone instead, so that anyone who can reach Remora
 # logs in as its user. Only for a private network.

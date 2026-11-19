@@ -25,6 +25,7 @@ pub fn config() -> Config {
         auto_confirm: true,
         owner_password: None,
         oidc: None,
+        trusted_proxies: Default::default(),
     }
 }
 

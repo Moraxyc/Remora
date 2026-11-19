@@ -4,19 +4,19 @@
 //! generated instead.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::extract::{ConnectInfo, FromRequestParts, State};
-use axum::http::request::Parts;
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::PublicUrl;
+use crate::address::ClientAddress;
 use crate::api::{self, ApiError, Body};
 use crate::device::{CallerDevice, Devices};
+use crate::limit::Limits;
 use crate::token::{TokenKey, random};
 use crate::user::{OWNER_ID, Sessions, Users};
 
@@ -58,7 +58,7 @@ impl Pending {
 pub struct Requester {
     /// The registered device the request came from, by name and UU platform number.
     pub device: Option<(String, u8)>,
-    /// The address the request came from, as this server saw it.
+    /// The client's address, as this server saw it or a trusted proxy named it.
     pub address: Option<IpAddr>,
     pub at: SystemTime,
 }
@@ -220,21 +220,6 @@ fn find<'a>(pending: &'a HashMap<String, Pending>, qr: &QrRef) -> Option<(&'a st
         .then_some((id.as_str(), login))
 }
 
-/// The address a request came from, when the server knows it.
-pub struct PeerAddress(pub Option<IpAddr>);
-
-impl<S: Send + Sync> FromRequestParts<S> for PeerAddress {
-    type Rejection = Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Infallible> {
-        let address = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(address)| address.ip().to_canonical());
-        Ok(Self(address))
-    }
-}
-
 #[derive(Serialize)]
 pub struct GenResponse {
     qrcode_jump_url: String,
@@ -245,9 +230,13 @@ pub struct GenResponse {
 pub async fn generate(
     State(logins): State<Logins>,
     State(devices): State<Devices>,
+    State(limits): State<Arc<Limits>>,
     CallerDevice(device_id): CallerDevice,
-    PeerAddress(address): PeerAddress,
+    ClientAddress(address): ClientAddress,
 ) -> Result<api::Ok<GenResponse>, ApiError> {
+    if !limits.qr_login(address) {
+        return Err(ApiError::TOO_MANY_REQUESTS);
+    }
     let device = match device_id {
         Some(id) => devices
             .get(&id)?

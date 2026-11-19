@@ -2240,6 +2240,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "httpdate",
+ "ipnet",
  "openidconnect",
  "prost",
  "remora-proto",

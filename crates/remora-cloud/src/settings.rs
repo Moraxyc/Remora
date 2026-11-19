@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::oidc::{InvalidOidc, OidcProvider, OidcRegistration};
 use crate::{
     Config, Database, DatabaseError, Ice, IceError, IceUrl, InvalidPasswordHash, OwnerPassword,
-    Ping, PublicUrl, ReconnectGrace, TurnSecret,
+    Ping, PublicUrl, ReconnectGrace, TrustedProxies, TrustedProxy, TurnSecret,
 };
 
 /// What the settings file says. Secrets stay in their own files, named here and read by
@@ -24,6 +24,9 @@ pub struct Settings {
     pub listen: SocketAddr,
     /// Origin clients reach this server at, when that is not `http://` plus `listen`.
     pub public_url: Option<PublicUrl>,
+    /// Reverse proxies, by address or network, whose `X-Forwarded-For` names the client.
+    #[serde(default)]
+    pub trusted_proxies: Vec<TrustedProxy>,
     /// File holding the request signing key. Without it, signatures are not checked.
     pub sign_key_file: Option<PathBuf>,
     /// SQLite database for what outlives a restart: registered devices and the key that signs
@@ -182,6 +185,7 @@ impl Settings {
             auto_confirm: self.login.auto_confirm,
             owner_password,
             oidc,
+            trusted_proxies: TrustedProxies::new(self.trusted_proxies),
         })
     }
 }
@@ -353,6 +357,7 @@ mod tests {
         assert!(!settings.login.auto_confirm);
         assert!(settings.login.password_file.is_some());
         assert_eq!(settings.ice.servers.len(), 2);
+        assert_eq!(settings.trusted_proxies.len(), 2);
     }
 
     #[test]
@@ -365,6 +370,7 @@ mod tests {
         }
         assert!(Settings::parse("public_url = \"remora.example\"").is_err());
         assert!(Settings::parse("[ice]\nservers = [\"http://x\"]").is_err());
+        assert!(Settings::parse("trusted_proxies = [\"localhost\"]").is_err());
     }
 
     #[test]

@@ -20,10 +20,13 @@
 			password = '';
 			await invalidate('remora:session');
 		} catch (error) {
+			const code = error instanceof ApiError ? error.code : null;
 			failure =
-				error instanceof ApiError && error.code === 'wrong_password'
+				code === 'wrong_password'
 					? 'Wrong password.'
-					: 'Signing in failed. Try again.';
+					: code === 'too_many_requests'
+						? 'Too many attempts. Wait a minute and try again.'
+						: 'Signing in failed. Try again.';
 		} finally {
 			busy = false;
 		}

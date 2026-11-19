@@ -2,6 +2,8 @@
 
 use std::convert::Infallible;
 
+use std::sync::Arc;
+
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use rusqlite::{OptionalExtension, Row, params};
@@ -9,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Database;
+use crate::address::ClientAddress;
 use crate::api::{self, ApiError, Body, Empty};
+use crate::limit::Limits;
 use crate::rooms::Rooms;
 use crate::user::User;
 
@@ -175,8 +179,13 @@ pub struct InitResponse {
 
 pub async fn windows_init(
     State(devices): State<Devices>,
+    State(limits): State<Arc<Limits>>,
+    ClientAddress(address): ClientAddress,
     Body(request): Body<InitRequest>,
 ) -> Result<api::Ok<InitResponse>, ApiError> {
+    if !limits.registration(address) {
+        return Err(ApiError::TOO_MANY_REQUESTS);
+    }
     if request.client_id.is_empty() {
         return Err(ApiError::INVALID_REQUEST);
     }

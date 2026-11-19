@@ -20,7 +20,9 @@ remora --config remora.toml
 
 [`contrib/remora.toml`](contrib/remora.toml) describes every setting, and
 [`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
-Serve it over TLS through a reverse proxy that passes WebSocket upgrades through.
+Serve it over TLS through a reverse proxy that passes WebSocket upgrades through, and list the
+proxy in `trusted_proxies` so that Remora sees clients' addresses in `X-Forwarded-For`: rate
+limits and login pages go by them.
 
 Users sign in to the web app in one of two ways:
 
@@ -29,7 +31,9 @@ Users sign in to the web app in one of two ways:
   provider lets sign in is a Remora user, with their own devices; Remora keeps no accounts of
   its own.
 - **The owner's password:** make the file with `remora hash-password > owner.password` and name
-  it in `login.password_file`. Wrong passwords are not rate limited yet, so use a long one.
+  it in `login.password_file`. Each client gets five tries, then one a minute, and guesses are
+  capped in total too, which can also keep the owner out while someone is guessing; use a long
+  password.
 
 To log a client in, open the address in its QR code (scan it with a phone, or copy it), sign
 in, and confirm: the client logs in as you. A browser stays signed in for 30 days. On a private

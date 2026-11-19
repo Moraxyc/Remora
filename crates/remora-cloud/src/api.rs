@@ -86,6 +86,14 @@ impl ApiError {
         code: 2001,
         msg: "device is offline",
     };
+
+    /// The client tried too often and has to wait. UU's own code for this is not known;
+    /// clients treat it like any other failure.
+    pub const TOO_MANY_REQUESTS: Self = Self {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: 1429,
+        msg: "too many requests",
+    };
 }
 
 impl IntoResponse for ApiError {
