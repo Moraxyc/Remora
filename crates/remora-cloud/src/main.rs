@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use remora_cloud::{Config, PublicUrl};
 use remora_proto::cloud::SignKey;
 use tracing_subscriber::EnvFilter;
 
@@ -13,6 +14,11 @@ struct Args {
     /// Address to serve the REST API on.
     #[arg(long, default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
+
+    /// Origin clients reach this server at, such as `https://remora.example`, when that is not
+    /// `http://` plus the listen address (behind a TLS proxy, say).
+    #[arg(long, value_name = "URL")]
+    public_url: Option<PublicUrl>,
 
     /// File holding the request signing key that clients are configured with. Without it,
     /// request signatures are not checked.
@@ -35,9 +41,26 @@ async fn main() -> io::Result<()> {
         tracing::warn!("no signing key configured; request signatures are not checked");
     }
 
+    let public_url = match args.public_url {
+        Some(url) => url,
+        None if args.listen.ip().is_unspecified() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--public-url is required when listening on all addresses",
+            ));
+        }
+        None => format!("http://{}", args.listen)
+            .parse()
+            .expect("a socket address is a valid authority"),
+    };
+
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %listener.local_addr()?, "listening");
-    axum::serve(listener, remora_cloud::router(sign_key))
+    let config = Config {
+        public_url,
+        sign_key,
+    };
+    axum::serve(listener, remora_cloud::router(config))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

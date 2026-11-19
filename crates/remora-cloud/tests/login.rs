@@ -45,7 +45,7 @@ const QR_EXPIRED: ApiError = ApiError::QrCodeExpired;
 
 #[tokio::test]
 async fn qr_login_is_confirmed_and_yields_a_token_with_csrf() {
-    let app = remora_cloud::router(None);
+    let app = remora_cloud::router(common::config());
     let qr = generate(&app).await;
     assert_ne!(qr.qrcode_jump_url, qr.status_query_ticket);
 
@@ -66,7 +66,7 @@ async fn qr_login_is_confirmed_and_yields_a_token_with_csrf() {
 
 #[tokio::test]
 async fn a_qr_login_is_used_once() {
-    let app = remora_cloud::router(None);
+    let app = remora_cloud::router(common::config());
     let qr = generate(&app).await;
     let (ticket, url) = (&qr.status_query_ticket, &qr.qrcode_jump_url);
 
@@ -77,7 +77,7 @@ async fn a_qr_login_is_used_once() {
 
 #[tokio::test]
 async fn rejects_unknown_or_mismatched_qr_logins() {
-    let app = remora_cloud::router(None);
+    let app = remora_cloud::router(common::config());
     let qr = generate(&app).await;
     let other = generate(&app).await;
     let (ticket, url) = (&qr.status_query_ticket, &qr.qrcode_jump_url);

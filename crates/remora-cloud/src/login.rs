@@ -133,7 +133,7 @@ pub async fn by_qrcode(
     };
     tracing::info!(user_id = OWNER_ID, "logged in by QR code");
     Ok(api::Ok(LoginResponse {
-        token: tokens.issue(OWNER_ID),
+        token: tokens.issue_user(OWNER_ID),
         user_id: OWNER_ID,
         nickname: OWNER_NICKNAME,
     }))

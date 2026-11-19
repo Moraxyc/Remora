@@ -13,7 +13,7 @@ const PATH: &str = "/api/v1/user/info";
 
 #[tokio::test]
 async fn user_info_needs_a_valid_token() {
-    let app = remora_cloud::router(None);
+    let app = remora_cloud::router(common::config());
     let token = common::log_in(&app).await;
 
     let info: Info = common::get(&app, PATH, Some(&token)).await.unwrap();

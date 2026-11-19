@@ -35,7 +35,7 @@ where
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .and_then(|token| tokens.verify(token))
+            .and_then(|token| tokens.verify_user(token))
             .map(|id| Self { id })
             .ok_or(ApiError::TOKEN_INVALID)
     }

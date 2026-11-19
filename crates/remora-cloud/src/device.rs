@@ -22,6 +22,11 @@ impl Devices {
             .or_insert_with(|| Uuid::new_v4().simple().to_string())
             .clone()
     }
+
+    pub fn contains(&self, device_id: &str) -> bool {
+        let devices = self.0.lock().expect("device lock poisoned");
+        devices.values().any(|id| id == device_id)
+    }
 }
 
 /// Body of `POST /api/v1/device/windows/init`. The name and hardware summary that clients also
