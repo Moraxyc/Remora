@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{FromRef, FromRequestParts, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use crate::Database;
-use crate::api::{self, ApiError};
+use crate::api::{self, ApiError, Empty};
 use crate::token::{TokenKey, UserToken, random};
 
 /// The only user.
@@ -38,6 +38,13 @@ impl Sessions {
             user_id: user_id.to_owned(),
             session_id,
         })
+    }
+
+    fn end(&self, session_id: &str) -> rusqlite::Result<()> {
+        self.0
+            .connection()
+            .execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
+        Ok(())
     }
 
     fn is_open(&self, token: &UserToken) -> rusqlite::Result<bool> {
@@ -100,4 +107,14 @@ pub async fn info(user: User) -> api::Ok<InfoResponse> {
         user_id: user.id,
         nickname: OWNER_NICKNAME,
     })
+}
+
+/// `POST /api/v1/user/logout`, with an empty body: ends the session of the token it carries.
+pub async fn logout(
+    user: User,
+    State(sessions): State<Sessions>,
+) -> Result<api::Ok<Empty>, ApiError> {
+    sessions.end(&user.session_id)?;
+    tracing::info!(user_id = %user.id, "logged out");
+    Ok(api::Ok(Empty {}))
 }

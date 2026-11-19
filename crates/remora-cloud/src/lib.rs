@@ -152,6 +152,7 @@ pub fn router(config: Config) -> Router {
         .route("/api/v1/qrcode/login/status", post(login::status))
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))
         .route("/api/v1/user/info", get(user::info))
+        .route("/api/v1/user/logout", post(user::logout))
         .route("/api/v1/room/create", post(room::create))
         .route(
             "/api/v1/room/join/by_device/{device_id}",

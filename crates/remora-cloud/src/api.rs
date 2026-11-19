@@ -11,6 +11,10 @@ use serde_json::json;
 /// Success: HTTP 200, `code` 0.
 pub struct Ok<T>(pub T);
 
+/// `data` of a success that has nothing to say: `{}`.
+#[derive(Serialize)]
+pub struct Empty {}
+
 impl<T: Serialize> IntoResponse for Ok<T> {
     fn into_response(self) -> Response {
         Json(json!({ "code": 0, "msg": "ok", "data": self.0 })).into_response()

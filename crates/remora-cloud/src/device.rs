@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::Database;
-use crate::api::{self, ApiError, Body};
+use crate::api::{self, ApiError, Body, Empty};
 use crate::rooms::Rooms;
 use crate::user::User;
 
@@ -262,6 +262,3 @@ pub async fn unbind(
     tracing::info!(user_id = %user.id, %device_id, "device unbound");
     Ok(api::Ok(Empty {}))
 }
-
-#[derive(Serialize)]
-pub struct Empty {}
