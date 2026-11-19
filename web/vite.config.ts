@@ -10,13 +10,14 @@ export default defineConfig({
 		sveltekit({
 			// A single-page app: every path that is not a file gets the fallback page.
 			adapter: adapter({ fallback: 'app.html' }),
-			// Lets the page's inline bootstrap run under a CSP without 'unsafe-inline'.
+			// Lets the page's inline bootstrap run under a CSP without 'unsafe-inline' for
+			// scripts. Styles allow it: Kit's route announcer has a style attribute.
 			csp: {
 				mode: 'hash',
 				directives: {
 					'default-src': ['none'],
 					'script-src': ['self'],
-					'style-src': ['self'],
+					'style-src': ['self', 'unsafe-inline'],
 					'img-src': ['self'],
 					'font-src': ['self'],
 					'connect-src': ['self']

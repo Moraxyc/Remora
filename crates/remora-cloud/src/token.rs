@@ -4,8 +4,6 @@
 //!   used until rejected. Each names its session (`sid`), which can be revoked.
 //! - Room tokens authenticate one signaling connection, as a device's host or as a viewer
 //!   joining it, and expire.
-//! - Browser tokens are the cookie of a browser the owner signed in with, and expire. Their
-//!   `csrf` claim goes into the forms of the pages they are used with.
 //!
 //! Each token names its kind, so one kind is never accepted as the other.
 
@@ -25,9 +23,6 @@ const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 /// How long a room token can be used to connect to signaling.
 const ROOM_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// How long a browser stays signed in.
-pub const BROWSER_TOKEN_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-
 /// Secret that signs every token.
 pub struct TokenKey([u8; 32]);
 
@@ -36,7 +31,6 @@ pub struct TokenKey([u8; 32]);
 enum Kind {
     User,
     Room,
-    Browser,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,19 +71,6 @@ pub enum Role {
         /// Joined with `force_join`: its desktop session ends other devices' ones.
         take_over: bool,
     },
-}
-
-#[derive(Serialize, Deserialize)]
-struct BrowserClaims {
-    kind: Kind,
-    csrf: String,
-    exp: u64,
-}
-
-/// What a browser token says: the token that the browser's forms have to carry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Browser {
-    pub csrf: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -139,21 +120,6 @@ impl TokenKey {
         (claims.kind == Kind::Room && claims.exp > now()).then_some(claims.room)
     }
 
-    pub fn issue_browser(&self) -> String {
-        self.sign(&BrowserClaims {
-            kind: Kind::Browser,
-            csrf: hex::encode(random::<16>()),
-            exp: now() + BROWSER_TOKEN_LIFETIME.as_secs(),
-        })
-    }
-
-    /// What an unexpired browser token this key issued says.
-    pub fn verify_browser(&self, token: &str) -> Option<Browser> {
-        let claims: BrowserClaims = self.verify(token)?;
-        (claims.kind == Kind::Browser && claims.exp > now())
-            .then_some(Browser { csrf: claims.csrf })
-    }
-
     fn sign(&self, claims: &impl Serialize) -> String {
         let payload = serde_json::to_vec(claims).expect("claims serialize");
         let unsigned = format!("{HEADER}.{}", URL_SAFE_NO_PAD.encode(payload));
@@ -185,7 +151,8 @@ impl fmt::Debug for TokenKey {
     }
 }
 
-fn now() -> u64 {
+/// Seconds since the Unix epoch.
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
@@ -271,29 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn browser_tokens_carry_their_csrf_and_expire() {
-        let key = TokenKey::generate();
-        let token = key.issue_browser();
-        let claims = payload(&token);
-        let browser = key.verify_browser(&token).unwrap();
-        assert_eq!(claims["csrf"], browser.csrf.as_str());
-        assert_ne!(key.issue_browser(), token);
-
-        let expired = key.sign(&BrowserClaims {
-            kind: Kind::Browser,
-            csrf: "c".into(),
-            exp: now() - 1,
-        });
-        assert_eq!(key.verify_browser(&expired), None);
-    }
-
-    #[test]
     fn kinds_are_not_interchangeable() {
         let key = TokenKey::generate();
         assert_eq!(key.verify_room(&key.issue_user(&user())), None);
         assert_eq!(key.verify_user(&key.issue_room(room())), None);
-        assert_eq!(key.verify_browser(&key.issue_user(&user())), None);
-        assert_eq!(key.verify_user(&key.issue_browser()), None);
     }
 
     #[test]

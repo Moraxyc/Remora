@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod browser;
 mod database;
 mod device;
 mod ice;
@@ -22,7 +23,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::FromRef;
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn_with_state, map_response};
 use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
@@ -49,7 +50,8 @@ pub struct Config {
     pub database: Database,
     /// Confirm every QR login as soon as it is generated, instead of asking the owner.
     pub auto_confirm: bool,
-    /// What the owner signs in to the web pages with. Without it, nobody can.
+    /// What the owner signs in to the web app with. Without it, nobody can sign in as the
+    /// owner.
     pub owner_password: Option<OwnerPassword>,
 }
 
@@ -128,6 +130,8 @@ impl std::error::Error for InvalidPublicUrl {}
 struct Cloud {
     devices: device::Devices,
     sessions: user::Sessions,
+    users: user::Users,
+    browsers: browser::Browsers,
     logins: login::Logins,
     tokens: Arc<token::TokenKey>,
     public_url: PublicUrl,
@@ -151,7 +155,7 @@ impl FromRef<Cloud> for web::Web {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             logins: cloud.logins.clone(),
-            tokens: cloud.tokens.clone(),
+            browsers: cloud.browsers.clone(),
             password: cloud.owner_password.clone(),
             public_url: cloud.public_url.clone(),
         }
@@ -178,13 +182,15 @@ impl FromRef<Cloud> for signaling::Admission {
     }
 }
 
-/// The REST API, signaling and the owner's web pages. Serve it with connection info
+/// The REST API, signaling, and the web app with its API. Serve it with connection info
 /// (`into_make_service_with_connect_info::<SocketAddr>`) so that login pages can show where a
 /// login came from.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
         sessions: config.database.clone().into(),
+        users: config.database.clone().into(),
+        browsers: config.database.clone().into(),
         logins: login::Logins::new(config.public_url.clone(), config.auto_confirm),
         tokens: config.database.tokens(),
         public_url: config.public_url,
@@ -216,14 +222,25 @@ pub fn router(config: Config) -> Router {
         )),
         None => api,
     };
+    let web_api = Router::new()
+        .route(
+            "/api/web/session",
+            get(web::session)
+                .post(web::sign_in_with_password)
+                .delete(web::sign_out),
+        )
+        .route(
+            "/api/web/logins/{id}",
+            get(web::login).post(web::decide_login),
+        )
+        .layer(map_response(web::no_store))
+        .with_state(cloud.clone());
     // Signaling requests carry the room token instead of a signature, and browsers sign
     // nothing.
-    let unsigned = Router::new()
+    let signaling = Router::new()
         .route("/socket.io/", get(signaling::connect))
-        .route("/login/{id}", get(web::show_login).post(web::decide_login))
-        .route("/signin", post(web::sign_in))
         .with_state(cloud);
-    api.merge(unsigned).fallback(app::serve)
+    api.merge(web_api).merge(signaling).fallback(app::serve)
 }
 
 #[cfg(test)]

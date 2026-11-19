@@ -12,10 +12,8 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 from websockets.sync.client import connect
@@ -60,40 +58,41 @@ def ok(*args, **kwargs):
     return data
 
 
-class NoRedirects(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args):
-        return None
-
-
-def browse(path, form=None, cookie=None):
-    """Loads a web page like a browser that does not follow redirects; returns
-    (status, headers, body)."""
-    data = None if form is None else urllib.parse.urlencode(form).encode()
-    request = urllib.request.Request(BASE + path, data=data)
+def browse(method, path, body=None, cookie=None, csrf=None):
+    """Calls the web app's API like the app does; returns (status, headers, JSON body)."""
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(BASE + path, data=data, method=method)
+    if body is not None:
+        request.add_header("content-type", "application/json")
     if cookie:
         request.add_header("cookie", cookie)
+    if csrf:
+        request.add_header("x-csrf-token", csrf)
     try:
-        response = urllib.request.build_opener(NoRedirects).open(request)
+        response = urllib.request.urlopen(request)
     except urllib.error.HTTPError as error:
         response = error
     with response:
-        return response.status, response.headers, response.read().decode()
+        text = response.read().decode()
+        return response.status, response.headers, json.loads(text) if text else None
 
 
 def confirm(qr_url):
     """Opens the QR code's page as the owner, signs in and confirms the login."""
     assert qr_url.startswith(BASE + "/login/"), "the QR code opens a page on Remora"
-    page = qr_url[len(BASE) :]
-    assert browse(page)[0] == 200
+    with urllib.request.urlopen(qr_url) as page:
+        assert b"<script" in page.read(), "the web app"
+    login = "/api/web/logins/" + qr_url.rsplit("/", 1)[1]
+    assert browse("GET", login)[0] == 200
     password = os.environ["REMORA_OWNER_PASSWORD"]
-    assert browse("/signin", {"password": "wrong", "next": page})[0] == 401
-    status, headers, _ = browse("/signin", {"password": password, "next": page})
-    assert status == 303, status
+    assert browse("POST", "/api/web/session", {"password": "wrong"})[0] == 401
+    status, headers, _ = browse("POST", "/api/web/session", {"password": password})
+    assert status == 204, status
     cookie = headers["set-cookie"].split(";")[0]
-    _, _, body = browse(page, cookie=cookie)
-    csrf = re.search(r'name="csrf" value="([^"]+)"', body).group(1)
-    status, _, _ = browse(page, {"csrf": csrf, "decision": "confirm"}, cookie)
-    assert status == 200, status
+    _, _, session = browse("GET", "/api/web/session", cookie=cookie)
+    csrf = session["signed_in"]["csrf"]
+    status, _, _ = browse("POST", login, {"decision": "confirm"}, cookie, csrf)
+    assert status == 204, status
 
 
 def open_socket(room_token):

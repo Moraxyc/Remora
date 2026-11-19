@@ -1,4 +1,5 @@
-//! What survives a restart, kept in SQLite: the token key, registered devices and user sessions.
+//! What survives a restart, kept in SQLite: the token key, users, registered devices, user
+//! sessions and signed-in browsers.
 
 use std::fmt;
 use std::path::Path;
@@ -32,6 +33,28 @@ const MIGRATIONS: &[&str] = &[
         device_id TEXT
     ) STRICT;
     CREATE INDEX sessions_by_device ON sessions (device_id);
+",
+    "
+    CREATE TABLE users (
+        -- Numeric, because clients and TURN usernames carry it.
+        id TEXT PRIMARY KEY,
+        -- Its OpenID Connect identity; none for the owner, who signs in with the password.
+        issuer TEXT,
+        subject TEXT,
+        name TEXT NOT NULL,
+        UNIQUE (issuer, subject)
+    ) STRICT;
+    INSERT INTO users (id, name) VALUES ('1', 'Owner');
+    -- Browsers signed in to the web app.
+    CREATE TABLE browsers (
+        -- SHA-256 of the cookie, so that the database holds no usable cookie.
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        csrf TEXT NOT NULL,
+        created INTEGER NOT NULL,
+        expires INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX browsers_by_user ON browsers (user_id);
 ",
 ];
 

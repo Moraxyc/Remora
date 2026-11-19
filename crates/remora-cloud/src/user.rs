@@ -1,4 +1,4 @@
-//! The user, and how requests prove they act for it.
+//! Users, and how clients' requests prove they act for one.
 
 use std::sync::Arc;
 
@@ -12,9 +12,39 @@ use crate::Database;
 use crate::api::{self, ApiError, Empty};
 use crate::token::{TokenKey, UserToken, random};
 
-/// The only user.
+/// The user who signs in with the password.
 pub const OWNER_ID: &str = "1";
-pub const OWNER_NICKNAME: &str = "Remora";
+
+/// Users, by numeric id. Each is the owner or an OpenID Connect identity.
+#[derive(Debug, Clone)]
+pub struct Users(Database);
+
+impl From<Database> for Users {
+    fn from(database: Database) -> Self {
+        Self(database)
+    }
+}
+
+/// A user as shown to them and to their clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+}
+
+impl Users {
+    pub fn get(&self, id: &str) -> rusqlite::Result<Option<Profile>> {
+        self.0
+            .connection()
+            .query_row("SELECT id, name FROM users WHERE id = ?1", [id], |row| {
+                Ok(Profile {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })
+            .optional()
+    }
+}
 
 /// Logins that have not been revoked. Each user token belongs to one.
 #[derive(Debug, Clone)]
@@ -98,15 +128,19 @@ where
 #[derive(Serialize)]
 pub struct InfoResponse {
     user_id: String,
-    nickname: &'static str,
+    nickname: String,
 }
 
 /// `GET /api/v1/user/info`.
-pub async fn info(user: User) -> api::Ok<InfoResponse> {
-    api::Ok(InfoResponse {
-        user_id: user.id,
-        nickname: OWNER_NICKNAME,
-    })
+pub async fn info(
+    user: User,
+    State(users): State<Users>,
+) -> Result<api::Ok<InfoResponse>, ApiError> {
+    let profile = users.get(&user.id)?.ok_or(ApiError::TOKEN_INVALID)?;
+    Ok(api::Ok(InfoResponse {
+        user_id: profile.id,
+        nickname: profile.name,
+    }))
 }
 
 /// `POST /api/v1/user/logout`, with an empty body: ends the session of the token it carries.

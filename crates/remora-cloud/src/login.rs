@@ -1,6 +1,7 @@
-//! QR-code login. The QR code holds the address of a page on this server: the owner opens it,
-//! which counts as scanning it, and confirms or denies the login there (see [`crate::web`]).
-//! With `auto_confirm`, every login is confirmed as soon as it is generated instead.
+//! QR-code login. The QR code holds the address of a page of the web app: a user opens it,
+//! which counts as scanning it, and confirms the login as themselves or denies it there (see
+//! [`crate::web`]). With `auto_confirm`, every login is confirmed for the owner as soon as it is
+//! generated instead.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -17,7 +18,7 @@ use crate::PublicUrl;
 use crate::api::{self, ApiError, Body};
 use crate::device::{CallerDevice, Devices};
 use crate::token::{TokenKey, random};
-use crate::user::{OWNER_ID, OWNER_NICKNAME, Sessions};
+use crate::user::{OWNER_ID, Sessions, Users};
 
 /// How long a generated QR code can be used to log in.
 const QR_LIFETIME: Duration = Duration::from_secs(180);
@@ -42,6 +43,8 @@ struct Pending {
     created: Instant,
     requester: Requester,
     state: watch::Sender<Progress>,
+    /// Who confirmed it, and so who it logs in.
+    user_id: Option<String>,
 }
 
 impl Pending {
@@ -112,10 +115,10 @@ impl Logins {
         let id = hex::encode(random::<32>());
         let ticket = hex::encode(random::<32>());
         let jump_url = format!("{}/login/{id}", self.public_url);
-        let state = if self.auto_confirm {
-            Progress::Confirmed
+        let (state, user_id) = if self.auto_confirm {
+            (Progress::Confirmed, Some(OWNER_ID.to_owned()))
         } else {
-            Progress::Waiting
+            (Progress::Waiting, None)
         };
         let mut pending = self.pending.lock().expect("login lock poisoned");
         pending.retain(|_, login| !login.expired());
@@ -127,6 +130,7 @@ impl Logins {
                 created: Instant::now(),
                 requester,
                 state: watch::Sender::new(state),
+                user_id,
             },
         );
         (ticket, jump_url)
@@ -152,21 +156,18 @@ impl Logins {
         }
     }
 
-    /// Takes a confirmed login out, so it is used only once.
-    fn redeem(&self, qr: &QrRef) -> bool {
+    /// Takes a confirmed login out, so it is used only once, and says whom it logs in.
+    fn redeem(&self, qr: &QrRef) -> Option<String> {
         let mut pending = self.pending.lock().expect("login lock poisoned");
-        let Some((id, login)) = find(&pending, qr) else {
-            return false;
-        };
+        let (id, login) = find(&pending, qr)?;
         if login.expired() || *login.state.borrow() != Progress::Confirmed {
-            return false;
+            return None;
         }
         let id = id.to_owned();
-        pending.remove(&id);
-        true
+        pending.remove(&id)?.user_id
     }
 
-    /// The owner opened the page of login `id`: marks it scanned, and says what it is.
+    /// Someone opened the page of login `id`: marks it scanned, and says what it is.
     pub fn scan(&self, id: &str) -> Option<(Progress, Requester)> {
         let pending = self.pending.lock().expect("login lock poisoned");
         let login = pending.get(id).filter(|login| !login.expired())?;
@@ -180,24 +181,35 @@ impl Logins {
         Some((*login.state.borrow(), login.requester.clone()))
     }
 
-    /// The owner confirmed or denied login `id`. A denied login is forgotten. Returns whether
-    /// the login was still waiting for a decision.
-    pub fn decide(&self, id: &str, confirm: bool) -> bool {
+    /// User `user_id` confirmed login `id`, which then logs in as them. Returns whether the
+    /// login was still waiting for a decision.
+    pub fn confirm(&self, id: &str, user_id: &str) -> bool {
         let mut pending = self.pending.lock().expect("login lock poisoned");
-        let Some(login) = pending.get(id).filter(|login| !login.expired()) else {
+        let Some(login) = undecided(&mut pending, id) else {
             return false;
         };
-        if *login.state.borrow() == Progress::Confirmed {
-            return false;
-        }
-        if confirm {
-            login.state.send_replace(Progress::Confirmed);
-        } else {
-            // Dropping the state wakes the client's poll, which then finds the login gone.
-            pending.remove(id);
-        }
+        login.user_id = Some(user_id.to_owned());
+        login.state.send_replace(Progress::Confirmed);
         true
     }
+
+    /// Someone denied login `id`, which is forgotten. Returns whether the login was still
+    /// waiting for a decision.
+    pub fn deny(&self, id: &str) -> bool {
+        let mut pending = self.pending.lock().expect("login lock poisoned");
+        if undecided(&mut pending, id).is_none() {
+            return false;
+        }
+        // Dropping the state wakes the client's poll, which then finds the login gone.
+        pending.remove(id);
+        true
+    }
+}
+
+fn undecided<'a>(pending: &'a mut HashMap<String, Pending>, id: &str) -> Option<&'a mut Pending> {
+    pending
+        .get_mut(id)
+        .filter(|login| !login.expired() && *login.state.borrow() != Progress::Confirmed)
 }
 
 /// The pending login `qr` names, with its id.
@@ -299,8 +311,8 @@ pub async fn status(
 #[derive(Serialize)]
 pub struct LoginResponse {
     token: String,
-    user_id: &'static str,
-    nickname: &'static str,
+    user_id: String,
+    nickname: String,
 }
 
 /// `POST /api/v1/login/by_qrcode`: trades a confirmed QR login for a user token, once.
@@ -308,17 +320,18 @@ pub async fn by_qrcode(
     State(logins): State<Logins>,
     State(tokens): State<Arc<TokenKey>>,
     State(sessions): State<Sessions>,
+    State(users): State<Users>,
     Body(qr): Body<QrRef>,
 ) -> Result<api::Ok<LoginResponse>, ApiError> {
-    if !logins.redeem(&qr) {
-        return Err(ApiError::QR_EXPIRED);
-    }
-    let session = sessions.start(OWNER_ID)?;
-    tracing::info!(user_id = OWNER_ID, "logged in by QR code");
+    let user_id = logins.redeem(&qr).ok_or(ApiError::QR_EXPIRED)?;
+    // A user who is gone by now has nobody to log in as.
+    let profile = users.get(&user_id)?.ok_or(ApiError::QR_EXPIRED)?;
+    let session = sessions.start(&profile.id)?;
+    tracing::info!(user_id = %profile.id, "logged in by QR code");
     Ok(api::Ok(LoginResponse {
         token: tokens.issue_user(&session),
-        user_id: OWNER_ID,
-        nickname: OWNER_NICKNAME,
+        user_id: profile.id,
+        nickname: profile.name,
     }))
 }
 
@@ -372,17 +385,18 @@ mod tests {
         let logins = logins(false);
         let (id, qr) = start(&logins);
         assert_eq!(state(&logins, &qr), Some(Progress::Waiting));
-        assert!(!logins.redeem(&qr), "not confirmed yet");
+        assert_eq!(logins.redeem(&qr), None, "not confirmed yet");
 
         let (scanned, _) = logins.scan(&id).unwrap();
         assert_eq!(scanned, Progress::Scanned);
         assert_eq!(state(&logins, &qr), Some(Progress::Scanned));
 
-        assert!(logins.decide(&id, true));
-        assert!(!logins.decide(&id, false), "already decided");
+        assert!(logins.confirm(&id, "7"));
+        assert!(!logins.deny(&id), "already decided");
+        assert!(!logins.confirm(&id, "8"), "already decided");
         assert_eq!(logins.scan(&id).unwrap().0, Progress::Confirmed);
-        assert!(logins.redeem(&qr));
-        assert!(!logins.redeem(&qr), "used once");
+        assert_eq!(logins.redeem(&qr).as_deref(), Some("7"), "as who confirmed");
+        assert_eq!(logins.redeem(&qr), None, "used once");
         assert!(logins.scan(&id).is_none());
     }
 
@@ -393,18 +407,18 @@ mod tests {
         let Check::Live { changes, .. } = logins.check(&qr) else {
             panic!("expected a live login");
         };
-        assert!(logins.decide(&id, false));
+        assert!(logins.deny(&id));
         assert!(changes.has_changed().is_err(), "the poll wakes up");
         assert!(matches!(logins.check(&qr), Check::Unknown));
-        assert!(!logins.redeem(&qr));
+        assert_eq!(logins.redeem(&qr), None);
     }
 
     #[test]
-    fn auto_confirmed_logins_need_no_owner() {
+    fn auto_confirmed_logins_log_the_owner_in() {
         let logins = logins(true);
         let (_, qr) = start(&logins);
         assert_eq!(state(&logins, &qr), Some(Progress::Confirmed));
-        assert!(logins.redeem(&qr));
+        assert_eq!(logins.redeem(&qr).as_deref(), Some(OWNER_ID));
     }
 
     #[test]
@@ -417,8 +431,8 @@ mod tests {
             qrcode_jump_url: qr.qrcode_jump_url.clone(),
         };
         assert!(matches!(logins.check(&crossed), Check::Unknown));
-        assert!(!logins.redeem(&crossed));
-        assert!(logins.redeem(&qr));
+        assert_eq!(logins.redeem(&crossed), None);
+        assert!(logins.redeem(&qr).is_some());
     }
 
     #[test]
@@ -428,7 +442,7 @@ mod tests {
         age(&logins, &id);
 
         assert!(logins.scan(&id).is_none());
-        assert!(!logins.decide(&id, true));
+        assert!(!logins.confirm(&id, OWNER_ID));
         assert!(matches!(logins.check(&qr), Check::Expired));
         assert!(matches!(logins.check(&qr), Check::Unknown));
     }
