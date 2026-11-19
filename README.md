@@ -20,6 +20,8 @@ remora --config remora.toml
 
 [`contrib/remora.toml`](contrib/remora.toml) describes every setting, and
 [`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
+[`contrib/remora.service`](contrib/remora.service) is a sandboxed systemd unit that runs
+`/usr/bin/remora` with `/etc/remora/remora.toml`.
 Serve it over TLS through a reverse proxy that passes WebSocket upgrades through, and list the
 proxy in `trusted_proxies` so that Remora sees clients' addresses in `X-Forwarded-For`: rate
 limits and login pages go by them.

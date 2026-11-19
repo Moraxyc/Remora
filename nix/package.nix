@@ -42,6 +42,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
   # HTTP clients load the system's CA certificates even when tests only talk to localhost.
   nativeCheckInputs = [ cacert ];
 
+  postInstall = ''
+    install -Dm644 -t $out/lib/systemd/system contrib/remora.service
+    substituteInPlace $out/lib/systemd/system/remora.service \
+      --replace-fail /usr/bin/remora $out/bin/remora
+  '';
+
   passthru = {
     workspace = lib.importTOML ../Cargo.toml;
     web = remora-web;

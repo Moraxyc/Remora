@@ -1,0 +1,38 @@
+[Unit]
+Description=Remora, a stand-in for the UU Remote cloud
+Documentation=https://github.com/Moraxyc/Remora
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/remora --config /etc/remora/remora.toml
+Restart=on-failure
+# Without a static remora user, systemd allocates one for each run. With one, the service runs as
+# it and can read settings and secrets that are root's but readable by the remora group.
+User=remora
+DynamicUser=yes
+StateDirectory=remora
+
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProcSubset=pid
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

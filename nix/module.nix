@@ -212,43 +212,19 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
+        # The package's unit sets up the sandbox; this adds the settings and their secrets.
+        systemd.packages = [ cfg.package ];
         systemd.services.remora = {
-          description = "Remora, a stand-in for the UU Remote cloud";
+          # A package without the unit leaves only this drop-in, which systemd refuses to load,
+          # rather than a unit that runs Remora as root outside the sandbox.
+          overrideStrategy = "asDropin";
           wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
           serviceConfig = {
-            ExecStart = "${lib.getExe cfg.package} --config ${configFile}";
-            Restart = "on-failure";
-            DynamicUser = true;
-            StateDirectory = "remora";
+            ExecStart = [
+              ""
+              "${lib.getExe cfg.package} --config ${configFile}"
+            ];
             LoadCredential = secrets;
-
-            CapabilityBoundingSet = "";
-            LockPersonality = true;
-            MemoryDenyWriteExecute = true;
-            PrivateDevices = true;
-            PrivateUsers = true;
-            ProcSubset = "pid";
-            ProtectClock = true;
-            ProtectControlGroups = true;
-            ProtectHome = true;
-            ProtectHostname = true;
-            ProtectKernelLogs = true;
-            ProtectKernelModules = true;
-            ProtectKernelTunables = true;
-            ProtectProc = "invisible";
-            RestrictAddressFamilies = [
-              "AF_INET"
-              "AF_INET6"
-            ];
-            RestrictNamespaces = true;
-            RestrictRealtime = true;
-            SystemCallArchitectures = "native";
-            SystemCallFilter = [
-              "@system-service"
-              "~@privileged"
-            ];
-            UMask = "0077";
           };
         };
       }
