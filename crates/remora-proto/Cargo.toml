@@ -1,6 +1,7 @@
 [package]
 name = "remora-proto"
 description = "UU Remote wire protocol: messages and codecs, no I/O"
+license = "MIT OR Apache-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

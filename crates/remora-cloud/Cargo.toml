@@ -1,6 +1,7 @@
 [package]
 name = "remora-cloud"
 description = "Self-hostable stand-in for the NetEase UU Remote cloud"
+license = "GPL-3.0-or-later"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -18,3 +18,12 @@ cargo build
 cargo test
 nix fmt
 ```
+
+## License
+
+| Crate | License |
+|---|---|
+| `remora-proto` | MIT OR Apache-2.0 |
+| `remora-cloud` | GPL-3.0-or-later |
+
+See the license files in each crate directory.
