@@ -8,7 +8,44 @@ This project is not affiliated with or endorsed by NetEase.
 
 ## Status
 
-Early development; nothing works yet.
+Early development. Hosts and viewers from uu-remote-linux log in, find each other and connect,
+peer to peer or relayed through coturn. Logins are confirmed automatically for now, so anyone
+who can reach the server can log in as its user: run it on a private network only.
+
+## Running
+
+```sh
+remora --config remora.toml
+```
+
+[`contrib/remora.toml`](contrib/remora.toml) describes every setting, and
+[`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
+Without `--config`, Remora serves on `127.0.0.1:8080` with no STUN or TURN server. Serve it over
+TLS through a reverse proxy that passes WebSocket upgrades through.
+
+Clients have to be pointed at Remora. uu-remote-linux has its API base URL in `src/auth.rs`.
+
+### NixOS
+
+The flake provides a module that runs Remora and, optionally, coturn next to it:
+
+```nix
+{
+  imports = [ remora.nixosModules.default ];
+
+  services.remora = {
+    enable = true;
+    settings.public_url = "https://remora.example";
+    # Shared by Remora and coturn; it only needs to be readable by root.
+    turnSecretFile = "/run/secrets/remora-turn";
+    coturn = {
+      enable = true;
+      domain = "turn.example";
+      openFirewall = true;
+    };
+  };
+}
+```
 
 ## Development
 
@@ -17,6 +54,7 @@ nix develop
 cargo build
 cargo test
 nix fmt
+nix flake check   # includes a NixOS VM test
 ```
 
 ## Acknowledgements
