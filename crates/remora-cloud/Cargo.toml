@@ -1,0 +1,13 @@
+[package]
+name = "remora-cloud"
+description = "Self-hostable stand-in for the NetEase UU Remote cloud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "remora"
+path = "src/main.rs"
+
+[dependencies]
