@@ -112,6 +112,23 @@ pub fn encode_event(name: &str, args: &[Value], ack_id: Option<u64>) -> String {
     format!("42{id}{}", Value::Array(array))
 }
 
+/// `45<n>-[<ack id>]["name",args…]`, to be followed by `attachments` binary frames that the
+/// args point to with [`placeholder`].
+pub fn encode_binary_event(
+    name: &str,
+    args: &[Value],
+    attachments: usize,
+    ack_id: Option<u64>,
+) -> String {
+    let event = encode_event(name, args, ack_id);
+    format!("45{attachments}-{}", &event[2..])
+}
+
+/// The value standing in for binary attachment `num`.
+pub fn placeholder(num: usize) -> Value {
+    json!({ "_placeholder": true, "num": num })
+}
+
 /// `40{"sid":…}`: a server accepting a connect to the default namespace.
 pub fn encode_connected(sid: &str) -> String {
     format!("40{}", json!({ "sid": sid }))
@@ -386,6 +403,27 @@ mod tests {
             r#"437["success",{"reconnect_key":"k"}]"#
         );
         assert_eq!(encode_ack(8, &[]), "438[]");
+    }
+
+    #[test]
+    fn encodes_binary_events() {
+        let args = [json!({"ice_id": "i", "app_data": placeholder(0)})];
+        let header = encode_binary_event("be-controlled", &args, 1, None);
+        assert_eq!(
+            header,
+            r#"451-["be-controlled",{"app_data":{"_placeholder":true,"num":0},"ice_id":"i"}]"#
+        );
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.text(&header), Ok(None));
+        let Some(Packet::Event(event)) = decoder.binary(b"\x08\x01").unwrap() else {
+            panic!("expected event");
+        };
+        assert_eq!(
+            event.attachment(&event.args[0]["app_data"]),
+            Some(&b"\x08\x01"[..])
+        );
+
+        assert!(encode_binary_event("control", &[], 1, Some(12)).starts_with("451-12["));
     }
 
     #[test]
