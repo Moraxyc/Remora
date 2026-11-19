@@ -25,7 +25,12 @@
       };
 
       perSystem =
-        { config, final, ... }:
+        {
+          config,
+          final,
+          lib,
+          ...
+        }:
         {
           overlayAttrs = {
             inherit (config.packages) remora remora-web uu-remote-linux;
@@ -35,6 +40,17 @@
             remora-web = final.callPackage ./nix/web.nix { };
             uu-remote-linux = final.callPackage ./nix/uu-remote-linux.nix { };
             default = config.packages.remora;
+          }
+          // lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
+            # A self-contained binary for release archives. The web app is platform-independent
+            # output, so it is built natively instead of with a static Node.js.
+            remora-static = final.pkgsStatic.callPackage ./nix/package.nix {
+              inherit (config.packages) remora-web;
+              # Prefixing AWS-LC's symbols fails to build in pkgsStatic: listing them runs a Go
+              # program that needs a C linker. The prefix only keeps AWS-LC apart from another
+              # OpenSSL in the same process, and the static binary links no other.
+              aws-lc = final.pkgsStatic.aws-lc.override { symbolPrefix = null; };
+            };
           };
         };
 
