@@ -1,0 +1,22 @@
+# Remora settings. Every setting is optional; the values here are examples.
+
+# Address to serve the REST API and signaling on. Put a TLS proxy in front of it.
+listen = "127.0.0.1:8080"
+# Origin clients reach Remora at. Required when `listen` is an unspecified address.
+public_url = "https://remora.example"
+# File holding the request signing key that clients are configured with. Without it, request
+# signatures are not checked; tokens are what authenticates users.
+# sign_key_file = "/etc/remora/sign.key"
+# Log filter: a level, or directives such as "info,remora_cloud=debug".
+log = "info"
+
+[ice]
+# STUN and TURN servers for sessions. Without any, peers only find each other on the same
+# network.
+servers = ["stun:turn.example:3478", "turn:turn.example:3478"]
+# File holding the secret shared with the TURN servers (coturn's `static-auth-secret`).
+# Relative paths are relative to this file.
+turn_secret_file = "turn.secret"
+# Relay every session through TURN, so that host and viewer never learn each other's
+# addresses.
+force_relay = true

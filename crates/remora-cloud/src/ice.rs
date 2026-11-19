@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, KeyInit, Mac};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::Sha1;
 
@@ -59,8 +60,17 @@ impl fmt::Debug for TurnSecret {
 }
 
 /// A `stun:`, `stuns:`, `turn:` or `turns:` URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct IceUrl(String);
+
+impl TryFrom<String> for IceUrl {
+    type Error = &'static str;
+
+    fn try_from(url: String) -> Result<Self, Self::Error> {
+        url.parse()
+    }
+}
 
 impl FromStr for IceUrl {
     type Err = &'static str;

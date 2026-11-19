@@ -6,6 +6,7 @@ mod ice;
 mod login;
 mod room;
 mod rooms;
+mod settings;
 mod signaling;
 mod signing;
 mod token;
@@ -20,8 +21,10 @@ use axum::extract::FromRef;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
+use serde::Deserialize;
 
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
+pub use settings::{IceSettings, Settings, SettingsError};
 pub use signaling::Ping;
 
 pub struct Config {
@@ -38,7 +41,8 @@ pub struct Config {
 
 /// The `http://` or `https://` origin clients reach this server at, such as
 /// `https://remora.example`. Clients sign the path they send, so it cannot have a path prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
 pub struct PublicUrl {
     secure: bool,
     authority: String,
@@ -71,6 +75,14 @@ impl FromStr for PublicUrl {
             secure,
             authority: authority.to_owned(),
         })
+    }
+}
+
+impl TryFrom<String> for PublicUrl {
+    type Error = InvalidPublicUrl;
+
+    fn try_from(url: String) -> Result<Self, InvalidPublicUrl> {
+        url.parse()
     }
 }
 
