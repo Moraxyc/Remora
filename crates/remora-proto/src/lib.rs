@@ -1,6 +1,7 @@
 //! UU Remote wire protocol: messages and codecs, no I/O.
 
 pub mod cloud;
+pub mod socketio;
 
 /// Generated from `proto/gv_pb.proto`.
 #[allow(clippy::large_enum_variant, reason = "generated oneofs")]
