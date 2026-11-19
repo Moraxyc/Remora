@@ -2,6 +2,7 @@
 
 mod api;
 mod device;
+mod ice;
 mod login;
 mod room;
 mod rooms;
@@ -20,6 +21,7 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
 
+pub use ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use signaling::Ping;
 
 pub struct Config {
@@ -30,6 +32,8 @@ pub struct Config {
     pub sign_key: Option<SignKey>,
     /// Signaling heartbeat.
     pub ping: Ping,
+    /// STUN and TURN servers for sessions.
+    pub ice: Ice,
 }
 
 /// The `http://` or `https://` origin clients reach this server at, such as
@@ -90,6 +94,7 @@ struct Cloud {
     public_url: PublicUrl,
     rooms: rooms::Rooms,
     ping: Ping,
+    ice: Arc<Ice>,
 }
 
 /// The REST API and signaling, with fresh state.
@@ -101,6 +106,7 @@ pub fn router(config: Config) -> Router {
         public_url: config.public_url,
         rooms: Default::default(),
         ping: config.ping,
+        ice: Arc::new(config.ice),
     };
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))

@@ -19,6 +19,7 @@ pub fn config() -> Config {
         public_url: PUBLIC_URL.parse().unwrap(),
         sign_key: None,
         ping: Ping::default(),
+        ice: Default::default(),
     }
 }
 

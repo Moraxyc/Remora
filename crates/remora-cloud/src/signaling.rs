@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
+use crate::ice::Ice;
 use crate::rooms::{Frame, Outbound, Peer, Refused, Rooms};
 use crate::token::{Role, Room, TokenKey, random};
 
@@ -62,6 +63,7 @@ pub async fn connect(
     State(tokens): State<Arc<TokenKey>>,
     State(rooms): State<Rooms>,
     State(ping): State<Ping>,
+    State(ice): State<Arc<Ice>>,
     headers: HeaderMap,
 ) -> Response {
     if query.eio != "4" || query.transport != "websocket" {
@@ -74,10 +76,10 @@ pub async fn connect(
     let Some(room) = room else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    upgrade.on_upgrade(move |socket| serve(socket, room, rooms, ping))
+    upgrade.on_upgrade(move |socket| serve(socket, room, rooms, ping, ice))
 }
 
-async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping) {
+async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping, ice: Arc<Ice>) {
     let id = hex::encode(random::<16>());
     let (outbox, mut inbox) = mpsc::channel(OUTBOX_CAPACITY);
     rooms.join(
@@ -102,6 +104,7 @@ async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping) {
         id: id.clone(),
         room,
         rooms: rooms.clone(),
+        ice,
     };
     let reason = session.run(open, &mut inbox, ping).await;
 
@@ -116,6 +119,7 @@ struct Session {
     id: String,
     room: Room,
     rooms: Rooms,
+    ice: Arc<Ice>,
 }
 
 impl Session {
@@ -218,9 +222,14 @@ impl Session {
                     .get("app_data")
                     .and_then(|value| event.attachment(value))
                     .unwrap_or_default();
-                let result = self
-                    .rooms
-                    .control(&self.room.device_id, &self.id, &header, options);
+                let ice_servers = self.ice.servers(&self.room.sub);
+                let result = self.rooms.control(
+                    &self.room.device_id,
+                    &self.id,
+                    &header,
+                    options,
+                    &ice_servers,
+                );
                 let reply = match result {
                     Ok(granted) => {
                         tracing::info!(device_id = %self.room.device_id, "control granted");

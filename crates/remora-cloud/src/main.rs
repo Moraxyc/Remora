@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use remora_cloud::{Config, Ping, PublicUrl};
+use remora_cloud::{Config, Ice, IceUrl, Ping, PublicUrl, TurnSecret};
 use remora_proto::cloud::SignKey;
 use tracing_subscriber::EnvFilter;
 
@@ -24,6 +24,15 @@ struct Args {
     /// request signatures are not checked.
     #[arg(long, value_name = "PATH")]
     sign_key_file: Option<PathBuf>,
+
+    /// STUN or TURN server for sessions, such as `turn:turn.example:3478`. Repeat for several.
+    /// Without any, peers only find each other on the same network.
+    #[arg(long = "ice-server", value_name = "URL")]
+    ice_servers: Vec<IceUrl>,
+
+    /// File holding the secret shared with the TURN servers (coturn's `static-auth-secret`).
+    #[arg(long, value_name = "PATH")]
+    turn_secret_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -35,11 +44,20 @@ async fn main() -> io::Result<()> {
     let sign_key = args
         .sign_key_file
         .as_deref()
-        .map(read_sign_key)
-        .transpose()?;
+        .map(|path| read_secret(path, "signing key"))
+        .transpose()?
+        .map(SignKey::new);
     if sign_key.is_none() {
         tracing::warn!("no signing key configured; request signatures are not checked");
     }
+    let turn_secret = args
+        .turn_secret_file
+        .as_deref()
+        .map(|path| read_secret(path, "TURN secret"))
+        .transpose()?
+        .map(TurnSecret::new);
+    let ice = Ice::new(args.ice_servers, turn_secret)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
     let public_url = match args.public_url {
         Some(url) => url,
@@ -60,6 +78,7 @@ async fn main() -> io::Result<()> {
         public_url,
         sign_key,
         ping: Ping::default(),
+        ice,
     };
     axum::serve(listener, remora_cloud::router(config))
         .with_graceful_shutdown(async {
@@ -68,16 +87,20 @@ async fn main() -> io::Result<()> {
         .await
 }
 
-/// The whole file, minus a trailing newline, is the key.
-fn read_sign_key(path: &Path) -> io::Result<SignKey> {
-    let contents = std::fs::read(path)?;
-    let key = contents.strip_suffix(b"\n").unwrap_or(&contents);
-    let key = key.strip_suffix(b"\r").unwrap_or(key);
-    if key.is_empty() {
+/// The whole file, minus a trailing newline, is the secret.
+fn read_secret(path: &Path, what: &str) -> io::Result<Vec<u8>> {
+    let mut contents = std::fs::read(path)?;
+    if contents.ends_with(b"\n") {
+        contents.pop();
+        if contents.ends_with(b"\r") {
+            contents.pop();
+        }
+    }
+    if contents.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "the signing key file is empty",
+            format!("the {what} file is empty"),
         ));
     }
-    Ok(SignKey::new(key))
+    Ok(contents)
 }

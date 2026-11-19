@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use remora_cloud::{Config, Ping};
+use remora_cloud::{Config, Ice, Ping, TurnSecret};
 use remora_proto::cloud::{ApiError, SignKey};
 use remora_proto::socketio::{Decoder, Event, Packet};
 use serde_json::{Value, json};
@@ -391,4 +391,48 @@ async fn control_fails_once_the_host_is_gone() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("control kept succeeding without a host");
+}
+
+#[tokio::test]
+async fn both_sides_get_the_same_turn_credentials() {
+    let ice = Ice::new(
+        vec!["turn:turn.test:3478".parse().unwrap()],
+        Some(TurnSecret::new("test-turn-secret")),
+    )
+    .unwrap();
+    let (app, addr) = start(Config {
+        ice,
+        ..common::config()
+    })
+    .await;
+    let (mut host, token, device_id) = online_host(&app, addr).await;
+    let joined = join(&app, &token, &device_id).await.unwrap();
+    let mut viewer = Client::connect(addr, joined["token"].as_str().unwrap())
+        .await
+        .unwrap();
+    viewer.handshake().await;
+
+    let header = json!({ "app_data": { "_placeholder": true, "num": 0 } });
+    viewer
+        .send(&format!("451-3{}", json!(["control", header])))
+        .await;
+    viewer.send_binary(&[]).await;
+    let Some(Packet::Ack(ack)) = viewer.recv().await else {
+        panic!("expected the control ack");
+    };
+    let servers = &ack.args[1]["iceServers"];
+    assert_eq!(servers[0]["urls"], json!(["turn:turn.test:3478"]));
+    assert!(
+        servers[0]["username"]
+            .as_str()
+            .is_some_and(|name| name.ends_with(":1"))
+    );
+    assert!(
+        servers[0]["credential"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty())
+    );
+
+    let be_controlled = host.event().await;
+    assert_eq!(&be_controlled.args[0]["iceServers"], servers);
 }

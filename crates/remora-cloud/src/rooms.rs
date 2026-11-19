@@ -131,6 +131,7 @@ impl Rooms {
         viewer_id: &str,
         header: &Value,
         connect_options: &[u8],
+        ice_servers: &Value,
     ) -> Result<Value, Refused> {
         let mut rooms = self.0.lock().expect("rooms lock poisoned");
         let members = rooms.get_mut(device_id).ok_or(Refused::HostOffline)?;
@@ -142,7 +143,7 @@ impl Rooms {
             "ice_id": ice_id,
             "client_id": viewer_id,
             "app_control_id": app_control_id,
-            "iceServers": [],
+            "iceServers": ice_servers,
             "force_relay": false,
             "app_data": placeholder(0),
         });
@@ -168,7 +169,7 @@ impl Rooms {
             "ice_id": ice_id,
             "client_id": host.id,
             "app_control_id": app_control_id,
-            "iceServers": [],
+            "iceServers": ice_servers,
             "force_relay": false,
         });
         members.sessions.insert(ice_id, viewer_id.to_owned());
@@ -288,6 +289,10 @@ mod tests {
         }
     }
 
+    fn no_ice() -> Value {
+        json!([])
+    }
+
     fn windows_viewer_options() -> Vec<u8> {
         ConnectOptions {
             capture_type: 1,
@@ -306,7 +311,9 @@ mod tests {
             json!({ "app_control_id": "app", "streamer_data": "{}", "app_data": placeholder(0) });
         let options = windows_viewer_options();
 
-        let ack = rooms.control("d", &viewer.id, &header, &options).unwrap();
+        let ack = rooms
+            .control("d", &viewer.id, &header, &options, &no_ice())
+            .unwrap();
         let ice_id = ack["ice_id"].as_str().unwrap().to_owned();
         assert_eq!(ack["client_id"], "host");
         assert_eq!(ack["app_control_id"], "app");
@@ -347,10 +354,10 @@ mod tests {
         let rooms = Rooms::default();
         let viewer = member(&rooms, Role::Viewer, "viewer");
         let options = windows_viewer_options();
-        let refused = rooms.control("d", &viewer.id, &json!({}), &options);
+        let refused = rooms.control("d", &viewer.id, &json!({}), &options, &no_ice());
         assert_eq!(refused, Err(Refused::HostOffline));
         assert_eq!(
-            rooms.control("other", &viewer.id, &json!({}), &options),
+            rooms.control("other", &viewer.id, &json!({}), &options, &no_ice()),
             Err(Refused::HostOffline)
         );
     }
@@ -361,7 +368,9 @@ mod tests {
         let mut host = member(&rooms, Role::Host, "host");
         let mut viewer = member(&rooms, Role::Viewer, "viewer");
         let mut other = member(&rooms, Role::Viewer, "other");
-        let ack = rooms.control("d", &viewer.id, &json!({}), &[]).unwrap();
+        let ack = rooms
+            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .unwrap();
         let ice_id = ack["ice_id"].clone();
         host.event();
 
@@ -380,7 +389,10 @@ mod tests {
         let rooms = Rooms::default();
         let mut host = member(&rooms, Role::Host, "host");
         let viewer = member(&rooms, Role::Viewer, "viewer");
-        let ice_id = rooms.control("d", &viewer.id, &json!({}), &[]).unwrap()["ice_id"].clone();
+        let ice_id = rooms
+            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .unwrap()["ice_id"]
+            .clone();
         host.event();
 
         rooms.leave(&viewer.room, &viewer.id);
@@ -392,7 +404,10 @@ mod tests {
         );
 
         let mut viewer = member(&rooms, Role::Viewer, "viewer");
-        let ice_id = rooms.control("d", &viewer.id, &json!({}), &[]).unwrap()["ice_id"].clone();
+        let ice_id = rooms
+            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .unwrap()["ice_id"]
+            .clone();
         host.event();
         rooms.leave(&host.room, &host.id);
         let left = viewer.event();
@@ -409,7 +424,9 @@ mod tests {
         let rooms = Rooms::default();
         let mut older = member(&rooms, Role::Host, "older");
         let mut viewer = member(&rooms, Role::Viewer, "viewer");
-        rooms.control("d", &viewer.id, &json!({}), &[]).unwrap();
+        rooms
+            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .unwrap();
         older.event();
 
         let _newer = member(&rooms, Role::Host, "newer");
