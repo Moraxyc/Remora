@@ -21,9 +21,10 @@ nix fmt
 
 ## License
 
-| Crate | License |
+| Path | License |
 |---|---|
-| `remora-proto` | MIT OR Apache-2.0 |
-| `remora-cloud` | GPL-3.0-or-later |
+| `crates/remora-proto` | MIT OR Apache-2.0 |
+| `crates/remora-cloud` | GPL-3.0-or-later |
+| everything else | MIT |
 
-See the license files in each crate directory.
+See the license files in each directory.
