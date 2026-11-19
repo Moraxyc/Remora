@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 /// `{"alg":"HS256","typ":"JWT"}`, base64url-encoded.
@@ -36,6 +36,20 @@ impl TokenKey {
         format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode(signature))
     }
 
+    /// The user id of a token this key issued, or `None` for anything else.
+    pub fn verify(&self, token: &str) -> Option<String> {
+        let (unsigned, signature) = token.rsplit_once('.')?;
+        let (header, payload) = unsigned.split_once('.')?;
+        if header != HEADER {
+            return None;
+        }
+        let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+        self.mac(unsigned).verify_slice(&signature).ok()?;
+        let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
+        let claims: VerifiedClaims = serde_json::from_slice(&payload).ok()?;
+        Some(claims.sub)
+    }
+
     fn mac(&self, unsigned: &str) -> Hmac<Sha256> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC accepts any key length");
         mac.update(unsigned.as_bytes());
@@ -54,6 +68,11 @@ struct Claims<'a> {
     sub: &'a str,
     csrf: &'a str,
     iat: u64,
+}
+
+#[derive(Deserialize)]
+struct VerifiedClaims {
+    sub: String,
 }
 
 /// `N` bytes from the OS random source.
@@ -99,6 +118,25 @@ mod tests {
                 .verify_slice(&signature)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn verifies_only_its_own_untampered_tokens() {
+        let key = TokenKey::generate();
+        let token = key.issue("1");
+        assert_eq!(key.verify(&token).as_deref(), Some("1"));
+        assert_eq!(TokenKey::generate().verify(&token), None);
+
+        let parts: Vec<&str> = token.split('.').collect();
+        let forged_payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"2","csrf":"x","iat":0}"#);
+        let forged = format!("{}.{forged_payload}.{}", parts[0], parts[2]);
+        assert_eq!(key.verify(&forged), None);
+
+        let none_alg = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        assert_eq!(key.verify(&format!("{none_alg}.{}.", parts[1])), None);
+        assert_eq!(key.verify(&format!("{token}.x")), None);
+        assert_eq!(key.verify(""), None);
+        assert_eq!(key.verify("a.b"), None);
     }
 
     #[test]

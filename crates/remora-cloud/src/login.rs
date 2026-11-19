@@ -10,13 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{self, ApiError, Body};
 use crate::token::{TokenKey, random};
+use crate::user::{OWNER_ID, OWNER_NICKNAME};
 
 /// How long a generated QR code can be used to log in.
 const QR_LIFETIME: Duration = Duration::from_secs(180);
-
-/// The only user.
-const OWNER_ID: &str = "1";
-const OWNER_NICKNAME: &str = "Remora";
 
 /// QR logins that have been generated and not yet used, keyed by their status ticket.
 #[derive(Debug, Default, Clone)]

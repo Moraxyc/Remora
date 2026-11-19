@@ -5,13 +5,14 @@ mod device;
 mod login;
 mod signing;
 mod token;
+mod user;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::FromRef;
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
+use axum::routing::{get, post};
 use remora_proto::cloud::SignKey;
 
 /// Everything the endpoints share. All of it lives in memory for now.
@@ -35,6 +36,7 @@ pub fn router(sign_key: Option<SignKey>) -> Router {
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
         .route("/api/v1/login/by_qrcode", post(login::by_qrcode))
+        .route("/api/v1/user/info", get(user::info))
         .with_state(cloud);
     match sign_key {
         Some(key) => app.layer(from_fn_with_state(

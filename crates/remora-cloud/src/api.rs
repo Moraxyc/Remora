@@ -31,6 +31,12 @@ impl ApiError {
         code: 1001,
     };
 
+    /// The user token is missing, invalid or expired: clients log in again.
+    pub const TOKEN_INVALID: Self = Self {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: 1120,
+    };
+
     /// The QR login is unknown, expired or already used.
     pub const QR_EXPIRED: Self = Self {
         status: StatusCode::BAD_REQUEST,
