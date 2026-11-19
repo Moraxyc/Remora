@@ -53,7 +53,7 @@ jobs:
             exit 1
           fi
 
-      - run: nix build .#remora-static --print-build-logs
+      - run: nix build .#remora-static .#remora-deb --print-build-logs
 
       - name: Pack
         run: |
@@ -61,11 +61,14 @@ jobs:
           cp result/bin/remora README.md crates/remora-cloud/LICENSE contrib/* "$ARCHIVE"/
           tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE"
           sha256sum "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          install -Dm644 -t deb result-1/*.deb
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARCHIVE }}
-          path: ${{ env.ARCHIVE }}.tar.gz*
+          path: |
+            ${{ env.ARCHIVE }}.tar.gz*
+            deb/*.deb
           if-no-files-found: error
 
   publish:
@@ -93,6 +96,17 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # pkgs.moraxyc.com indexes the Debian packages of each release that carries this manifest,
+      # under the asset name its registration of Remora names. The tool always writes
+      # moraxyc-manifest.json and verifies that name, so the rename comes last.
+      - name: Write the APT manifest
+        run: |
+          for operation in manifest verify-artifacts; do
+            nix run --inputs-from ./dev moraxyc-repo#moraxyc-repo -- \
+              "$operation" --artifacts dist/deb --project remora --tag "$GITHUB_REF_NAME"
+          done
+          mv dist/deb/moraxyc-manifest.json dist/deb/remora-apt-manifest.json
+
       # With release immutability on, a published release can no longer gain or change assets,
       # so every asset goes onto a draft first. A rerun after a failure reuses that draft.
       - name: Publish an immutable GitHub release
@@ -103,13 +117,14 @@ jobs:
           if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          assets=(dist/*.tar.gz* dist/deb/*)
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false
           if [ "$(gh release view "$GITHUB_REF_NAME" --json isImmutable --jq .isImmutable)" != true ]; then
             echo "::error::The release is not immutable; turn on release immutability in the repository settings"
             exit 1
           fi
           gh release verify "$GITHUB_REF_NAME"
-          for asset in dist/*; do
+          for asset in "${assets[@]}"; do
             gh release verify-asset "$GITHUB_REF_NAME" "$asset"
           done
