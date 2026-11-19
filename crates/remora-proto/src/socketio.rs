@@ -6,11 +6,15 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 pub const CONNECT: &str = "40";
+pub const PING: &str = "2";
 pub const PONG: &str = "3";
+
+/// Largest message a server advertises it accepts, in bytes.
+pub const MAX_PAYLOAD: u64 = 1_000_000;
 
 /// Server handshake, the `0{…}` open packet.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -24,6 +28,30 @@ pub struct Handshake {
 }
 
 impl Handshake {
+    /// The open packet a server sends: WebSocket only, so no upgrades.
+    pub fn encode(&self) -> String {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Open<'a> {
+            sid: &'a str,
+            upgrades: [&'a str; 0],
+            ping_interval: u64,
+            ping_timeout: u64,
+            max_payload: u64,
+        }
+        let open = Open {
+            sid: &self.sid,
+            upgrades: [],
+            ping_interval: self.ping_interval,
+            ping_timeout: self.ping_timeout,
+            max_payload: MAX_PAYLOAD,
+        };
+        format!(
+            "0{}",
+            serde_json::to_string(&open).expect("open packet serializes")
+        )
+    }
+
     /// How long without a server ping before the connection counts as dead.
     pub fn liveness_timeout(&self) -> Duration {
         let ms = self.ping_interval.saturating_add(self.ping_timeout);
@@ -82,6 +110,16 @@ pub fn encode_event(name: &str, args: &[Value], ack_id: Option<u64>) -> String {
     array.extend_from_slice(args);
     let id = ack_id.map(|id| id.to_string()).unwrap_or_default();
     format!("42{id}{}", Value::Array(array))
+}
+
+/// `40{"sid":…}`: a server accepting a connect to the default namespace.
+pub fn encode_connected(sid: &str) -> String {
+    format!("40{}", json!({ "sid": sid }))
+}
+
+/// `43<id>[args…]`.
+pub fn encode_ack(id: u64, args: &[Value]) -> String {
+    format!("43{id}{}", Value::Array(args.to_vec()))
 }
 
 /// Reassembles packets from WebSocket frames.
@@ -325,6 +363,29 @@ mod tests {
             decoder.binary(b"late").is_err(),
             "the broken packet was dropped"
         );
+    }
+
+    #[test]
+    fn encodes_server_packets() {
+        let handshake = Handshake {
+            sid: "abc".into(),
+            ping_interval: 25000,
+            ping_timeout: 20000,
+        };
+        let open = handshake.encode();
+        assert_eq!(
+            open,
+            r#"0{"sid":"abc","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}"#
+        );
+        assert_eq!(decode(&open), Packet::Open(handshake));
+
+        assert_eq!(encode_connected("abc"), r#"40{"sid":"abc"}"#);
+        assert_eq!(decode(&encode_connected("abc")), Packet::Connected);
+        assert_eq!(
+            encode_ack(7, &[json!("success"), json!({"reconnect_key": "k"})]),
+            r#"437["success",{"reconnect_key":"k"}]"#
+        );
+        assert_eq!(encode_ack(8, &[]), "438[]");
     }
 
     #[test]
