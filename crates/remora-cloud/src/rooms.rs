@@ -4,6 +4,9 @@
 //! session with the host, named by an `ice_id` the cloud assigns. After that, `soac` and
 //! `forward_setting` pass between the two, each addressed by the receiver's `client_id`. On
 //! the way, `client_id` is rewritten to the sender's, which is what the receiver answers to.
+//!
+//! Only one viewer device at a time controls the desktop. Tool sessions (files, terminal, port
+//! mapping) and further sessions from the controlling device are not limited.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,8 +28,25 @@ pub struct Rooms(Arc<Mutex<HashMap<String, Members>>>);
 struct Members {
     host: Option<Peer>,
     viewers: HashMap<String, Peer>,
-    /// Open sessions: the viewer's client id, by `ice_id`.
-    sessions: HashMap<String, String>,
+    /// Open sessions, by `ice_id`.
+    sessions: HashMap<String, Session>,
+}
+
+#[derive(Debug)]
+struct Session {
+    /// The viewer connection's client id.
+    viewer: String,
+    /// The device the viewer runs on, if known.
+    from_device: Option<String>,
+    desktop: bool,
+}
+
+impl Session {
+    /// Whether this is a desktop session held from a device other than `device`. A viewer that
+    /// did not name its device counts as another device.
+    fn holds_desktop_against(&self, device: Option<&str>) -> bool {
+        self.desktop && (self.from_device.is_none() || self.from_device.as_deref() != device)
+    }
 }
 
 /// One signaling connection.
@@ -66,13 +86,15 @@ impl Peer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     HostOffline,
+    /// Another device controls the desktop, and this viewer did not ask to take over.
+    ControlledElsewhere,
 }
 
 impl Rooms {
     pub fn join(&self, room: &Room, peer: Peer) {
         let mut rooms = self.0.lock().expect("rooms lock poisoned");
         let members = rooms.entry(room.device_id.clone()).or_default();
-        match room.role {
+        match &room.role {
             Role::Host => {
                 if let Some(previous) = members.host.replace(peer) {
                     // A full outbox means that connection is stuck; it times out by itself.
@@ -80,7 +102,7 @@ impl Rooms {
                     members.end_sessions_with_host(&previous.id);
                 }
             }
-            Role::Viewer => {
+            Role::Viewer { .. } => {
                 members.viewers.insert(peer.id.clone(), peer);
             }
         }
@@ -98,11 +120,11 @@ impl Rooms {
                 members.end_sessions_with_host(id);
             }
             Role::Host => {}
-            Role::Viewer => {
+            Role::Viewer { .. } => {
                 members.viewers.remove(id);
                 let host = members.host.as_ref();
-                members.sessions.retain(|ice_id, viewer| {
-                    if viewer != id {
+                members.sessions.retain(|ice_id, session| {
+                    if session.viewer != id {
                         return true;
                     }
                     if let Some(host) = host {
@@ -117,6 +139,17 @@ impl Rooms {
         }
     }
 
+    /// Whether a device other than `from_device` controls the desktop of `device_id`.
+    pub fn controlled_elsewhere(&self, device_id: &str, from_device: Option<&str>) -> bool {
+        let rooms = self.0.lock().expect("rooms lock poisoned");
+        rooms.get(device_id).is_some_and(|members| {
+            members
+                .sessions
+                .values()
+                .any(|session| session.holds_desktop_against(from_device))
+        })
+    }
+
     pub fn is_online(&self, device_id: &str) -> bool {
         let rooms = self.0.lock().expect("rooms lock poisoned");
         rooms
@@ -124,19 +157,43 @@ impl Rooms {
             .is_some_and(|members| members.host.is_some())
     }
 
-    /// A viewer asks to control the host: forwards `be-controlled` with the viewer's
-    /// `ConnectOptions`, and returns what the viewer's `control` is acknowledged with.
+    /// The viewer `viewer_id`, connected with `room`, asks to control the host: forwards
+    /// `be-controlled` with the viewer's `ConnectOptions`, and returns what the viewer's
+    /// `control` is acknowledged with.
     pub fn control(
         &self,
-        device_id: &str,
+        room: &Room,
         viewer_id: &str,
         header: &Value,
         connect_options: &[u8],
         ice: &Grant,
     ) -> Result<Value, Refused> {
+        let (from_device, take_over) = match &room.role {
+            Role::Viewer {
+                from_device,
+                take_over,
+            } => (from_device.as_deref(), *take_over),
+            Role::Host => (None, false),
+        };
         let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let members = rooms.get_mut(device_id).ok_or(Refused::HostOffline)?;
-        let host = members.host.as_ref().ok_or(Refused::HostOffline)?;
+        let members = rooms.get_mut(&room.device_id).ok_or(Refused::HostOffline)?;
+        let host = members.host.clone().ok_or(Refused::HostOffline)?;
+
+        let desktop = is_desktop(connect_options);
+        if desktop {
+            let held: Vec<String> = members
+                .sessions
+                .iter()
+                .filter(|(_, session)| session.holds_desktop_against(from_device))
+                .map(|(ice_id, _)| ice_id.clone())
+                .collect();
+            if !held.is_empty() && !take_over {
+                return Err(Refused::ControlledElsewhere);
+            }
+            for ice_id in held {
+                members.end_session(&ice_id, &host);
+            }
+        }
 
         let ice_id = hex::encode(random::<16>());
         let app_control_id = header.get("app_control_id").cloned().unwrap_or_default();
@@ -173,7 +230,12 @@ impl Rooms {
             "iceServers": ice.servers,
             "force_relay": ice.force_relay,
         });
-        members.sessions.insert(ice_id, viewer_id.to_owned());
+        let session = Session {
+            viewer: viewer_id.to_owned(),
+            from_device: from_device.map(str::to_owned),
+            desktop,
+        };
+        members.sessions.insert(ice_id, session);
         Ok(ack)
     }
 
@@ -184,15 +246,18 @@ impl Rooms {
         let Some(members) = rooms.get(&room.device_id) else {
             return false;
         };
-        let target = match room.role {
+        let target = match &room.role {
             Role::Host => body
                 .get("client_id")
                 .and_then(Value::as_str)
                 .and_then(|id| members.viewers.get(id)),
-            Role::Viewer => {
+            Role::Viewer { .. } => {
                 let ice_id = body.pointer("/data/ice_id").and_then(Value::as_str);
                 let own = ice_id.is_some_and(|ice_id| {
-                    members.sessions.get(ice_id).map(String::as_str) == Some(from)
+                    members
+                        .sessions
+                        .get(ice_id)
+                        .is_some_and(|session| session.viewer == from)
                 });
                 members.host.as_ref().filter(|_| own)
             }
@@ -208,12 +273,32 @@ impl Rooms {
 impl Members {
     /// The host went away: every viewer in a session with it is told the host left.
     fn end_sessions_with_host(&mut self, host_id: &str) {
-        for (ice_id, viewer) in self.sessions.drain() {
-            if let Some(viewer) = self.viewers.get(&viewer) {
+        for (ice_id, session) in self.sessions.drain() {
+            if let Some(viewer) = self.viewers.get(&session.viewer) {
                 viewer.event("left", json!({ "ice_id": ice_id, "client_id": host_id }));
             }
         }
     }
+
+    /// Ends one session as if each side had left the other.
+    fn end_session(&mut self, ice_id: &str, host: &Peer) {
+        let Some(session) = self.sessions.remove(ice_id) else {
+            return;
+        };
+        host.event(
+            "released",
+            json!({ "ice_id": ice_id, "client_id": session.viewer }),
+        );
+        if let Some(viewer) = self.viewers.get(&session.viewer) {
+            viewer.event("left", json!({ "ice_id": ice_id, "client_id": host.id }));
+        }
+    }
+}
+
+/// Whether `ConnectOptions` ask for the desktop rather than a tool: capture types unknown (0),
+/// desktop (1) and window (2).
+fn is_desktop(connect_options: &[u8]) -> bool {
+    ConnectOptions::decode(connect_options).map_or(true, |options| options.capture_type <= 2)
 }
 
 /// The viewer's platform as `be-controlled` names it, from the `ConnectOptions` client type.
@@ -290,6 +375,13 @@ mod tests {
         }
     }
 
+    fn viewer_on(device: Option<&str>) -> Role {
+        Role::Viewer {
+            from_device: device.map(str::to_owned),
+            take_over: false,
+        }
+    }
+
     fn no_ice() -> Grant {
         Grant {
             servers: json!([]),
@@ -310,13 +402,13 @@ mod tests {
     fn control_reaches_the_host_and_soac_flows_both_ways() {
         let rooms = Rooms::default();
         let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, Role::Viewer, "viewer");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
         let header =
             json!({ "app_control_id": "app", "streamer_data": "{}", "app_data": placeholder(0) });
         let options = windows_viewer_options();
 
         let ack = rooms
-            .control("d", &viewer.id, &header, &options, &no_ice())
+            .control(&viewer.room, &viewer.id, &header, &options, &no_ice())
             .unwrap();
         let ice_id = ack["ice_id"].as_str().unwrap().to_owned();
         assert_eq!(ack["client_id"], "host");
@@ -356,12 +448,16 @@ mod tests {
     #[test]
     fn control_needs_the_host_online() {
         let rooms = Rooms::default();
-        let viewer = member(&rooms, Role::Viewer, "viewer");
+        let viewer = member(&rooms, viewer_on(None), "viewer");
         let options = windows_viewer_options();
-        let refused = rooms.control("d", &viewer.id, &json!({}), &options, &no_ice());
+        let refused = rooms.control(&viewer.room, &viewer.id, &json!({}), &options, &no_ice());
         assert_eq!(refused, Err(Refused::HostOffline));
+        let elsewhere = Room {
+            device_id: "other".into(),
+            ..viewer.room.clone()
+        };
         assert_eq!(
-            rooms.control("other", &viewer.id, &json!({}), &options, &no_ice()),
+            rooms.control(&elsewhere, &viewer.id, &json!({}), &options, &no_ice()),
             Err(Refused::HostOffline)
         );
     }
@@ -370,10 +466,10 @@ mod tests {
     fn relays_only_within_a_session() {
         let rooms = Rooms::default();
         let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, Role::Viewer, "viewer");
-        let mut other = member(&rooms, Role::Viewer, "other");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
+        let mut other = member(&rooms, viewer_on(None), "other");
         let ack = rooms
-            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
             .unwrap();
         let ice_id = ack["ice_id"].clone();
         host.event();
@@ -392,9 +488,9 @@ mod tests {
     fn leaving_ends_the_other_sides_sessions() {
         let rooms = Rooms::default();
         let mut host = member(&rooms, Role::Host, "host");
-        let viewer = member(&rooms, Role::Viewer, "viewer");
+        let viewer = member(&rooms, viewer_on(None), "viewer");
         let ice_id = rooms
-            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
             .unwrap()["ice_id"]
             .clone();
         host.event();
@@ -407,9 +503,9 @@ mod tests {
             json!({ "ice_id": ice_id, "client_id": "viewer" })
         );
 
-        let mut viewer = member(&rooms, Role::Viewer, "viewer");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
         let ice_id = rooms
-            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
             .unwrap()["ice_id"]
             .clone();
         host.event();
@@ -427,9 +523,9 @@ mod tests {
     fn a_newer_host_kicks_the_older_one() {
         let rooms = Rooms::default();
         let mut older = member(&rooms, Role::Host, "older");
-        let mut viewer = member(&rooms, Role::Viewer, "viewer");
+        let mut viewer = member(&rooms, viewer_on(None), "viewer");
         rooms
-            .control("d", &viewer.id, &json!({}), &[], &no_ice())
+            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
             .unwrap();
         older.event();
 
@@ -442,6 +538,85 @@ mod tests {
             rooms.is_online("d"),
             "the older host leaving keeps the newer one"
         );
+    }
+
+    fn options(capture_type: i32) -> Vec<u8> {
+        ConnectOptions {
+            capture_type,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn one_device_at_a_time_controls_the_desktop() {
+        const DESKTOP: i32 = 1;
+        const TERMINAL: i32 = 8;
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
+        let phone = member(&rooms, viewer_on(Some("phone")), "phone");
+        let laptop = member(&rooms, viewer_on(Some("laptop")), "laptop");
+        let control = |viewer: &Member, capture_type| {
+            rooms.control(
+                &viewer.room,
+                &viewer.id,
+                &json!({}),
+                &options(capture_type),
+                &no_ice(),
+            )
+        };
+
+        control(&phone, DESKTOP).unwrap();
+        host.event();
+        assert!(rooms.controlled_elsewhere("d", Some("laptop")));
+        assert!(rooms.controlled_elsewhere("d", None));
+        assert!(!rooms.controlled_elsewhere("d", Some("phone")));
+
+        assert_eq!(control(&laptop, DESKTOP), Err(Refused::ControlledElsewhere));
+        assert!(host.idle());
+        control(&laptop, TERMINAL).unwrap();
+        host.event();
+        control(&phone, DESKTOP).unwrap();
+        host.event();
+    }
+
+    #[test]
+    fn taking_over_ends_the_other_devices_desktop_sessions() {
+        let rooms = Rooms::default();
+        let mut host = member(&rooms, Role::Host, "host");
+        let mut phone = member(&rooms, viewer_on(Some("phone")), "phone");
+        let laptop = member(
+            &rooms,
+            Role::Viewer {
+                from_device: Some("laptop".into()),
+                take_over: true,
+            },
+            "laptop",
+        );
+        let desktop = options(1);
+        let ice_id = rooms
+            .control(&phone.room, &phone.id, &json!({}), &desktop, &no_ice())
+            .unwrap()["ice_id"]
+            .clone();
+        host.event();
+
+        rooms
+            .control(&laptop.room, &laptop.id, &json!({}), &desktop, &no_ice())
+            .unwrap();
+        let released = host.event();
+        assert_eq!(released.name, "released");
+        assert_eq!(
+            released.args[0],
+            json!({ "ice_id": ice_id, "client_id": "phone" })
+        );
+        assert_eq!(host.event().name, "be-controlled");
+        let left = phone.event();
+        assert_eq!(left.name, "left");
+        assert_eq!(
+            left.args[0],
+            json!({ "ice_id": ice_id, "client_id": "host" })
+        );
+        assert!(!rooms.controlled_elsewhere("d", Some("laptop")));
     }
 
     #[test]

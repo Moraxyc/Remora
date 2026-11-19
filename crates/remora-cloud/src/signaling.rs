@@ -90,7 +90,7 @@ async fn serve(socket: WebSocket, room: Room, rooms: Rooms, ping: Ping, ice: Arc
         },
     );
     let device_id = room.device_id.clone();
-    let role = room.role;
+    let role = room.role.clone();
     tracing::info!(%device_id, ?role, "signaling connected");
 
     let open = Handshake {
@@ -202,7 +202,7 @@ impl Session {
 
     fn answer_event(&self, mut event: Event) -> Vec<String> {
         let ack = |args: &[Value]| event.ack_id.map(|id| encode_ack(id, args));
-        match (self.room.role, event.name.as_str()) {
+        match (&self.room.role, event.name.as_str()) {
             (Role::Host, "room_info") => {
                 let ready = json!({ "data": { "status": "online", "publisher_availability_status": "ready" } });
                 ack(&[json!({})])
@@ -216,24 +216,28 @@ impl Session {
                     .into_iter()
                     .collect()
             }
-            (Role::Viewer, "control") => {
+            (Role::Viewer { .. }, "control") => {
                 let header = event.args.first().cloned().unwrap_or_default();
                 let options = header
                     .get("app_data")
                     .and_then(|value| event.attachment(value))
                     .unwrap_or_default();
                 let ice = self.ice.grant(&self.room.sub);
-                let result =
-                    self.rooms
-                        .control(&self.room.device_id, &self.id, &header, options, &ice);
+                let result = self
+                    .rooms
+                    .control(&self.room, &self.id, &header, options, &ice);
                 let reply = match result {
                     Ok(granted) => {
                         tracing::info!(device_id = %self.room.device_id, "control granted");
                         [json!("success"), granted]
                     }
-                    Err(Refused::HostOffline) => {
-                        tracing::info!(device_id = %self.room.device_id, "control refused: host offline");
-                        [json!("failure"), json!({ "reason": "host offline" })]
+                    Err(refused) => {
+                        let reason = match refused {
+                            Refused::HostOffline => "host offline",
+                            Refused::ControlledElsewhere => "controlled from another device",
+                        };
+                        tracing::info!(device_id = %self.room.device_id, reason, "control refused");
+                        [json!("failure"), json!({ "reason": reason })]
                     }
                 };
                 ack(&reply).into_iter().collect()

@@ -97,6 +97,15 @@ struct Cloud {
     ice: Arc<Ice>,
 }
 
+impl FromRef<Cloud> for room::Tickets {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            tokens: cloud.tokens.clone(),
+            public_url: cloud.public_url.clone(),
+        }
+    }
+}
+
 /// The REST API and signaling, with fresh state.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {

@@ -46,17 +46,23 @@ struct UserClaims {
 pub struct Room {
     pub sub: String,
     pub device_id: String,
+    #[serde(flatten)]
     pub role: Role,
 }
 
 /// Which side of the room a connection is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
 pub enum Role {
     /// The device's own host.
     Host,
     /// A viewer that joined the room to control the host.
-    Viewer,
+    Viewer {
+        /// The device the viewer runs on, when it said so.
+        from_device: Option<String>,
+        /// Joined with `force_join`: its desktop session ends other devices' ones.
+        take_over: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

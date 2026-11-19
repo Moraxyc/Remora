@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use std::convert::Infallible;
+
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -13,7 +16,25 @@ use crate::rooms::Rooms;
 use crate::user::User;
 
 /// Identifies the calling installation once it has registered.
-pub const DEVICE_ID_HEADER: &str = "x-param-device-id";
+const DEVICE_ID_HEADER: &str = "x-param-device-id";
+
+/// The calling installation's device id, if it sent one. Nothing vouches for it: it is the
+/// device the caller says it is.
+pub struct CallerDevice(pub Option<String>);
+
+impl<S: Send + Sync> FromRequestParts<S> for CallerDevice {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Infallible> {
+        let id = parts
+            .headers
+            .get(DEVICE_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        Ok(Self(id))
+    }
+}
 
 /// What `device/windows/init` registers as, in UU's platform numbering.
 const PLATFORM_WINDOWS: u8 = 1;
@@ -140,14 +161,11 @@ pub async fn list(
     user: User,
     State(devices): State<Devices>,
     State(rooms): State<Rooms>,
-    headers: HeaderMap,
+    CallerDevice(caller): CallerDevice,
 ) -> api::Ok<ListResponse> {
-    let caller = headers
-        .get(DEVICE_ID_HEADER)
-        .and_then(|value| value.to_str().ok());
     let registry = devices.0.lock().expect("device lock poisoned");
     let current_device = caller
-        .and_then(|id| registry.get_key_value(id))
+        .and_then(|id| registry.get_key_value(&id))
         .map(|(id, device)| entry(id, device, &rooms));
     let mut my_binded_devices: Vec<Entry> = registry
         .iter()

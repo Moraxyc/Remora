@@ -252,8 +252,40 @@ async fn online_host(app: &Router, addr: SocketAddr) -> (Client, String, String)
 }
 
 async fn join(app: &Router, token: &str, device_id: &str) -> Result<Value, ApiError> {
+    join_from(app, token, device_id, None, false).await
+}
+
+/// Joins from the viewer device `from`, taking the desktop over if `force`.
+async fn join_from(
+    app: &Router,
+    token: &str,
+    device_id: &str,
+    from: Option<&str>,
+    force: bool,
+) -> Result<Value, ApiError> {
     let path = format!("/api/v1/room/join/by_device/{device_id}");
-    common::post_as(app, &path, token, None, r#"{"force_join":false}"#).await
+    let body = json!({ "force_join": force }).to_string();
+    common::post_as(app, &path, token, from, &body).await
+}
+
+/// Connects a joined viewer and takes control of the desktop; returns the session's `ice_id`.
+async fn control_desktop(addr: SocketAddr, joined: &Value) -> (Client, String) {
+    let mut viewer = Client::connect(addr, joined["token"].as_str().unwrap())
+        .await
+        .unwrap();
+    viewer.handshake().await;
+    let header = json!({ "app_data": { "_placeholder": true, "num": 0 } });
+    viewer
+        .send(&format!("451-5{}", json!(["control", header])))
+        .await;
+    // ConnectOptions { capture_type: CT_DESKTOP }.
+    viewer.send_binary(&[0x08, 0x01]).await;
+    let Some(Packet::Ack(ack)) = viewer.recv().await else {
+        panic!("expected the control ack");
+    };
+    assert_eq!(ack.args[0], "success");
+    let ice_id = ack.args[1]["ice_id"].as_str().unwrap().to_owned();
+    (viewer, ice_id)
 }
 
 #[tokio::test]
@@ -439,4 +471,50 @@ async fn both_sides_get_the_same_turn_settings() {
     let be_controlled = host.event().await;
     assert_eq!(&be_controlled.args[0]["iceServers"], servers);
     assert_eq!(be_controlled.args[0]["force_relay"], true);
+}
+
+#[tokio::test]
+async fn another_device_needs_force_join_to_take_the_desktop_over() {
+    let (app, addr) = start(common::config()).await;
+    let (mut host, token, device_id) = online_host(&app, addr).await;
+    let phone = common::register(&app, "client-phone").await;
+    let laptop = common::register(&app, "client-laptop").await;
+
+    let joined = join_from(&app, &token, &device_id, Some(&phone), false)
+        .await
+        .unwrap();
+    let (mut phone_viewer, phone_ice) = control_desktop(addr, &joined).await;
+    assert_eq!(host.event().await.name, "be-controlled");
+
+    let busy = Err(ApiError::Rejected {
+        http_status: 400,
+        code: 2002,
+    });
+    let refused = join_from(&app, &token, &device_id, Some(&laptop), false).await;
+    assert_eq!(refused.map(drop), busy);
+    // The controlling device can still open more sessions, such as file transfer.
+    assert!(
+        join_from(&app, &token, &device_id, Some(&phone), false)
+            .await
+            .is_ok()
+    );
+
+    let joined = join_from(&app, &token, &device_id, Some(&laptop), true)
+        .await
+        .unwrap();
+    let (_laptop_viewer, _) = control_desktop(addr, &joined).await;
+    let released = host.event().await;
+    assert_eq!(
+        (released.name.as_str(), &released.args[0]["ice_id"]),
+        ("released", &json!(phone_ice))
+    );
+    assert_eq!(host.event().await.name, "be-controlled");
+    let left = phone_viewer.event().await;
+    assert_eq!(
+        (left.name.as_str(), &left.args[0]["ice_id"]),
+        ("left", &json!(phone_ice))
+    );
+
+    let refused = join_from(&app, &token, &device_id, Some(&phone), false).await;
+    assert_eq!(refused.map(drop), busy, "now the laptop holds the desktop");
 }

@@ -62,6 +62,13 @@ impl ApiError {
         msg: "no such device",
     };
 
+    /// Another device controls the host's desktop. Clients know this code and say so.
+    pub const BEING_CONTROLLED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: 2002,
+        msg: "被控端正在被远控中，无法发起连接",
+    };
+
     /// The device's host is not on signaling.
     pub const DEVICE_OFFLINE: Self = Self {
         status: StatusCode::BAD_REQUEST,
