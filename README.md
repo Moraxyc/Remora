@@ -27,7 +27,7 @@ remora --config remora.toml
 
 - **Debian 与 Ubuntu**：可通过 [`pkgs.moraxyc.com`](https://pkgs.moraxyc.com) APT 仓库安装 `remora` 并随 `apt upgrade` 自动更新，或从 Release 下载 `amd64` 与 `arm64` 的 `.deb` 包。软件包提供沙箱化的 `remora.service` 与按需激活的 `remora.socket`，读取 `/etc/remora/remora.toml` 并将 SQLite 数据库保存在 `/var/lib/remora/remora.db`。
 - **NixOS**：本仓库 Flake 导出 `nixosModules.default`，可同时配置 `services.remora` 与本机 `services.remora.coturn`，并通过 systemd `LoadCredential` 注入密钥文件。
-- **客户端（`uu-remote-linux`）**：本仓库 Flake 提供 `packages.uu-remote-linux`（及 `overlays.default`），`0.2.62` 及以上版本已原生支持通过环境变量 `UU_BASE_URL` / `UU_SIGN_KEY` 或客户端配置文件中的 `"base_url"` / `"sign_key"` 指向你的 Remora 实例。
+- **客户端（`uu-remote-linux`）**：上游仓库提供了独立 Flake（`github:VallierDev/uu-remote-linux`，包含 `packages.uu-remote-linux` 与 `nixosModules.default`）。`0.2.62` 及以上版本已原生支持通过环境变量 `UU_BASE_URL` / `UU_SIGN_KEY` 或客户端配置文件中的 `"base_url"` / `"sign_key"` 指向你的 Remora 实例。
 
 ## 文档
 

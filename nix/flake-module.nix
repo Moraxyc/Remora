@@ -11,9 +11,6 @@
     {
       overlayAttrs = {
         inherit (config.packages) remora remora-web;
-      }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        inherit (config.packages) uu-remote-linux;
       };
 
       packages = {
@@ -22,9 +19,6 @@
         default = config.packages.remora;
       }
       // lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
-        uu-remote-linux = final.callPackage ./uu-remote-linux.nix {
-          src = inputs.uu-remote-linux;
-        };
         # A self-contained binary for release archives.
         remora-static =
           (final.pkgsStatic.remora.override {

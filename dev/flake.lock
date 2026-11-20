@@ -59,7 +59,23 @@
     "root": {
       "inputs": {
         "moraxyc-repo": "moraxyc-repo",
-        "treefmt-nix": "treefmt-nix"
+        "treefmt-nix": "treefmt-nix",
+        "uu-remote-linux": "uu-remote-linux"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1689347949,
+        "narHash": "sha256-12tWmuL2zgBgZkdoB6qXZsgJEH9LR3oUgpaQq2RbI80=",
+        "owner": "nix-systems",
+        "repo": "default-linux",
+        "rev": "31732fcf5e8fea42e59c2488ad31a0e651500f68",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default-linux",
+        "type": "github"
       }
     },
     "treefmt-nix": {
@@ -77,6 +93,32 @@
       "original": {
         "owner": "numtide",
         "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "uu-remote-linux": {
+      "inputs": {
+        "flake-parts": [
+          "moraxyc-repo",
+          "flake-parts"
+        ],
+        "nixpkgs": [
+          "moraxyc-repo",
+          "nixpkgs"
+        ],
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1795184573,
+        "narHash": "sha256-+QtqvaOdALZLC9HpvfBhy8Ij5XE/9YyNNLaU5TU9NGw=",
+        "owner": "VallierDev",
+        "repo": "uu-remote-linux",
+        "rev": "1f01bad3e3a68278df35730586f15595564ef95e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "VallierDev",
+        "repo": "uu-remote-linux",
         "type": "github"
       }
     }

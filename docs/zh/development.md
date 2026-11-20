@@ -10,6 +10,8 @@
 nix develop
 ```
 
+仅开发使用的输入（包括 `treefmt-nix`、`moraxyc-repo` 以及用于集成测试的上游 `uu-remote-linux`）放在 `dev/flake.nix` 中，不会进入下游用户的 `flake.lock`。
+
 ## 2. 构建与前后端联调
 
 `crates/remora-cloud/build.rs` 在编译期通过 `rust-embed` 将前端静态构建产物嵌入 `remora` 二进制。构建脚本默认读取仓库内的 `web/build/` 目录（要求其中存在 `app.html`），也可通过环境变量 `REMORA_WEB_DIR=/path/to/build` 指定外部产物路径（Nix 构建流程即通过该变量传入 `.#remora-web`）。首次在本地执行 `cargo build` 或 `cargo test` 前，先构建一次前端：
@@ -53,7 +55,6 @@ nix fmt
 | `packages.<sys>.remora-web` | SvelteKit 前端静态构建产物。 |
 | `packages.<sys>.remora-static` | 基于 musl 静态链接并剥离符号的独立 Linux 二进制，用于制作 Release 压缩包。 |
 | `packages.<sys>.remora-deb` | Debian / Ubuntu `.deb` 安装包，CI 中通过 `lintian` 与 systemd 容器脚本测试安装、升级、卸载与 purge。 |
-| `packages.<sys>.uu-remote-linux` | `uu-remote-linux` 客户端与被控端 Nix 打包（含运行时依赖封装、桌面入口、systemd 用户单元与 udev 规则）。 |
 | `nixosModules.default` | NixOS 服务模块（支持同时配置 `remora` 与本机 `coturn`）。 |
 
 构建指定输出包：

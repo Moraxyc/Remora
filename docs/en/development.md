@@ -10,6 +10,8 @@ The repository's Nix Flake provides the development shell with `cargo`, `rustc`,
 nix develop
 ```
 
+Development-only inputs—including `treefmt-nix`, `moraxyc-repo`, and upstream `uu-remote-linux` (for integration testing)—live in `dev/flake.nix` so they stay out of downstream consumers' `flake.lock`.
+
 ## 2. Building and Frontend Workflow
 
 `crates/remora-cloud/build.rs` embeds the SvelteKit static build into the `remora` binary at compile time via `rust-embed`. By default it reads `web/build/` (which must contain `app.html`), or the directory set in `REMORA_WEB_DIR` (used by Nix package builds to pass `.#remora-web`). Build `web/` once before running `cargo build` or `cargo test` in a fresh checkout:
@@ -53,7 +55,6 @@ On Linux, `nix flake check` builds every flake package, runs `clippy` and `treef
 | `packages.<sys>.remora-web` | Static SvelteKit frontend build. |
 | `packages.<sys>.remora-static` | Static musl-linked stripped Linux binary used for release tarballs. |
 | `packages.<sys>.remora-deb` | Debian and Ubuntu `.deb` package tested in CI with `lintian` and systemd install/upgrade/remove/purge scripts. |
-| `packages.<sys>.uu-remote-linux` | Linux host and viewer package for `uu-remote-linux` (wrapped runtime dependencies, desktop entries, systemd user unit, and udev rule). |
 | `nixosModules.default` | NixOS module for `remora` and optional co-located `coturn`. |
 
 Build individual release artifacts with:
