@@ -51,7 +51,7 @@
       };
 
       postInstall = ''
-        install -Dm644 -t $out/lib/systemd/system contrib/remora.service
+        install -Dm644 -t $out/lib/systemd/system contrib/remora.service contrib/remora.socket
         substituteInPlace $out/lib/systemd/system/remora.service \
           --replace-fail /usr/bin/remora $out/bin/remora
       '';

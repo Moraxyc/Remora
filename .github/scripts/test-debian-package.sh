@@ -10,6 +10,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 url=http://127.0.0.1:8080/
 wants=/etc/systemd/system/multi-user.target.wants/remora.service
+socket_wants=/etc/systemd/system/sockets.target.wants/remora.socket
 
 step() { printf '\n== %s\n' "$*"; }
 fail() {
@@ -60,8 +61,16 @@ after=$(main_pid)
 [ "$after" != 0 ] && [ "$after" != "$before" ] || fail "the service was not restarted ($before, $after)"
 systemctl is-enabled --quiet remora.service || fail "the upgrade disabled the service"
 
-step "removing stops the service and keeps its settings and database"
+step "the socket starts the service on the first connection"
+sudo systemctl stop remora.service
+sudo systemctl enable --now remora.socket
+! systemctl is-active --quiet remora.service || fail "the service started before a connection"
+serving
+systemctl is-active --quiet remora.service || fail "a connection did not start the service"
+
+step "removing stops the service and its socket, and keeps its settings and database"
 sudo apt-get remove --yes remora
+! systemctl is-active --quiet remora.socket || fail "the socket still listens"
 ! systemctl is-active --quiet remora.service || fail "the service still runs"
 sudo test -s /var/lib/private/remora/remora.db || fail "removing deleted the database"
 sudo test -e /etc/remora/remora.toml || fail "removing deleted the settings"
@@ -71,7 +80,9 @@ sudo apt-get purge --yes remora
 sudo test ! -e /var/lib/private/remora || fail "the database is still there"
 sudo test ! -e /var/lib/remora -a ! -L /var/lib/remora || fail "/var/lib/remora is still there"
 [ ! -L "$wants" ] || fail "the service is still enabled"
+[ ! -L "$socket_wants" ] || fail "the socket is still enabled"
 [ ! -L /etc/systemd/system/remora.service ] || fail "the service is still masked"
+[ ! -L /etc/systemd/system/remora.socket ] || fail "the socket is still masked"
 sudo test -e /etc/remora/remora.toml || fail "purging deleted the settings"
 
 step "passed"

@@ -69,10 +69,15 @@ in
       import shlex
 
       start_all()
-      server.wait_for_unit("remora.service")
+      server.wait_for_unit("remora.socket")
       server.wait_for_unit("coturn.service")
-      server.wait_for_open_port(8080)
       server.wait_for_open_port(3478, "${serverAddress}")
+
+      with subtest("remora starts on the first connection"):
+          server.require_unit_state("remora.service", "inactive")
+          server.wait_for_open_port(8080)
+          server.wait_until_succeeds("systemctl is-active remora.service")
+          server.succeed("journalctl -u remora.service -o cat | grep -q 'listening on the socket systemd passed'")
 
       remora = "REMORA_OWNER_PASSWORD=${ownerPassword} python3 ${./session.py} http://server:8080 ${signKey}"
 
@@ -94,8 +99,8 @@ in
           )
 
       with subtest("devices and logins outlive a restart"):
-          server.systemctl("restart remora.service")
-          server.wait_for_open_port(8080)
+          server.systemctl("stop remora.service")
+          # The socket keeps listening and starts Remora again for this request.
           listed = json.loads(client.succeed(
               f"{remora} devices {shlex.quote(session['token'])}"
           ))

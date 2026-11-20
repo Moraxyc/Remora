@@ -2,5 +2,6 @@
 set -e
 
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
-    deb-systemd-invoke stop remora.service > /dev/null || true
+    # The socket first, so that no connection starts the service again.
+    deb-systemd-invoke stop remora.socket remora.service > /dev/null || true
 fi

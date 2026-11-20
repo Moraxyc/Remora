@@ -21,7 +21,10 @@ remora --config remora.toml
 [`contrib/remora.toml`](contrib/remora.toml) describes every setting, and
 [`contrib/turnserver.conf`](contrib/turnserver.conf) is a coturn configuration to go with it.
 [`contrib/remora.service`](contrib/remora.service) is a sandboxed systemd unit that runs
-`/usr/bin/remora` with `/etc/remora/remora.toml`.
+`/usr/bin/remora` with `/etc/remora/remora.toml`. Enable
+[`contrib/remora.socket`](contrib/remora.socket) as well, or instead, to have systemd listen in
+Remora's place: it starts Remora on the first connection, and connections wait while Remora
+restarts. Keep its `ListenStream` the same as `listen`.
 Serve it over TLS through a reverse proxy that passes WebSocket upgrades through, and list the
 proxy in `trusted_proxies` so that Remora sees clients' addresses in `X-Forwarded-For`: rate
 limits and login pages go by them.
@@ -57,10 +60,10 @@ Clients have to be pointed at Remora. The flake also packages a patched
 ### Debian and Ubuntu
 
 Each release carries a `.deb` for amd64 and arm64. It installs `remora.service`, which reads
-`/etc/remora/remora.toml` and keeps its database in `/var/lib/remora`, and a `remora` group that
-may read the settings and secrets there while they stay root's. The example settings name files
-that do not exist yet; keep at least one way to confirm logins (`login.password_file`, `[oidc]`
-or `login.auto_confirm`) and make the files it names:
+`/etc/remora/remora.toml` and keeps its database in `/var/lib/remora`, `remora.socket`, and a
+`remora` group that may read the settings and secrets there while they stay root's. The example
+settings name files that do not exist yet; keep at least one way to confirm logins
+(`login.password_file`, `[oidc]` or `login.auto_confirm`) and make the files it names:
 
 ```sh
 sudo cp /usr/share/doc/remora/examples/remora.toml /etc/remora/
@@ -70,12 +73,16 @@ sudo chmod 0640 /etc/remora/*
 sudo systemctl enable --now remora
 ```
 
+To start Remora on the first connection instead, enable `remora.socket`
+(`sudo systemctl enable --now remora.socket`) rather than the service.
+
 Purging the package deletes the database, which holds the key that signs tokens, and keeps
 `/etc/remora`.
 
 ### NixOS
 
-The flake provides a module that runs Remora and, optionally, coturn next to it:
+The flake provides a module that runs Remora and, optionally, coturn next to it. systemd listens
+on `listen` and starts Remora on the first connection:
 
 ```nix
 {

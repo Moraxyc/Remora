@@ -1,0 +1,11 @@
+[Unit]
+Description=Remora's listening socket
+Documentation=https://github.com/Moraxyc/Remora
+
+[Socket]
+# Keep this the address `listen` names in remora.toml: Remora serves on this socket instead, but
+# still derives the default `public_url` from `listen`.
+ListenStream=127.0.0.1:8080
+
+[Install]
+WantedBy=sockets.target

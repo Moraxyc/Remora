@@ -73,7 +73,10 @@ in
           listen = lib.mkOption {
             type = lib.types.str;
             default = "127.0.0.1:8080";
-            description = "Address to serve the REST API and signaling on.";
+            description = ''
+              Address to serve the REST API and signaling on. systemd listens on it and starts
+              Remora on the first connection.
+            '';
           };
           public_url = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
@@ -212,13 +215,24 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
-        # The package's unit sets up the sandbox; this adds the settings and their secrets.
+        # The package's units set up the socket and the sandbox; these drop-ins add the address,
+        # the settings and their secrets.
         systemd.packages = [ cfg.package ];
+        # Remora starts on the first connection, and connections wait in the socket while it
+        # restarts.
+        systemd.sockets.remora = {
+          overrideStrategy = "asDropin";
+          wantedBy = [ "sockets.target" ];
+          # The empty entry drops the package's address.
+          listenStreams = [
+            ""
+            cfg.settings.listen
+          ];
+        };
         systemd.services.remora = {
           # A package without the unit leaves only this drop-in, which systemd refuses to load,
           # rather than a unit that runs Remora as root outside the sandbox.
           overrideStrategy = "asDropin";
-          wantedBy = [ "multi-user.target" ];
           serviceConfig = {
             ExecStart = [
               ""

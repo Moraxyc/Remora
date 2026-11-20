@@ -61,7 +61,7 @@ stdenvNoCC.mkDerivation {
     EOF
     gzip -9n < changelog.Debian > root/usr/share/doc/${pname}/changelog.Debian.gz
     install -Dm644 -t root/usr/share/doc/${pname}/examples contrib/remora.toml contrib/turnserver.conf
-    install -Dm644 -t root/usr/lib/systemd/system contrib/remora.service
+    install -Dm644 -t root/usr/lib/systemd/system contrib/remora.service contrib/remora.socket
     install -Dm644 ${lintianOverrides} root/usr/share/lintian/overrides/${pname}
     install -Dm644 ${control} root/DEBIAN/control
     for script in postinst prerm postrm; do

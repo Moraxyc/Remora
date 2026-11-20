@@ -7,14 +7,16 @@ fi
 
 # init-system-helpers may already be gone when this runs.
 if command -v deb-systemd-helper > /dev/null; then
-    if [ "$1" = remove ]; then
-        # Keeps a leftover enablement from starting a service whose binary is gone.
-        deb-systemd-helper mask remora.service > /dev/null || true
-    fi
-    if [ "$1" = purge ]; then
-        deb-systemd-helper purge remora.service > /dev/null || true
-        deb-systemd-helper unmask remora.service > /dev/null || true
-    fi
+    for unit in remora.socket remora.service; do
+        if [ "$1" = remove ]; then
+            # Keeps a leftover enablement from starting a service whose binary is gone.
+            deb-systemd-helper mask "$unit" > /dev/null || true
+        fi
+        if [ "$1" = purge ]; then
+            deb-systemd-helper purge "$unit" > /dev/null || true
+            deb-systemd-helper unmask "$unit" > /dev/null || true
+        fi
+    done
 fi
 
 if [ "$1" = purge ]; then
