@@ -48,9 +48,20 @@
 | 方法与路径 | 鉴权 | 请求体 | 响应 `data` 与行为 |
 |---|---|---|---|
 | `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "..."}`（`name` 可选，其余硬件字段被忽略） | `{"device_id": "..."}`。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称，平台记为 `1`（Windows）。 |
-| `GET /api/v1/device/list` | User Token | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform` 与 `status`（`"CONNECTED"` 或 `"DISCONNECTED"`）。 |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话与局域网信息，并向在线被控端发送踢出信令。 |
+| `GET /api/v1/device/list` | User Token | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）与可选 `wallpaper_url`。 |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话、局域网信息、壁纸与上传的文件，并向在线被控端发送踢出信令。 |
 | `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`。保存调用方已绑定设备最近一次上报的局域网信息，用于网络唤醒。`inner_ip` 为局域网地址且必填；字段缺失或无效（MAC 须为以 `:` 或 `-` 分隔的 6 个十六进制字节，地址须为 IPv4，子网掩码须连续）时返回 HTTP `422`、code `1001`。 |
+
+### 文件与壁纸
+
+被控端会上传桌面壁纸，用作设备卡片的背景。图片保存在 SQLite 中，任何持有图片 URL 的人都可以免凭据获取；每个 URL 带有一个 128 位随机 id，对应的内容永不改变。
+
+| 接口 | 鉴权 | 请求体 | 响应与行为 |
+|---|---|---|---|
+| `GET /api/v1/tool/fp/token?filetype=1` | User Token | 空 | `{"token": "...", "req_url": "{public_url}/api/files", "ttl": 3600, "max_size": 10485760}`。上传令牌在 `ttl` 秒内可多次使用，前提是签发它的登录会话仍然有效。不检查 `filetype`。 |
+| `POST /api/files` | `Authorization: <上传令牌>`（可直接写令牌，也可加 `Bearer ` 前缀） | 原始图片字节，或 `multipart/form-data`（取第一个文件部分） | 不使用 UU 响应信封：成功时返回 HTTP `200` 与 `{"url": "{public_url}/api/files/{id}", "fsize": 123, "md5": "<hex>", "mime": "image/png"}`。按文件内容识别并接受 PNG、JPEG、WebP、GIF 与 BMP，大小不超过 `max_size` 字节。错误为 `{"error": ...}`：`401 unauthorized`、`400 empty`、`413 too_large`、`415 not_an_image`。每个用户的每台设备保留最近 4 次上传，正在使用的壁纸另外保留。 |
+| `GET /api/files/{id}` | 无（URL 中的 `id` 即凭据） | — | 返回图片，附带图片类型、`Cache-Control: public, max-age=31536000, immutable`、`nosniff` 与沙箱 CSP。忽略查询串（如缩放参数）。 |
+| `POST /api/v1/device/wallpaper` | User Token + `X-Param-Device-Id` | `{"wallpaper_url": "<上传返回的 url>"}` | `{}`。把调用方已绑定设备的壁纸设为该用户上传过的某个文件；按路径中的 id 匹配，不论 URL 指向哪个源站；传 `""` 表示清除壁纸。URL 对应的文件不存在时返回 `422` / `1001`；调用方设备未绑定时返回 `400` / `2003`。 |
 
 ### 扫码登录接口
 
@@ -82,7 +93,7 @@
 | `GET /api/web/oidc/callback` | 匿名 | 校验 OIDC 授权码与 ID Token，建档或更新用户并写入 `remora_session` Cookie。 |
 | `GET /api/web/logins/{id}` | 匿名（URL `id` 凭证） | 将二维码标记为已扫描（`Scanned`），返回发起设备的名称、平台、来源 IP、创建时间及确认状态。 |
 | `POST /api/web/logins/{id}` | Cookie + CSRF | 提交 `{"decision": "confirm" \| "deny"}` 确认或拒绝该次客户端扫码登录。 |
-| `GET /api/web/devices` | Cookie | 列出当前用户绑定的设备、在线状态及 `wakeable`（设备是否上报过局域网信息；不返回任何地址）。 |
+| `GET /api/web/devices` | Cookie | 列出当前用户绑定的设备、在线状态、`wakeable`（设备是否上报过局域网信息；不返回任何地址）及 `wallpaper`（壁纸图片的路径，没有时为 `null`）。 |
 | `DELETE /api/web/devices/{id}` | Cookie + CSRF | 解绑指定设备、删除其被控端登录会话并踢出在线被控端。 |
 | `POST /api/web/devices/{id}/wake` | Cookie + CSRF（限流） | 唤醒离线设备：在当前用户的在线设备中选一台上报的 IPv4 网段（地址与掩码）与目标相同的设备，向其推送 `wake_on_lan`，推送后返回 `204`。错误：`404 not_found`、`409 device_online`、`409 no_lan_report`、`409 no_wake_helper`、`429 too_many_requests`。 |
 | `GET /api/web/client-sessions` | Cookie | 列出当前用户所有活跃的客户端登录会话。 |

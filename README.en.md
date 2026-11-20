@@ -13,7 +13,7 @@ uuremote-viewer ──REST + Socket.IO──► remora ◄──REST + Socket.IO
 
 ## Status
 
-Remora is in early development and supports end-to-end sessions with `uu-remote-linux`. A client's login QR code opens Remora's embedded web app, where a user signs in with an OpenID Connect provider or the owner password and confirms the device login. From the same web app, users inspect bound devices, unbind hosts, wake offline devices through an online device on the same LAN (Wake-on-LAN), and revoke active client or browser sessions.
+Remora is in early development and supports end-to-end sessions with `uu-remote-linux`. A client's login QR code opens Remora's embedded web app, where a user signs in with an OpenID Connect provider or the owner password and confirms the device login. From the same web app, users inspect bound devices and their desktop wallpapers, unbind hosts, wake offline devices through an online device on the same LAN (Wake-on-LAN), and revoke active client or browser sessions.
 
 ## Quick Start
 

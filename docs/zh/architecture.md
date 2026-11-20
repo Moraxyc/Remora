@@ -78,7 +78,7 @@ OIDC 登录采用授权码模式（Authorization Code）配合 PKCE、`state` �
 
 ## 6. SQLite 存储与日志脱敏
 
-`database.rs` 打开 SQLite 时设置 `journal_mode = WAL`、`synchronous = NORMAL` 与 5 秒 `busy_timeout`，所有表均启用 `STRICT` 类型检查，并通过 `PRAGMA user_version` 顺序迁移（当前版本为 `5`）：
+`database.rs` 打开 SQLite 时设置 `journal_mode = WAL`、`synchronous = NORMAL` 与 5 秒 `busy_timeout`，所有表均启用 `STRICT` 类型检查，并通过 `PRAGMA user_version` 顺序迁移（当前版本为 `6`）：
 
 | 表名 | 主要列 | 用途 |
 |---|---|---|
@@ -88,5 +88,7 @@ OIDC 登录采用授权码模式（Authorization Code）配合 PKCE、`state` �
 | `users` | `id TEXT PRIMARY KEY, issuer TEXT, subject TEXT, name TEXT` | 预置 `id = '1'`（`Owner`）；OIDC 用户按 `UNIQUE (issuer, subject)` 建档。 |
 | `browsers` | `id TEXT PRIMARY KEY, user_id TEXT, csrf TEXT, created INTEGER, expires INTEGER` | 浏览器登录会话，主键 `id` 为 `remora_session` Cookie 的 SHA-256 哈希。 |
 | `lan_reports` | `device_id TEXT PRIMARY KEY, mac TEXT, ip TEXT, subnet_mask TEXT` | 每台设备最近一次上报的网络唤醒信息，设备离线后仍保留；解绑时删除。 |
+| `files` | `id TEXT PRIMARY KEY, user_id TEXT, device_id TEXT, mime TEXT, md5 TEXT, content BLOB` | 上传的图片。`id` 随机生成并出现在文件 URL 中；每个用户的每台设备保留最近 4 份，正在使用的壁纸另外保留；设备解绑时删除其上传的文件。 |
+| `wallpapers` | `device_id TEXT PRIMARY KEY, file_id TEXT` | 每台设备卡片展示的图片；解绑时删除。 |
 
-服务端日志仅输出实体标识（`user_id`、`device_id`）、会话计数、字节长度与布尔状态。承载密钥或敏感凭据的类型（`SignKey`、`TurnSecret`、`OwnerPassword`、`Database`、`LanReport`）均手动实现了输出固定占位符（如 `SignKey(..)`）的 `Debug`，使 JWT、Cookie、二维码链接与 Ticket、密码及哈希、TURN 密钥与派生凭据、OIDC 客户端密钥以及 SDP 中的 `ufrag` / `pwd` 以及设备的 MAC、局域网地址与子网掩码均被排除在日志与错误堆栈之外。
+服务端日志仅输出实体标识（`user_id`、`device_id`）、会话计数、字节长度与布尔状态。承载密钥或敏感凭据的类型（`SignKey`、`TurnSecret`、`OwnerPassword`、`Database`、`LanReport`、`FileId`）均手动实现了输出固定占位符（如 `SignKey(..)`）的 `Debug`，使 JWT、Cookie、二维码链接与 Ticket、密码及哈希、TURN 密钥与派生凭据、OIDC 客户端密钥以及 SDP 中的 `ufrag` / `pwd` 设备的 MAC、局域网地址与子网掩码，以及上传令牌与文件 URL 均被排除在日志与错误堆栈之外。

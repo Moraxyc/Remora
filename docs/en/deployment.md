@@ -199,6 +199,8 @@ When `uuremote-server` starts on a host, it registers the device and displays a 
 
 Wake-on-LAN needs `UU_WOL_HELPER=1` in the environment of `uuremote-server` on both the device to wake and the helper that wakes it: only then does a host report its MAC, LAN address and netmask to Remora, and act on wake requests. The helper must be on the target's LAN with host networking (not a container network namespace or NAT), so that its broadcast reaches the target. The target's network card must have Wake-on-LAN enabled in its firmware and operating system.
 
+Signed-in graphical hosts upload their desktop wallpaper, which device cards in viewers and in the web app show. `uu-remote-linux` uploads only when `public_url` is `https://`, and skips images larger than 10 MiB; set `UU_WALLPAPER_UPLOAD=0` on a host to stop it. Remora keeps the images in its database and serves them to anyone who has their URL.
+
 ## 5. Operations and Troubleshooting
 
 Opening `{public_url}/` in a browser loads the management console. The **Devices** tab lists devices bound to your account with their online status; clicking **Unbind** removes the device binding, deletes its host login sessions, and kicks any connected host from signaling. Offline devices that reported their LAN show **Wake**, which asks one of your online devices on the same IPv4 network to send a magic packet; the console says when no such device is online. The **Client logins** tab lists active host and viewer tokens with a **Revoke** button for each session, and the **Browsers** tab lists active 30-day browser sessions with remote sign-out.

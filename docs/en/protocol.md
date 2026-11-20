@@ -48,9 +48,20 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 | Endpoint | Auth | Request Body | Response `data` and Behavior |
 |---|---|---|---|
 | `POST /api/v1/device/windows/init` | None (rate-limited) | `{"client_id": "...", "name": "..."}` (`name` optional; hardware fields ignored) | `{"device_id": "..."}`. Idempotent by `client_id`: re-registering returns the existing `device_id`, updates `name`, and sets platform `1` (Windows). |
-| `GET /api/v1/device/list` | User Token | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` has `device_id`, optional `alias`, `platform`, and `status` (`"CONNECTED"` or `"DISCONNECTED"`). |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions and LAN report, and kicks any connected host. |
+| `GET /api/v1/device/list` | User Token | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` has `device_id`, optional `alias`, `platform`, `status` (`"CONNECTED"` or `"DISCONNECTED"`), and optional `wallpaper_url`. |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions, LAN report, wallpaper and uploaded files, and kicks any connected host. |
 | `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`. Stores the calling bound device's last LAN report for Wake-on-LAN. `inner_ip` is the LAN address and is required; a missing or invalid field (MAC of six hex bytes separated by `:` or `-`, IPv4 addresses, contiguous netmask) answers HTTP `422` with code `1001`. |
+
+### Files and Wallpapers
+
+Hosts publish an image of their desktop wallpaper for device cards. Images are stored in SQLite and served without credentials to anyone holding their URL; each URL carries a random 128-bit id and never changes content.
+
+| Endpoint | Auth | Request Body | Response and Behavior |
+|---|---|---|---|
+| `GET /api/v1/tool/fp/token?filetype=1` | User Token | Empty | `{"token": "...", "req_url": "{public_url}/api/files", "ttl": 3600, "max_size": 10485760}`. The upload token can be used for `ttl` seconds, for any number of uploads, while its login session stays open. `filetype` is not checked. |
+| `POST /api/files` | `Authorization: <upload token>` (bare, or after `Bearer `) | Raw image bytes, or `multipart/form-data` whose first file part is the image | Not a UU envelope: HTTP `200` with `{"url": "{public_url}/api/files/{id}", "fsize": 123, "md5": "<hex>", "mime": "image/png"}`. PNG, JPEG, WebP, GIF and BMP are accepted by their content, up to `max_size` bytes. Errors are `{"error": ...}` with `401 unauthorized`, `400 empty`, `413 too_large`, `415 not_an_image`. The last 4 uploads of each user and device are kept, besides current wallpapers. |
+| `GET /api/files/{id}` | None (URL `id` capability) | — | The image, with its type, `Cache-Control: public, max-age=31536000, immutable`, `nosniff` and a sandboxing CSP. Query strings, such as resizing parameters, are ignored. |
+| `POST /api/v1/device/wallpaper` | User Token + `X-Param-Device-Id` | `{"wallpaper_url": "<url from upload>"}` | `{}`. Sets the calling bound device's wallpaper to one of the user's uploaded files, matched by the id in its path whatever origin it names; `""` clears it. A URL of no such file answers `422` / `1001`; an unbound caller answers `400` / `2003`. |
 
 ### QR Login
 
@@ -82,7 +93,7 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 | `GET /api/web/oidc/callback` | None | Exchanges the authorization code, verifies the ID token, upserts the user, and sets `remora_session`. |
 | `GET /api/web/logins/{id}` | None (URL `id` capability) | Marks the QR login `Scanned` and returns device name, platform, client IP, creation timestamp, and confirmation state. |
 | `POST /api/web/logins/{id}` | Cookie + CSRF | Submits `{"decision": "confirm" \| "deny"}` for the pending QR login. |
-| `GET /api/web/devices` | Cookie | Lists devices bound to the signed-in user with online status and `wakeable` (whether the device reported its LAN; addresses are never returned). |
+| `GET /api/web/devices` | Cookie | Lists devices bound to the signed-in user with online status, `wakeable` (whether the device reported its LAN; addresses are never returned), and `wallpaper` (the path of its wallpaper image, or `null`). |
 | `DELETE /api/web/devices/{id}` | Cookie + CSRF | Unbinds the device, deletes its host login sessions, and kicks any online host. |
 | `POST /api/web/devices/{id}/wake` | Cookie + CSRF (rate-limited) | Wakes an offline device: pushes `wake_on_lan` to one of the user's online devices whose reported IPv4 network (address and netmask) equals the target's, and returns `204` once sent. Errors: `404 not_found`, `409 device_online`, `409 no_lan_report`, `409 no_wake_helper`, `429 too_many_requests`. |
 | `GET /api/web/client-sessions` | Cookie | Lists active client User Token sessions for the signed-in user. |
