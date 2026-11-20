@@ -1,7 +1,6 @@
 {
   lib,
-  fetchFromGitHub,
-  fetchpatch2,
+  src,
   rustPlatform,
   pkg-config,
   wayland-scanner,
@@ -18,6 +17,7 @@
   pipewire,
   libei,
   SDL2,
+  libdecor,
   ffmpeg-full,
   pulseaudio,
   libopus,
@@ -25,6 +25,7 @@
   libgbm,
   libayatana-appindicator,
   wl-clipboard,
+  xclip,
   wireplumber,
   xrandr,
   coreutils,
@@ -35,25 +36,22 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "uu-remote-linux";
-  inherit (finalAttrs.passthru.lock) version;
+  version = (lib.importTOML "${src}/Cargo.toml").package.version;
 
-  src = fetchFromGitHub (builtins.removeAttrs finalAttrs.passthru.lock.src [ "fetcher" ]);
+  inherit src;
 
-  cargoLock.lockFile = ../_sources/${finalAttrs.passthru.lock.derived.cargoLock.lockfile};
-
-  patches = [
-    # feat: allow a custom API base URL (#254); drop with the release after 0.2.61.
-    (fetchpatch2 {
-      name = "uu-remote-linux-base-url.patch";
-      url = "https://github.com/VallierDev/uu-remote-linux/commit/f19257428c7ba85289bd83385c0e677eff3c7b7d.patch?full_index=1";
-      hash = "sha256-8PDDPKTQo5Dh6bYCv2fKLUG6Z/PVpOyToUfcIHBSohQ=";
-    })
-  ];
+  cargoLock.lockFile = "${src}/Cargo.lock";
 
   postPatch = ''
     substituteInPlace src/terminal.rs \
       --replace-fail '"/bin/bash"' '"${lib.getExe bash}"'
+    substituteInPlace src/viewer/sdl.rs \
+      --replace-fail '"/usr/lib/libdecor/plugins-1"' '"${libdecor}/lib/libdecor/plugins-1"'
+    substituteInPlace src/session_lock.rs \
+      --replace-fail '"/bin/sleep"' '"${lib.getExe' coreutils "sleep"}"'
   '';
+
+  strictDeps = true;
 
   nativeBuildInputs = [
     pkg-config
@@ -94,6 +92,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
           pipewire
           wireplumber
           wl-clipboard
+          xclip
           xrandr
           coreutils
           pciutils
@@ -115,12 +114,21 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   postInstall = ''
     install -Dm644 contrib/desktop/*.desktop -t $out/share/applications
+    substituteInPlace $out/share/applications/uu-remote-linux.desktop \
+      --replace-fail "Exec=uuremote-server" "Exec=$out/bin/uuremote-server"
+    substituteInPlace $out/share/applications/uu-remote-linux-viewer.desktop \
+      --replace-fail "Exec=uuremote-viewer" "Exec=$out/bin/uuremote-viewer"
     install -Dm644 contrib/desktop/uu-remote-linux.svg \
       $out/share/icons/hicolor/scalable/apps/uu-remote-linux.svg
     install -Dm644 packaging/deb/uuremote-native.service \
       $out/lib/systemd/user/uuremote-native.service
     substituteInPlace $out/lib/systemd/user/uuremote-native.service \
       --replace-fail /usr/bin/uuremote-server $out/bin/uuremote-server
+    install -Dm644 config.example.json \
+      $out/share/doc/uu-remote-linux/config.example.json
+    install -Dm644 /dev/stdin $out/lib/udev/rules.d/60-uu-remote-linux-uinput.rules <<'EOF'
+    KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"
+    EOF
   '';
 
   doInstallCheck = true;
@@ -129,10 +137,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     $out/bin/uuremote-viewer --help
   '';
 
-  passthru.lock = (lib.importJSON ../_sources/lock.json).packages.uu-remote-linux;
-
   meta = {
-    description = "Unofficial Linux host and viewer for NetEase UU Remote, patched with UU_BASE_URL / base_url support";
+    description = "Unofficial Linux host and viewer for NetEase UU Remote";
     homepage = "https://github.com/VallierDev/uu-remote-linux";
     changelog = "https://github.com/VallierDev/uu-remote-linux/releases/tag/v${finalAttrs.version}";
     license = lib.licenses.gpl3Plus;

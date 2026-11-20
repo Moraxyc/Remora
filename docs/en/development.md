@@ -4,7 +4,7 @@
 
 ## 1. Development Environment
 
-The repository's Nix Flake provides the development shell with `cargo`, `rustc`, `clippy`, `rustfmt`, `rust-analyzer`, `nodejs`, `treefmt`, and `fetchrix`:
+The repository's Nix Flake provides the development shell with `cargo`, `rustc`, `clippy`, `rustfmt`, `rust-analyzer`, `nodejs`, and `treefmt`:
 
 ```sh
 nix develop
@@ -53,7 +53,7 @@ On Linux, `nix flake check` builds every flake package, runs `clippy` and `treef
 | `packages.<sys>.remora-web` | Static SvelteKit frontend build. |
 | `packages.<sys>.remora-static` | Static musl-linked stripped Linux binary used for release tarballs. |
 | `packages.<sys>.remora-deb` | Debian and Ubuntu `.deb` package tested in CI with `lintian` and systemd install/upgrade/remove/purge scripts. |
-| `packages.<sys>.uu-remote-linux` | Patched Linux client package with `BASE_URL` and `SIGN_KEY` configuration support. |
+| `packages.<sys>.uu-remote-linux` | Linux host and viewer package for `uu-remote-linux` (wrapped runtime dependencies, desktop entries, systemd user unit, and udev rule). |
 | `nixosModules.default` | NixOS module for `remora` and optional co-located `coturn`. |
 
 Build individual release artifacts with:

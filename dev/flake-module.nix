@@ -19,10 +19,7 @@
 
       checks =
         lib.filterAttrs (_: lib.meta.availableOn pkgs.stdenv.hostPlatform) (
-          removeAttrs self'.packages [
-            "default"
-            "uu-remote-linux"
-          ]
+          removeAttrs self'.packages [ "default" ]
         )
         // {
           inherit (self'.packages.remora) clippy;
@@ -42,7 +39,6 @@
           rustfmt
           rust-analyzer
           nodejs
-          (callPackage (inputs.fetchrix + "/nix/package.nix") { })
         ];
       };
     };

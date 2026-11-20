@@ -186,14 +186,14 @@ Setting `force_relay = true` instructs clients to use only `relay` ICE candidate
 
 ## 4. Connecting Clients (`uu-remote-linux`)
 
-This repository's flake provides a patched `uu-remote-linux` (`packages.uu-remote-linux` and `overlays.default`) that accepts a custom base URL and signing key via environment variables or its JSON configuration file:
+This repository's flake provides Nix packaging for `uu-remote-linux` (`packages.<sys>.uu-remote-linux` and `overlays.default`, including desktop entries, the systemd user service, and an optional `/dev/uinput` udev rule). Version `0.2.62` and later natively accept a custom base URL and signing key via environment variables or the JSON configuration file:
 
 ```sh
 export UU_BASE_URL="https://remora.example"
 export UU_SIGN_KEY="same-value-as-sign_key_file"
 ```
 
-Alternatively, set `"base_url"` and `"sign_key"` in `uu-remote-linux`'s config file.
+Alternatively, set `"base_url"` and `"sign_key"` in `uu-remote-linux`'s config file (see `share/doc/uu-remote-linux/config.example.json` in the package). On NixOS, add the package to `services.udev.packages` to grant `/dev/uinput` access for Wayland input, and enable the bundled `uuremote-native.service` user unit to start the host with your graphical session.
 
 When `uuremote-server` starts on a host, it registers the device and displays a QR code pointing to `{public_url}/login/<id>`. Open that link in a browser, sign in with the Owner password or OIDC, check the displayed device name, platform, and client IP, and click **Log in**. The host receives its user token, creates a signaling room, and comes online. Sign in on `uuremote-viewer` as the same user to see the online host and start a remote desktop session.
 

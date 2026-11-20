@@ -12,6 +12,10 @@
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     systems.url = "github:nix-systems/default";
     crane.url = "github:ipetkov/crane";
+    uu-remote-linux = {
+      url = "github:VallierDev/uu-remote-linux/v0.2.62";
+      flake = false;
+    };
   };
 
   outputs =

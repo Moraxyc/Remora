@@ -186,14 +186,14 @@ force_relay = true
 
 ## 4. 客户端接入（`uu-remote-linux`）
 
-本仓库 Flake 打包了打过补丁的 `uu-remote-linux`（`packages.uu-remote-linux` 与 `overlays.default`），支持通过环境变量或配置文件指定 Remora 地址与签名密钥：
+本仓库 Flake 提供了 `uu-remote-linux` 的 Nix 打包（`packages.<sys>.uu-remote-linux` 与 `overlays.default`，包含桌面入口、systemd 用户单元以及可选的 `/dev/uinput` udev 规则）。`0.2.62` 及以上版本已原生支持通过环境变量或配置文件指定 Remora 地址与签名密钥：
 
 ```sh
 export UU_BASE_URL="https://remora.example"
 export UU_SIGN_KEY="与服务端 sign_key_file 一致的密钥"
 ```
 
-也可以在 `uu-remote-linux` 的 JSON 配置文件中写入 `"base_url"` 和 `"sign_key"` 字段。
+也可以在 `uu-remote-linux` 的 JSON 配置文件（参见软件包内的 `share/doc/uu-remote-linux/config.example.json`）中写入 `"base_url"` 和 `"sign_key"` 字段。在 NixOS 上如需在 Wayland 下启用 `/dev/uinput` 虚拟输入，可将包加入 `services.udev.packages`；如需开机随图形会话启动被控端，可启用软件包附带的 `uuremote-native.service` 用户单元。
 
 启动被控端 `uuremote-server` 后，客户端会向 Remora 注册设备并展示包含 `{public_url}/login/<id>` 的登录二维码。在浏览器中打开该链接并使用 Owner 密码或 OIDC 登录，核对页面显示的设备名称、平台与来源 IP 后点击 **Log in**，被控端即获取用户令牌、创建房间并接入 Socket.IO 信令。随后在控制端 `uuremote-viewer` 登录同一账号，即可在设备列表中看到在线的被控端并发起远程桌面连接。
 

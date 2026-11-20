@@ -7,10 +7,6 @@
     treefmt-nix.inputs.nixpkgs.follows = "";
     # Release tooling for the APT repository at pkgs.moraxyc.com.
     moraxyc-repo.url = "github:Moraxyc/pkgs.moraxyc.com";
-    fetchrix = {
-      url = "github:moraxyc/fetchrix";
-      flake = false;
-    };
   };
 
   outputs = _: { };

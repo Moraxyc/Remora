@@ -1,21 +1,5 @@
 {
   "nodes": {
-    "fetchrix": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1794975314,
-        "narHash": "sha256-Onl1WhZdHBPoAz1Nw8wnIw5r54QB9DQVAGCMtF1ZBrE=",
-        "owner": "moraxyc",
-        "repo": "fetchrix",
-        "rev": "c65a03483cc1aabd1acff02ad2be4fba7fb3dc78",
-        "type": "github"
-      },
-      "original": {
-        "owner": "moraxyc",
-        "repo": "fetchrix",
-        "type": "github"
-      }
-    },
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
@@ -74,7 +58,6 @@
     },
     "root": {
       "inputs": {
-        "fetchrix": "fetchrix",
         "moraxyc-repo": "moraxyc-repo",
         "treefmt-nix": "treefmt-nix"
       }

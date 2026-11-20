@@ -27,7 +27,7 @@ Prebuilt packages and client integrations:
 
 - **Debian and Ubuntu**: Install `remora` from the [`pkgs.moraxyc.com`](https://pkgs.moraxyc.com) APT repository for automatic updates via `apt upgrade`, or download the `amd64` and `arm64` `.deb` packages from GitHub Releases. The package installs a sandboxed `remora.service` and socket-activated `remora.socket` that read `/etc/remora/remora.toml` and store SQLite state in `/var/lib/remora/remora.db`.
 - **NixOS**: The flake exports `nixosModules.default` to run `services.remora` and an optional co-located `services.remora.coturn`, loading secret files through systemd `LoadCredential`.
-- **Client (`uu-remote-linux`)**: The flake packages a patched `packages.uu-remote-linux` (and `overlays.default`) that reads `UU_BASE_URL` / `"base_url"` and `UU_SIGN_KEY` / `"sign_key"`.
+- **Client (`uu-remote-linux`)**: The flake provides `packages.uu-remote-linux` (and `overlays.default`), which since `0.2.62` natively reads `UU_BASE_URL` / `"base_url"` and `UU_SIGN_KEY` / `"sign_key"`.
 
 ## Documentation
 

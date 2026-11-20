@@ -4,7 +4,7 @@
 
 ## 1. 开发环境
 
-仓库通过 Nix Flake 提供统一的开发环境（包含 Rust 工具链、`rust-analyzer`、`nodejs`、`treefmt` 与 `fetchrix`）：
+仓库通过 Nix Flake 提供统一的开发环境（包含 Rust 工具链、`rust-analyzer`、`nodejs` 与 `treefmt`）：
 
 ```sh
 nix develop
@@ -53,7 +53,7 @@ nix fmt
 | `packages.<sys>.remora-web` | SvelteKit 前端静态构建产物。 |
 | `packages.<sys>.remora-static` | 基于 musl 静态链接并剥离符号的独立 Linux 二进制，用于制作 Release 压缩包。 |
 | `packages.<sys>.remora-deb` | Debian / Ubuntu `.deb` 安装包，CI 中通过 `lintian` 与 systemd 容器脚本测试安装、升级、卸载与 purge。 |
-| `packages.<sys>.uu-remote-linux` | 打入自定义 `BASE_URL` 与 `SIGN_KEY` 支持补丁的 Linux 客户端包。 |
+| `packages.<sys>.uu-remote-linux` | `uu-remote-linux` 客户端与被控端 Nix 打包（含运行时依赖封装、桌面入口、systemd 用户单元与 udev 规则）。 |
 | `nixosModules.default` | NixOS 服务模块（支持同时配置 `remora` 与本机 `coturn`）。 |
 
 构建指定输出包：

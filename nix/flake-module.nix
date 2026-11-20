@@ -10,16 +10,21 @@
     }:
     {
       overlayAttrs = {
-        inherit (config.packages) remora remora-web uu-remote-linux;
+        inherit (config.packages) remora remora-web;
+      }
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        inherit (config.packages) uu-remote-linux;
       };
 
       packages = {
         remora = final.callPackage ./package.nix { craneLib = inputs.crane.mkLib final; };
         remora-web = pkgs.buildPackages.callPackage ./web.nix { };
-        uu-remote-linux = final.callPackage ./uu-remote-linux.nix { };
         default = config.packages.remora;
       }
       // lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
+        uu-remote-linux = final.callPackage ./uu-remote-linux.nix {
+          src = inputs.uu-remote-linux;
+        };
         # A self-contained binary for release archives.
         remora-static =
           (final.pkgsStatic.remora.override {
