@@ -25,8 +25,13 @@ const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 /// How long a room token can be used to connect to signaling.
 const ROOM_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
-/// How long an upload token can be used. Clients fetch one ahead of time and keep using it.
-pub const UPLOAD_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
+/// How long clients are told an upload token lasts. They fetch one ahead of time, keep using
+/// it, and fetch the next only once this has passed.
+pub const UPLOAD_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How long an upload token works past [`UPLOAD_TOKEN_TTL`], so that uploads between its
+/// expiry and the client's next fetch still succeed.
+const UPLOAD_TOKEN_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// Secret that signs every token.
 pub struct TokenKey([u8; 32]);
@@ -147,7 +152,7 @@ impl TokenKey {
         self.sign(&UploadClaims {
             kind: Kind::Upload,
             upload,
-            exp: now() + UPLOAD_TOKEN_LIFETIME.as_secs(),
+            exp: now() + (UPLOAD_TOKEN_TTL + UPLOAD_TOKEN_GRACE).as_secs(),
         })
     }
 
@@ -283,12 +288,12 @@ mod tests {
     }
 
     #[test]
-    fn upload_tokens_expire() {
+    fn upload_tokens_expire_after_their_ttl() {
         let key = TokenKey::generate();
-        assert_eq!(
-            key.verify_upload(&key.issue_upload(upload())),
-            Some(upload())
-        );
+        let token = key.issue_upload(upload());
+        assert_eq!(key.verify_upload(&token), Some(upload()));
+        let exp = payload(&token)["exp"].as_u64().unwrap();
+        assert!(exp > now() + UPLOAD_TOKEN_TTL.as_secs(), "outlives its ttl");
         let expired = key.sign(&UploadClaims {
             kind: Kind::Upload,
             upload: upload(),

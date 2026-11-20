@@ -22,7 +22,7 @@ use serde_json::json;
 
 use crate::api::{self, ApiError, Body, Empty};
 use crate::device::{CallerDevice, Devices};
-use crate::token::{TokenKey, UPLOAD_TOKEN_LIFETIME, Upload, UserToken, random};
+use crate::token::{TokenKey, UPLOAD_TOKEN_TTL, Upload, UserToken, random};
 use crate::user::{Sessions, User};
 use crate::{Database, PublicUrl};
 
@@ -226,7 +226,7 @@ pub struct FileService {
 pub struct TokenResponse {
     token: String,
     req_url: String,
-    /// Seconds the token can be used for.
+    /// Seconds after which the client fetches a new token.
     ttl: u64,
     max_size: usize,
 }
@@ -252,7 +252,7 @@ pub async fn token(
     Ok(api::Ok(TokenResponse {
         token,
         req_url: format!("{}{UPLOAD_PATH}", service.public_url),
-        ttl: UPLOAD_TOKEN_LIFETIME.as_secs(),
+        ttl: UPLOAD_TOKEN_TTL.as_secs(),
         max_size: MAX_FILE_SIZE,
     }))
 }

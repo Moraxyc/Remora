@@ -67,13 +67,24 @@ async fn send(app: &Router, request: Request<Body>) -> (StatusCode, header::Head
 /// Uploads like uu-remote-linux: the raw bytes, with the bare token as `Authorization` and
 /// no account credentials.
 async fn upload(app: &Router, grant: &Value, content: &[u8]) -> (StatusCode, Value) {
+    upload_as(app, grant, Some("image/png"), content).await
+}
+
+/// Uploads the raw bytes, with `content_type` if any: the official Windows host sends none.
+async fn upload_as(
+    app: &Router,
+    grant: &Value,
+    content_type: Option<&str>,
+    content: &[u8],
+) -> (StatusCode, Value) {
     let path = grant["req_url"].as_str().unwrap();
     let path = path.strip_prefix(common::PUBLIC_URL).unwrap();
-    let request = Request::post(path)
-        .header(header::AUTHORIZATION, grant["token"].as_str().unwrap())
-        .header(header::CONTENT_TYPE, "image/png")
-        .body(Body::from(content.to_vec()))
-        .unwrap();
+    let mut request =
+        Request::post(path).header(header::AUTHORIZATION, grant["token"].as_str().unwrap());
+    if let Some(content_type) = content_type {
+        request = request.header(header::CONTENT_TYPE, content_type);
+    }
+    let request = request.body(Body::from(content.to_vec())).unwrap();
     let (status, _, body) = send(app, request).await;
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
@@ -104,9 +115,11 @@ async fn a_host_uploads_its_wallpaper_and_viewers_see_it() {
     let url = uploaded["url"].as_str().unwrap();
     assert!(url.starts_with("https://remora.test/api/files/"), "{url}");
 
-    // The same token keeps working until it expires.
-    let (status, again) = upload(&app, &grant, PNG).await;
+    // The same token keeps working until it expires, whatever type the body claims.
+    let jpeg = b"\xff\xd8\xff\xe0synthetic";
+    let (status, again) = upload_as(&app, &grant, None, jpeg).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["mime"], "image/jpeg");
     assert_ne!(again["url"], uploaded["url"]);
 
     assert_eq!(
