@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use listenfd::ListenFd;
 use remora_cloud::{OwnerPassword, Settings};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
@@ -31,7 +32,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let result = match (args.command, args.config) {
         (Some(Command::HashPassword), _) => hash_password(),
-        (None, Some(config)) => serve(config),
+        (None, Some(config)) => passed_socket().and_then(|socket| serve(config, socket)),
         (None, None) => unreachable!("clap requires --config without a subcommand"),
     };
     match result {
@@ -62,8 +63,19 @@ fn hash_password() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The listening socket systemd passed, if it passed one. Reading it clears `LISTEN_FDS` and
+/// `LISTEN_PID`, which is only sound before any other thread runs.
+fn passed_socket() -> Result<Option<std::net::TcpListener>, Box<dyn Error>> {
+    ListenFd::from_env()
+        .take_tcp_listener(0)
+        .map_err(|error| format!("the socket systemd passed is unusable: {error}").into())
+}
+
 #[tokio::main]
-async fn serve(config: PathBuf) -> Result<(), Box<dyn Error>> {
+async fn serve(
+    config: PathBuf,
+    socket: Option<std::net::TcpListener>,
+) -> Result<(), Box<dyn Error>> {
     let settings = Settings::load(&config)?;
     let filter =
         EnvFilter::try_new(&settings.log).map_err(|error| format!("invalid log: {error}"))?;
@@ -89,8 +101,23 @@ async fn serve(config: PathBuf) -> Result<(), Box<dyn Error>> {
         tracing::warn!("no signing key configured; request signatures are not checked");
     }
 
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!(addr = %listener.local_addr()?, "listening");
+    let listener = match socket {
+        Some(socket) => {
+            socket.set_nonblocking(true)?;
+            let listener = tokio::net::TcpListener::from_std(socket)?;
+            let addr = listener.local_addr()?;
+            tracing::info!(%addr, "listening on the socket systemd passed");
+            if addr != listen {
+                tracing::warn!(%addr, %listen, "the socket systemd passed is not on listen");
+            }
+            listener
+        }
+        None => {
+            let listener = tokio::net::TcpListener::bind(listen).await?;
+            tracing::info!(addr = %listener.local_addr()?, "listening");
+            listener
+        }
+    };
     let mut terminate = signal(SignalKind::terminate())?;
     let app = remora_cloud::router(config).into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, app)
