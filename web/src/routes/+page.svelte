@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { invalidate } from '$app/navigation';
 	import {
+		ApiError,
 		platformName,
 		revokeBrowser,
 		revokeClientSession,
 		signOut,
-		unbindDevice
+		unbindDevice,
+		wakeDevice
 	} from '#lib/api.ts';
 	import SignIn from '#lib/SignIn.svelte';
 	import type { PageProps } from './$types';
@@ -14,6 +16,30 @@
 
 	let busy = $state<string | null>(null);
 	let error = $state<string | null>(null);
+	let success = $state<string | null>(null);
+
+	const wakeErrors: Record<string, string> = {
+		device_online: 'That device is online already.',
+		no_lan_report: 'That device has not reported its LAN yet.',
+		no_wake_helper: 'No online device on the same LAN can wake it.',
+		too_many_requests: 'Too many wake requests. Wait a moment and try again.'
+	};
+
+	async function wake(id: string, csrf: string) {
+		busy = `wake:${id}`;
+		error = null;
+		success = null;
+		try {
+			await wakeDevice(id, csrf);
+			success = 'Wake request sent. The device may take a minute to come online.';
+		} catch (caught) {
+			error =
+				(caught instanceof ApiError && wakeErrors[caught.code]) ||
+				'Could not wake that device. Refresh and try again.';
+		} finally {
+			busy = null;
+		}
+	}
 
 	function formatTime(seconds: number): string {
 		return new Date(seconds * 1000).toLocaleString();
@@ -22,6 +48,7 @@
 	async function run(key: string, action: () => Promise<void>, refresh: string) {
 		busy = key;
 		error = null;
+		success = null;
 		try {
 			await action();
 			await invalidate(refresh);
@@ -54,6 +81,9 @@
 	{#if error}
 		<p class="notice error" role="alert">{error}</p>
 	{/if}
+	{#if success}
+		<p class="notice" role="status">{success}</p>
+	{/if}
 
 	<section aria-labelledby="devices-heading">
 		<h2 id="devices-heading">Devices</h2>
@@ -74,6 +104,11 @@
 								{platformName(device.platform)}
 							</div>
 						</div>
+						{#if !device.online && device.wakeable}
+							<button disabled={busy !== null} onclick={() => wake(device.id, signedIn.csrf)}>
+								Wake
+							</button>
+						{/if}
 						<button
 							class="secondary"
 							disabled={busy !== null}

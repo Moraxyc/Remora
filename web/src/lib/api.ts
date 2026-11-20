@@ -28,6 +28,8 @@ export interface ManagedDevice {
 	name: string;
 	platform: number;
 	online: boolean;
+	/** Whether it reported its LAN, so that a device on that LAN can wake it. */
+	wakeable: boolean;
 }
 
 export interface ClientSession {
@@ -121,6 +123,11 @@ export async function devices(fetch: Fetch): Promise<ManagedDevice[]> {
 
 export async function unbindDevice(id: string, csrf: string): Promise<void> {
 	await call(fetch, 'DELETE', `devices/${encodeURIComponent(id)}`, { csrf });
+}
+
+/** Asks an online device on the same LAN to wake this offline device. */
+export async function wakeDevice(id: string, csrf: string): Promise<void> {
+	await call(fetch, 'POST', `devices/${encodeURIComponent(id)}/wake`, { csrf });
 }
 
 export async function clientSessions(fetch: Fetch): Promise<ClientSession[]> {

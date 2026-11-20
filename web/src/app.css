@@ -67,6 +67,7 @@ h2 {
 }
 
 .item-info {
+	flex: 1;
 	min-width: 0;
 }
 
