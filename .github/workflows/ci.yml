@@ -61,9 +61,11 @@ jobs:
       - if: '!matrix.vm-test'
         env:
           checks: .#checks.${{ matrix.system }}
+        # `--no-build` evaluates in read-only mode, which cannot copy the dev partition's flake
+        # into the store, so `nix eval` must copy it first.
         run: |
-          nix flake check --no-build
           read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" ]))')"
+          nix flake check --no-build
           nix build --no-link --print-build-logs --keep-going "${names[@]/#/$checks.}"
 
   # The runner is a real Ubuntu, booted by systemd, so the package goes through apt, dpkg and
