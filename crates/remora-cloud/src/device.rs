@@ -110,8 +110,8 @@ impl Devices {
         Ok(true)
     }
 
-    /// Takes one of `user_id`'s devices off them and closes its host's sessions; `false` if it
-    /// is not theirs.
+    /// Takes one of `user_id`'s devices off them, closes its host's sessions and forgets its
+    /// LAN report; `false` if it is not theirs.
     pub fn unbind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
         let mut connection = self.0.connection();
         let transaction = connection.transaction()?;
@@ -123,6 +123,7 @@ impl Devices {
             return Ok(false);
         }
         transaction.execute("DELETE FROM sessions WHERE device_id = ?1", [device_id])?;
+        transaction.execute("DELETE FROM lan_reports WHERE device_id = ?1", [device_id])?;
         transaction.commit()?;
         Ok(true)
     }

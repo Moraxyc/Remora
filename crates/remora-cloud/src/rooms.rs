@@ -220,6 +220,16 @@ impl Rooms {
         members.end_sessions_with_host(&host_id);
     }
 
+    /// Sends an event to the device's host; `false` if it is not on signaling or not draining
+    /// its queue.
+    pub fn push_to_host(&self, device_id: &str, name: &str, body: Value) -> bool {
+        let rooms = self.0.lock().expect("rooms lock poisoned");
+        rooms
+            .get(device_id)
+            .and_then(|members| members.host.as_ref())
+            .is_some_and(|host| host.event(name, body))
+    }
+
     pub fn is_online(&self, device_id: &str) -> bool {
         let rooms = self.0.lock().expect("rooms lock poisoned");
         rooms

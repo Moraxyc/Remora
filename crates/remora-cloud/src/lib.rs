@@ -18,6 +18,7 @@ mod signaling;
 mod signing;
 mod token;
 mod user;
+mod wake;
 mod web;
 
 use std::fmt;
@@ -138,6 +139,7 @@ impl std::error::Error for InvalidPublicUrl {}
 #[derive(Clone, FromRef)]
 struct Cloud {
     devices: device::Devices,
+    lan_reports: wake::LanReports,
     sessions: user::Sessions,
     users: user::Users,
     browsers: browser::Browsers,
@@ -170,6 +172,7 @@ impl FromRef<Cloud> for web::Web {
             browsers: cloud.browsers.clone(),
             users: cloud.users.clone(),
             devices: cloud.devices.clone(),
+            lan_reports: cloud.lan_reports.clone(),
             sessions: cloud.sessions.clone(),
             rooms: cloud.rooms.clone(),
             password: cloud.owner_password.clone(),
@@ -206,6 +209,7 @@ impl FromRef<Cloud> for signaling::Admission {
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
+        lan_reports: config.database.clone().into(),
         sessions: config.database.clone().into(),
         users: config.database.clone().into(),
         browsers: config.database.clone().into(),
@@ -224,6 +228,7 @@ pub fn router(config: Config) -> Router {
     let api = Router::new()
         .route("/api/v1/device/windows/init", post(device::windows_init))
         .route("/api/v1/device/list", get(device::list))
+        .route("/api/v1/device/wake_on_lan/info", post(wake::report))
         .route("/api/v1/device/{device_id}/unbind", post(device::unbind))
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
@@ -258,6 +263,7 @@ pub fn router(config: Config) -> Router {
         )
         .route("/api/web/devices", get(web::devices))
         .route("/api/web/devices/{id}", delete(web::unbind_device))
+        .route("/api/web/devices/{id}/wake", post(web::wake_device))
         .route("/api/web/client-sessions", get(web::client_sessions))
         .route(
             "/api/web/client-sessions/{id}",

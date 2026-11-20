@@ -1,5 +1,6 @@
 //! Limits on how often clients may do what needs no account or guesses a secret: signing in
-//! with the password, starting a QR login and registering a device.
+//! with the password, starting a QR login and registering a device; and on waking devices,
+//! which makes other hosts broadcast on their LAN.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -48,6 +49,11 @@ const QR_LOGIN_PER_CLIENT: Rate = Rate {
 const REGISTRATION_PER_CLIENT: Rate = Rate {
     burst: 10,
     every: Duration::from_secs(60),
+};
+
+const WAKE_PER_CLIENT: Rate = Rate {
+    burst: 5,
+    every: Duration::from_secs(30),
 };
 
 /// Counts attempts per client with the generic cell rate algorithm: each client has the time
@@ -105,6 +111,7 @@ pub struct Limits {
     password_total: Limiter,
     qr_login: Limiter,
     registration: Limiter,
+    wake: Limiter,
 }
 
 impl Default for Limits {
@@ -114,6 +121,7 @@ impl Default for Limits {
             password_total: Limiter::new(PASSWORD_TOTAL),
             qr_login: Limiter::new(QR_LOGIN_PER_CLIENT),
             registration: Limiter::new(REGISTRATION_PER_CLIENT),
+            wake: Limiter::new(WAKE_PER_CLIENT),
         }
     }
 }
@@ -135,6 +143,10 @@ impl Limits {
 
     pub fn registration(&self, client: Option<IpAddr>) -> bool {
         Self::check(&self.registration, "registration", client)
+    }
+
+    pub fn wake(&self, client: Option<IpAddr>) -> bool {
+        Self::check(&self.wake, "wake", client)
     }
 
     fn check(limiter: &Limiter, limit: &'static str, client: Option<IpAddr>) -> bool {

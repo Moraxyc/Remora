@@ -1,5 +1,5 @@
 //! What survives a restart, kept in SQLite: the token key, users, registered devices, user
-//! sessions and signed-in browsers.
+//! sessions, signed-in browsers and devices' LAN reports.
 
 use std::fmt;
 use std::path::Path;
@@ -58,6 +58,15 @@ const MIGRATIONS: &[&str] = &[
 ",
     "
     ALTER TABLE sessions ADD COLUMN created INTEGER NOT NULL DEFAULT 0;
+",
+    "
+    -- Each device's last LAN identity, for Wake-on-LAN.
+    CREATE TABLE lan_reports (
+        device_id TEXT PRIMARY KEY,
+        mac TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        subnet_mask TEXT NOT NULL
+    ) STRICT;
 ",
 ];
 

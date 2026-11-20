@@ -2,6 +2,7 @@
 //! cookie (see [`crate::browser`]). Bodies are JSON, which other sites cannot send without the
 //! browser asking this server first.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -24,6 +25,7 @@ use crate::oidc::OidcProvider;
 use crate::password::OwnerPassword;
 use crate::rooms::Rooms;
 use crate::user::{OWNER_ID, Profile, Sessions, Users};
+use crate::wake::{self, LanReports, WakeRefused};
 
 /// Ties a sign-in at the OpenID Connect provider to the browser that started it. Lax, because
 /// the provider sends the browser back from another site.
@@ -42,6 +44,7 @@ pub struct Web {
     pub browsers: Browsers,
     pub users: Users,
     pub devices: Devices,
+    pub lan_reports: LanReports,
     pub sessions: Sessions,
     pub rooms: Rooms,
     /// Without a password, nobody can sign in with one.
@@ -64,6 +67,12 @@ pub enum WebError {
     PasswordOff,
     /// The browser tried too often and has to wait.
     TooManyRequests,
+    /// The device to wake is online already.
+    DeviceOnline,
+    /// The device to wake never reported its LAN identity.
+    NoLanReport,
+    /// None of the user's online devices is on the LAN of the device to wake.
+    NoWakeHelper,
     Internal,
 }
 
@@ -77,6 +86,9 @@ impl IntoResponse for WebError {
             Self::WrongPassword => (StatusCode::UNAUTHORIZED, "wrong_password"),
             Self::PasswordOff => (StatusCode::NOT_FOUND, "password_off"),
             Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
+            Self::DeviceOnline => (StatusCode::CONFLICT, "device_online"),
+            Self::NoLanReport => (StatusCode::CONFLICT, "no_lan_report"),
+            Self::NoWakeHelper => (StatusCode::CONFLICT, "no_wake_helper"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (status, Json(json!({ "error": code }))).into_response()
@@ -378,6 +390,8 @@ pub struct ManagedDevice {
     name: String,
     platform: u8,
     online: bool,
+    /// Whether it reported its LAN identity, so that a device on its LAN may wake it.
+    wakeable: bool,
 }
 
 /// `GET /api/web/devices`: the signed-in user's bound devices.
@@ -386,10 +400,17 @@ pub async fn devices(
     State(web): State<Web>,
 ) -> Result<Json<Vec<ManagedDevice>>, WebError> {
     let owned = web.devices.owned_by(&signed_in.user.id)?;
+    let reported: HashSet<String> = web
+        .lan_reports
+        .of_user(&signed_in.user.id)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     let list = owned
         .into_iter()
         .map(|device| ManagedDevice {
             online: web.rooms.is_online(&device.id),
+            wakeable: reported.contains(&device.id),
             id: device.id,
             name: device.name,
             platform: device.platform,
@@ -411,6 +432,34 @@ pub async fn unbind_device(
     web.rooms.kick_host(&id);
     tracing::info!(user_id = %signed_in.user.id, device_id = %id, "device unbound from web");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/web/devices/{id}/wake`, with an empty body: asks an online device of the user on
+/// the LAN of their offline device to wake it with a magic packet. Answers once asked.
+pub async fn wake_device(
+    signed_in: SignedIn,
+    State(web): State<Web>,
+    ClientAddress(address): ClientAddress,
+    Path(id): Path<String>,
+) -> Result<StatusCode, WebError> {
+    let user_id = &signed_in.user.id;
+    if web.devices.platform_of_owned(&id, user_id)?.is_none() {
+        return Err(WebError::NotFound);
+    }
+    if web.rooms.is_online(&id) {
+        return Err(WebError::DeviceOnline);
+    }
+    if !web.limits.wake(address) {
+        return Err(WebError::TooManyRequests);
+    }
+    match wake::wake(&web.lan_reports, &web.rooms, user_id, &id)? {
+        Ok(helper_id) => {
+            tracing::info!(%user_id, device_id = %id, %helper_id, "wake_on_lan pushed");
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(WakeRefused::NoLanReport) => Err(WebError::NoLanReport),
+        Err(WakeRefused::NoHelper) => Err(WebError::NoWakeHelper),
+    }
 }
 
 #[derive(Serialize)]
