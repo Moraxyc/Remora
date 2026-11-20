@@ -1,6 +1,7 @@
 {
   lib,
   fetchFromGitHub,
+  fetchpatch2,
   rustPlatform,
   pkg-config,
   wayland-scanner,
@@ -40,7 +41,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   cargoLock.lockFile = ../_sources/${finalAttrs.passthru.lock.derived.cargoLock.lockfile};
 
-  patches = [ ./patches/uu-remote-linux-base-url.patch ];
+  patches = [
+    # feat: allow a custom API base URL (#254); drop with the release after 0.2.61.
+    (fetchpatch2 {
+      name = "uu-remote-linux-base-url.patch";
+      url = "https://github.com/VallierDev/uu-remote-linux/commit/f19257428c7ba85289bd83385c0e677eff3c7b7d.patch?full_index=1";
+      hash = "sha256-8PDDPKTQo5Dh6bYCv2fKLUG6Z/PVpOyToUfcIHBSohQ=";
+    })
+  ];
 
   postPatch = ''
     substituteInPlace src/terminal.rs \
