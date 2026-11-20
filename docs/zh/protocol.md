@@ -49,7 +49,8 @@
 |---|---|---|---|
 | `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "..."}`（`name` 可选，其余硬件字段被忽略） | `{"device_id": "..."}`。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称，平台记为 `1`（Windows）。 |
 | `GET /api/v1/device/list` | User Token | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform` 与 `status`（`"CONNECTED"` 或 `"DISCONNECTED"`）。 |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话，并向在线被控端发送踢出信令。 |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话与局域网信息，并向在线被控端发送踢出信令。 |
+| `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`。保存调用方已绑定设备最近一次上报的局域网信息，用于网络唤醒。`inner_ip` 为局域网地址且必填；字段缺失或无效（MAC 须为以 `:` 或 `-` 分隔的 6 个十六进制字节，地址须为 IPv4，子网掩码须连续）时返回 HTTP `422`、code `1001`。 |
 
 ### 扫码登录接口
 
@@ -81,8 +82,9 @@
 | `GET /api/web/oidc/callback` | 匿名 | 校验 OIDC 授权码与 ID Token，建档或更新用户并写入 `remora_session` Cookie。 |
 | `GET /api/web/logins/{id}` | 匿名（URL `id` 凭证） | 将二维码标记为已扫描（`Scanned`），返回发起设备的名称、平台、来源 IP、创建时间及确认状态。 |
 | `POST /api/web/logins/{id}` | Cookie + CSRF | 提交 `{"decision": "confirm" \| "deny"}` 确认或拒绝该次客户端扫码登录。 |
-| `GET /api/web/devices` | Cookie | 列出当前用户绑定的设备及在线状态。 |
+| `GET /api/web/devices` | Cookie | 列出当前用户绑定的设备、在线状态及 `wakeable`（设备是否上报过局域网信息；不返回任何地址）。 |
 | `DELETE /api/web/devices/{id}` | Cookie + CSRF | 解绑指定设备、删除其被控端登录会话并踢出在线被控端。 |
+| `POST /api/web/devices/{id}/wake` | Cookie + CSRF（限流） | 唤醒离线设备：在当前用户的在线设备中选一台上报的 IPv4 网段（地址与掩码）与目标相同的设备，向其推送 `wake_on_lan`，推送后返回 `204`。错误：`404 not_found`、`409 device_online`、`409 no_lan_report`、`409 no_wake_helper`、`429 too_many_requests`。 |
 | `GET /api/web/client-sessions` | Cookie | 列出当前用户所有活跃的客户端登录会话。 |
 | `DELETE /api/web/client-sessions/{id}` | Cookie + CSRF | 吊销指定客户端登录会话（若为在线被控端会话，同步踢出信令房间）。 |
 | `GET /api/web/browsers` | Cookie | 列出当前用户所有活跃的浏览器登录会话。 |
@@ -105,6 +107,7 @@ Engine.IO 建立后，客户端发送 `"40"` 加入 Socket.IO 默认命名空间
 | Viewer → Cloud | `control`（带 Ack，含 1 个二进制附件） | 请求建立控制会话。JSON 参数包含 `app_control_id`、可选 `streamer_data` 以及指向序列化 `gv_pb.ConnectOptions` 附件的 `app_data` 占位符。允许接入时，服务端分配 `ice_id` 与临时 TURN 凭据，向被控端发送 `be-controlled`，并向控制端回复 Ack `["success", {"ice_id", "client_id": <host_id>, "app_control_id", "iceServers", "force_relay"}]`；拒绝时回复 `["failure", {"reason": "host offline" \| "controlled from another device"}]`。 |
 | Cloud → Host | `be-controlled`（含 1 个二进制附件） | JSON 参数包含 `ice_id`、`client_id`（控制端连接 ID）、`app_control_id`、`iceServers`、`force_relay`、`app_data` 占位符、可选 `streamer_data`，以及由 `ConnectOptions.client_type` 映射的 `controller_platform`（`1` Windows、`2` Android、`3` iOS、`4` macOS）；二进制帧原样转发 `ConnectOptions`。 |
 | Host ↔ Viewer | `soac`、`forward_setting` | 转发 SDP Offer/Answer、ICE 候选与会话设置。被控端通过顶层 `client_id` 指定目标控制端；控制端通过 `data.ice_id` 指定目标会话。服务端校验会话归属后，将 JSON 中的 `client_id` 改写为发送方的真实连接 ID 再投递给对端。 |
+| Cloud → Host | `bmsg_push`（`wake_on_lan`） | `{"type":"wake_on_lan","data":{"target_device":{"mac":"aa:bb:cc:dd:ee:ff","ip":"192.168.1.20","subnet_mask":"255.255.255.0"}}}`，发给 `POST /api/web/devices/{id}/wake` 选中的协助唤醒被控端，由其在所在局域网内发送魔术包。 |
 | Cloud → Host | `released` | 控制端断开连接或被其他控制端通过 `force_join` 抢占时发送：`{"ice_id": "...", "client_id": "<viewer_id>"}`。 |
 | Cloud → Host | `left`（无 `ice_id`） | 被控端被新连接顶替或设备被解绑时发送 `{}`，随后服务端关闭该 WebSocket。 |
 | Cloud → Viewer | `left`（带 `ice_id`） | 被控端断线超过 30 秒宽限期、被踢出或当前控制端被 `force_join` 抢占时发送：`{"ice_id": "...", "client_id": "<host_id>"}`。 |

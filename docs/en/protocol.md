@@ -49,7 +49,8 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 |---|---|---|---|
 | `POST /api/v1/device/windows/init` | None (rate-limited) | `{"client_id": "...", "name": "..."}` (`name` optional; hardware fields ignored) | `{"device_id": "..."}`. Idempotent by `client_id`: re-registering returns the existing `device_id`, updates `name`, and sets platform `1` (Windows). |
 | `GET /api/v1/device/list` | User Token | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` has `device_id`, optional `alias`, `platform`, and `status` (`"CONNECTED"` or `"DISCONNECTED"`). |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions, and kicks any connected host. |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions and LAN report, and kicks any connected host. |
+| `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`. Stores the calling bound device's last LAN report for Wake-on-LAN. `inner_ip` is the LAN address and is required; a missing or invalid field (MAC of six hex bytes separated by `:` or `-`, IPv4 addresses, contiguous netmask) answers HTTP `422` with code `1001`. |
 
 ### QR Login
 
@@ -81,8 +82,9 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 | `GET /api/web/oidc/callback` | None | Exchanges the authorization code, verifies the ID token, upserts the user, and sets `remora_session`. |
 | `GET /api/web/logins/{id}` | None (URL `id` capability) | Marks the QR login `Scanned` and returns device name, platform, client IP, creation timestamp, and confirmation state. |
 | `POST /api/web/logins/{id}` | Cookie + CSRF | Submits `{"decision": "confirm" \| "deny"}` for the pending QR login. |
-| `GET /api/web/devices` | Cookie | Lists devices bound to the signed-in user with online status. |
+| `GET /api/web/devices` | Cookie | Lists devices bound to the signed-in user with online status and `wakeable` (whether the device reported its LAN; addresses are never returned). |
 | `DELETE /api/web/devices/{id}` | Cookie + CSRF | Unbinds the device, deletes its host login sessions, and kicks any online host. |
+| `POST /api/web/devices/{id}/wake` | Cookie + CSRF (rate-limited) | Wakes an offline device: pushes `wake_on_lan` to one of the user's online devices whose reported IPv4 network (address and netmask) equals the target's, and returns `204` once sent. Errors: `404 not_found`, `409 device_online`, `409 no_lan_report`, `409 no_wake_helper`, `429 too_many_requests`. |
 | `GET /api/web/client-sessions` | Cookie | Lists active client User Token sessions for the signed-in user. |
 | `DELETE /api/web/client-sessions/{id}` | Cookie + CSRF | Revokes a client session (and kicks the host if the session belongs to an online host). |
 | `GET /api/web/browsers` | Cookie | Lists active browser sessions for the signed-in user. |
@@ -105,6 +107,7 @@ After receiving the Open frame, the client sends `"40"` to connect to the defaul
 | Viewer → Cloud | `control` (Ack + 1 binary frame) | Requests a control session. The JSON payload carries `app_control_id`, optional `streamer_data`, and an `app_data` placeholder pointing to serialized `gv_pb.ConnectOptions`. When granted, the server allocates an `ice_id` and 24-hour TURN credentials, emits `be-controlled` to the host, and acks `["success", {"ice_id", "client_id": <host_id>, "app_control_id", "iceServers", "force_relay"}]`; when refused, it acks `["failure", {"reason": "host offline" \| "controlled from another device"}]`. |
 | Cloud → Host | `be-controlled` (1 binary frame) | The JSON payload carries `ice_id`, `client_id` (viewer's connection ID), `app_control_id`, `iceServers`, `force_relay`, `app_data` placeholder, optional `streamer_data`, and `controller_platform` mapped from `ConnectOptions.client_type` (`1` Windows, `2` Android, `3` iOS, `4` macOS). The binary frame forwards the raw `ConnectOptions` bytes. |
 | Host ↔ Viewer | `soac`, `forward_setting` | Relays SDP offers/answers, ICE candidates, and session settings. The host addresses a viewer via top-level `client_id`; the viewer addresses the host via `data.ice_id`. After verifying session ownership, the server overwrites `client_id` in the JSON payload with the sender's verified connection ID before forwarding. |
+| Cloud → Host | `bmsg_push` (`wake_on_lan`) | `{"type":"wake_on_lan","data":{"target_device":{"mac":"aa:bb:cc:dd:ee:ff","ip":"192.168.1.20","subnet_mask":"255.255.255.0"}}}`, sent to the helper host chosen by `POST /api/web/devices/{id}/wake`. The host sends a magic packet on its LAN. |
 | Cloud → Host | `released` | Sent when a viewer disconnects or is displaced by `force_join`: `{"ice_id": "...", "client_id": "<viewer_id>"}`. |
 | Cloud → Host | `left` (without `ice_id`) | Sent as `{}` before closing the WebSocket when a host is replaced by a newer connection or unbound. |
 | Cloud → Viewer | `left` (with `ice_id`) | Sent when a host fails to reconnect within the 30-second grace period, is kicked, or the viewer is displaced by `force_join`: `{"ice_id": "...", "client_id": "<host_id>"}`. |

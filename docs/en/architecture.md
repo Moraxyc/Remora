@@ -74,10 +74,11 @@ Unauthenticated endpoints and password checks enforce Generic Cell Rate Algorith
 | Owner password check | Global total | 30 | 1 per 10 s |
 | QR login generation | Per client IPv4 / IPv6 `/64` | 10 | 1 per 10 s |
 | Device registration | Per client IPv4 / IPv6 `/64` | 10 | 1 per 60 s |
+| Wake-on-LAN request | Per client IPv4 / IPv6 `/64` | 5 | 1 per 30 s |
 
 ## 6. SQLite Storage and Log Redaction
 
-`database.rs` opens SQLite with `journal_mode = WAL`, `synchronous = NORMAL`, a 5-second `busy_timeout`, and `STRICT` tables migrated sequentially via `PRAGMA user_version` (schema version `4`):
+`database.rs` opens SQLite with `journal_mode = WAL`, `synchronous = NORMAL`, a 5-second `busy_timeout`, and `STRICT` tables migrated sequentially via `PRAGMA user_version` (schema version `5`):
 
 | Table | Columns | Purpose |
 |---|---|---|
@@ -86,5 +87,6 @@ Unauthenticated endpoints and password checks enforce Generic Cell Rate Algorith
 | `sessions` | `id TEXT PRIMARY KEY, user_id TEXT, device_id TEXT, created INTEGER` | Tracks active client User Token sessions; indexed by `device_id` for cascade cleanup on unbind. |
 | `users` | `id TEXT PRIMARY KEY, issuer TEXT, subject TEXT, name TEXT` | Pre-seeded with `id = '1'` (`Owner`); OIDC users keyed by `UNIQUE (issuer, subject)`. |
 | `browsers` | `id TEXT PRIMARY KEY, user_id TEXT, csrf TEXT, created INTEGER, expires INTEGER` | Tracks browser sessions, with the SHA-256 digest of `remora_session` as `id`. |
+| `lan_reports` | `device_id TEXT PRIMARY KEY, mac TEXT, ip TEXT, subnet_mask TEXT` | Each device's last Wake-on-LAN report, kept while the device is offline; deleted on unbind. |
 
-Log statements record only entity identifiers (`user_id`, `device_id`), session counts, byte sizes, and booleans. Types holding secret material (`SignKey`, `TurnSecret`, `OwnerPassword`, `Database`) implement `Debug` with fixed placeholders such as `SignKey(..)`, keeping JWTs, cookies, QR URLs and tickets, password hashes, TURN secrets and derived credentials, OIDC client secrets, and SDP `ufrag` / `pwd` out of logs and error traces.
+Log statements record only entity identifiers (`user_id`, `device_id`), session counts, byte sizes, and booleans. Types holding secret material (`SignKey`, `TurnSecret`, `OwnerPassword`, `Database`, `LanReport`) implement `Debug` with fixed placeholders such as `SignKey(..)`, keeping JWTs, cookies, QR URLs and tickets, password hashes, TURN secrets and derived credentials, OIDC client secrets, and SDP `ufrag` / `pwd`, and devices' MAC addresses, LAN addresses and netmasks out of logs and error traces.
