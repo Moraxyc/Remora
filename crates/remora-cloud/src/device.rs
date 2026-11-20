@@ -10,12 +10,13 @@ use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::Database;
 use crate::address::ClientAddress;
 use crate::api::{self, ApiError, Body, Empty};
+use crate::files::{FileId, Files};
 use crate::limit::Limits;
 use crate::rooms::Rooms;
 use crate::user::User;
+use crate::{Database, PublicUrl};
 
 /// Identifies the calling installation once it has registered.
 const DEVICE_ID_HEADER: &str = "x-param-device-id";
@@ -111,7 +112,7 @@ impl Devices {
     }
 
     /// Takes one of `user_id`'s devices off them, closes its host's sessions and forgets its
-    /// LAN report; `false` if it is not theirs.
+    /// LAN report, its wallpaper and the files it uploaded; `false` if it is not theirs.
     pub fn unbind(&self, device_id: &str, user_id: &str) -> rusqlite::Result<bool> {
         let mut connection = self.0.connection();
         let transaction = connection.transaction()?;
@@ -124,6 +125,8 @@ impl Devices {
         }
         transaction.execute("DELETE FROM sessions WHERE device_id = ?1", [device_id])?;
         transaction.execute("DELETE FROM lan_reports WHERE device_id = ?1", [device_id])?;
+        transaction.execute("DELETE FROM wallpapers WHERE device_id = ?1", [device_id])?;
+        transaction.execute("DELETE FROM files WHERE device_id = ?1", [device_id])?;
         transaction.commit()?;
         Ok(true)
     }
@@ -195,8 +198,14 @@ pub async fn windows_init(
     Ok(api::Ok(InitResponse { device_id }))
 }
 
-fn entry(device: Device, rooms: &Rooms) -> Entry {
+fn entry(
+    device: Device,
+    wallpaper: Option<&FileId>,
+    rooms: &Rooms,
+    public_url: &PublicUrl,
+) -> Entry {
     Entry {
+        wallpaper_url: wallpaper.map(|file| file.url(public_url)),
         status: if rooms.is_online(&device.id) {
             Status::Connected
         } else {
@@ -215,6 +224,9 @@ pub struct Entry {
     alias: Option<String>,
     platform: u8,
     status: Status,
+    /// The image the device's card shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wallpaper_url: Option<String>,
 }
 
 /// Whether the device's host is on signaling right now.
@@ -239,16 +251,28 @@ pub async fn list(
     user: User,
     State(devices): State<Devices>,
     State(rooms): State<Rooms>,
+    State(files): State<Files>,
+    State(public_url): State<PublicUrl>,
     CallerDevice(caller): CallerDevice,
 ) -> Result<api::Ok<ListResponse>, ApiError> {
     let current_device = match caller {
-        Some(id) => devices.get(&id)?.map(|device| entry(device, &rooms)),
+        Some(id) => match devices.get(&id)? {
+            Some(device) => {
+                let wallpaper = files.wallpaper_of(&device.id)?;
+                Some(entry(device, wallpaper.as_ref(), &rooms, &public_url))
+            }
+            None => None,
+        },
         None => None,
     };
+    let wallpapers = files.wallpapers_of_user(&user.id)?;
     let my_binded_devices = devices
         .owned_by(&user.id)?
         .into_iter()
-        .map(|device| entry(device, &rooms))
+        .map(|device| {
+            let wallpaper = wallpapers.get(&device.id);
+            entry(device, wallpaper, &rooms, &public_url)
+        })
         .collect();
     Ok(api::Ok(ListResponse {
         current_device,

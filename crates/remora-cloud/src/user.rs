@@ -170,7 +170,7 @@ impl Sessions {
             .optional()
     }
 
-    fn is_open(&self, token: &UserToken) -> rusqlite::Result<bool> {
+    pub(crate) fn is_open(&self, token: &UserToken) -> rusqlite::Result<bool> {
         let found = self
             .0
             .connection()

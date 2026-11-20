@@ -1,5 +1,5 @@
 //! What survives a restart, kept in SQLite: the token key, users, registered devices, user
-//! sessions, signed-in browsers and devices' LAN reports.
+//! sessions, signed-in browsers, devices' LAN reports, uploaded files and devices' wallpapers.
 
 use std::fmt;
 use std::path::Path;
@@ -66,6 +66,26 @@ const MIGRATIONS: &[&str] = &[
         mac TEXT NOT NULL,
         ip TEXT NOT NULL,
         subnet_mask TEXT NOT NULL
+    ) STRICT;
+",
+    "
+    -- Images clients uploaded. Only the last few of each uploader are kept, and those that
+    -- are a device's wallpaper.
+    CREATE TABLE files (
+        -- Random, because it is in the file's URL, which is served to anyone who has it.
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        -- The user's device that uploaded it, if the client named one of theirs.
+        device_id TEXT,
+        mime TEXT NOT NULL,
+        md5 TEXT NOT NULL,
+        content BLOB NOT NULL
+    ) STRICT;
+    CREATE INDEX files_by_uploader ON files (user_id, device_id);
+    -- The image each device shows on its card.
+    CREATE TABLE wallpapers (
+        device_id TEXT PRIMARY KEY,
+        file_id TEXT NOT NULL
     ) STRICT;
 ",
 ];

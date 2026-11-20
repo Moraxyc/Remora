@@ -4,6 +4,8 @@
 //!   used until rejected. Each names its session (`sid`), which can be revoked.
 //! - Room tokens authenticate one signaling connection, as a device's host or as a viewer
 //!   joining it, and expire.
+//! - Upload tokens let a logged-in client upload files until they expire, as long as its
+//!   session is open.
 //!
 //! Each token names its kind, so one kind is never accepted as the other.
 
@@ -23,6 +25,9 @@ const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 /// How long a room token can be used to connect to signaling.
 const ROOM_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
+/// How long an upload token can be used. Clients fetch one ahead of time and keep using it.
+pub const UPLOAD_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
+
 /// Secret that signs every token.
 pub struct TokenKey([u8; 32]);
 
@@ -31,6 +36,7 @@ pub struct TokenKey([u8; 32]);
 enum Kind {
     User,
     Room,
+    Upload,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -71,6 +77,23 @@ pub enum Role {
         /// Joined with `force_join`: its desktop session ends other devices' ones.
         take_over: bool,
     },
+}
+
+/// What an upload token grants: uploading files as user `sub` in session `sid`, from
+/// `device_id` when it is one of theirs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Upload {
+    pub sub: String,
+    pub sid: String,
+    pub device_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadClaims {
+    kind: Kind,
+    #[serde(flatten)]
+    upload: Upload,
+    exp: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,6 +141,20 @@ impl TokenKey {
     pub fn verify_room(&self, token: &str) -> Option<Room> {
         let claims: RoomClaims = self.verify(token)?;
         (claims.kind == Kind::Room && claims.exp > now()).then_some(claims.room)
+    }
+
+    pub fn issue_upload(&self, upload: Upload) -> String {
+        self.sign(&UploadClaims {
+            kind: Kind::Upload,
+            upload,
+            exp: now() + UPLOAD_TOKEN_LIFETIME.as_secs(),
+        })
+    }
+
+    /// What an unexpired upload token this key issued grants.
+    pub fn verify_upload(&self, token: &str) -> Option<Upload> {
+        let claims: UploadClaims = self.verify(token)?;
+        (claims.kind == Kind::Upload && claims.exp > now()).then_some(claims.upload)
     }
 
     fn sign(&self, claims: &impl Serialize) -> String {
@@ -237,11 +274,36 @@ mod tests {
         assert_eq!(key.verify_room(&expired), None);
     }
 
+    fn upload() -> Upload {
+        Upload {
+            sub: "1".into(),
+            sid: "s".into(),
+            device_id: Some("d".into()),
+        }
+    }
+
+    #[test]
+    fn upload_tokens_expire() {
+        let key = TokenKey::generate();
+        assert_eq!(
+            key.verify_upload(&key.issue_upload(upload())),
+            Some(upload())
+        );
+        let expired = key.sign(&UploadClaims {
+            kind: Kind::Upload,
+            upload: upload(),
+            exp: now() - 1,
+        });
+        assert_eq!(key.verify_upload(&expired), None);
+    }
+
     #[test]
     fn kinds_are_not_interchangeable() {
         let key = TokenKey::generate();
         assert_eq!(key.verify_room(&key.issue_user(&user())), None);
         assert_eq!(key.verify_user(&key.issue_room(room())), None);
+        assert_eq!(key.verify_upload(&key.issue_room(room())), None);
+        assert_eq!(key.verify_room(&key.issue_upload(upload())), None);
     }
 
     #[test]

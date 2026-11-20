@@ -6,6 +6,7 @@ mod app;
 mod browser;
 mod database;
 mod device;
+mod files;
 mod ice;
 mod limit;
 mod login;
@@ -26,7 +27,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::FromRef;
+use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::middleware::{from_fn_with_state, map_response};
 use axum::routing::{delete, get, post};
 use remora_proto::cloud::SignKey;
@@ -140,6 +141,7 @@ impl std::error::Error for InvalidPublicUrl {}
 struct Cloud {
     devices: device::Devices,
     lan_reports: wake::LanReports,
+    files: files::Files,
     sessions: user::Sessions,
     users: user::Users,
     browsers: browser::Browsers,
@@ -159,6 +161,18 @@ struct Cloud {
 impl FromRef<Cloud> for room::Tickets {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
+            tokens: cloud.tokens.clone(),
+            public_url: cloud.public_url.clone(),
+        }
+    }
+}
+
+impl FromRef<Cloud> for files::FileService {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            files: cloud.files.clone(),
+            devices: cloud.devices.clone(),
+            sessions: cloud.sessions.clone(),
             tokens: cloud.tokens.clone(),
             public_url: cloud.public_url.clone(),
         }
@@ -210,6 +224,7 @@ pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
         lan_reports: config.database.clone().into(),
+        files: config.database.clone().into(),
         sessions: config.database.clone().into(),
         users: config.database.clone().into(),
         browsers: config.database.clone().into(),
@@ -229,6 +244,8 @@ pub fn router(config: Config) -> Router {
         .route("/api/v1/device/windows/init", post(device::windows_init))
         .route("/api/v1/device/list", get(device::list))
         .route("/api/v1/device/wake_on_lan/info", post(wake::report))
+        .route("/api/v1/device/wallpaper", post(files::set_wallpaper))
+        .route("/api/v1/tool/fp/token", get(files::token))
         .route("/api/v1/device/{device_id}/unbind", post(device::unbind))
         .route("/api/v1/qrcode/gen/login", post(login::generate))
         .route("/api/v1/qrcode/login/status", post(login::status))
@@ -273,12 +290,24 @@ pub fn router(config: Config) -> Router {
         .route("/api/web/browsers/{id}", delete(web::revoke_browser))
         .layer(map_response(web::no_store))
         .with_state(cloud.clone());
+    // Uploads carry an upload token instead of a signature, and files are fetched without
+    // credentials. A form around the file may add a little to its size.
+    let files = Router::new()
+        .route(
+            files::UPLOAD_PATH,
+            post(files::upload).layer(DefaultBodyLimit::max(files::MAX_FILE_SIZE + 64 * 1024)),
+        )
+        .route("/api/files/{id}", get(files::serve))
+        .with_state(cloud.clone());
     // Signaling requests carry the room token instead of a signature, and browsers sign
     // nothing.
     let signaling = Router::new()
         .route("/socket.io/", get(signaling::connect))
         .with_state(cloud);
-    api.merge(web_api).merge(signaling).fallback(app::serve)
+    api.merge(web_api)
+        .merge(files)
+        .merge(signaling)
+        .fallback(app::serve)
 }
 
 #[cfg(test)]
