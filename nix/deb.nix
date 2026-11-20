@@ -20,6 +20,19 @@ let
     version = debVersion;
     installedSize = null;
   };
+  staticBinaryOverride =
+    {
+      x86_64-linux = ''
+        # A static-pie executable: it has no interpreter, and no libraries to declare.
+        remora: shared-library-lacks-prerequisites [usr/bin/remora]'';
+      aarch64-linux = ''
+        # A statically linked musl executable: rustc does not default this target to static-pie.
+        remora: statically-linked-binary [usr/bin/remora]'';
+    }
+    .${stdenvNoCC.hostPlatform.system};
+  lintianOverrides = replaceVars ./debian/lintian-overrides {
+    inherit staticBinaryOverride;
+  };
 in
 stdenvNoCC.mkDerivation {
   pname = "${pname}-deb";
@@ -49,7 +62,7 @@ stdenvNoCC.mkDerivation {
     gzip -9n < changelog.Debian > root/usr/share/doc/${pname}/changelog.Debian.gz
     install -Dm644 -t root/usr/share/doc/${pname}/examples contrib/remora.toml contrib/turnserver.conf
     install -Dm644 -t root/usr/lib/systemd/system contrib/remora.service
-    install -Dm644 ${./debian/lintian-overrides} root/usr/share/lintian/overrides/${pname}
+    install -Dm644 ${lintianOverrides} root/usr/share/lintian/overrides/${pname}
     install -Dm644 ${control} root/DEBIAN/control
     for script in postinst prerm postrm; do
       install -Dm755 ${./debian}/$script root/DEBIAN/$script
