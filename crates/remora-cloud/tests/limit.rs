@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use remora_cloud::{Config, OwnerPassword, TrustedProxies, TrustedProxy};
+use remora_cloud::{Config, OwnerPassword, PeerAddress, TrustedProxies, TrustedProxy};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -90,6 +90,83 @@ async fn login_pages_show_the_client_a_trusted_proxy_names() {
         "198.51.100.1",
         "only a trusted proxy is believed"
     );
+}
+
+#[tokio::test]
+async fn unix_sockets_trust_forwarded_for_by_default() {
+    let app = remora_cloud::router(common::config());
+    let request = Request::post("/api/v1/qrcode/gen/login")
+        .extension(ConnectInfo(PeerAddress::Unix))
+        .header("x-forwarded-for", "203.0.113.9");
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let generated: Value = serde_json::from_slice(&bytes).unwrap();
+    let url = generated["data"]["qrcode_jump_url"].as_str().unwrap();
+    let id = url.rsplit_once('/').unwrap().1;
+    let response = app
+        .oneshot(
+            Request::get(format!("/api/web/logins/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let login: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(login["address"], "203.0.113.9");
+}
+
+#[tokio::test]
+async fn unix_listener_serves_and_extracts_forwarded_for() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let socket_path = std::env::temp_dir().join(format!("remora-test-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let app =
+        remora_cloud::router(common::config()).into_make_service_with_connect_info::<PeerAddress>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let send_raw = |request: String| {
+        let socket_path = socket_path.clone();
+        async move {
+            let mut stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            let text = String::from_utf8(response).unwrap();
+            let (_, body) = text.split_once("\r\n\r\n").unwrap();
+            serde_json::from_str::<Value>(body).unwrap()
+        }
+    };
+
+    let generated = send_raw(
+        "POST /api/v1/qrcode/gen/login HTTP/1.1\r\n\
+         Host: remora.example\r\n\
+         X-Forwarded-For: 203.0.113.9\r\n\
+         Connection: close\r\n\r\n"
+            .to_owned(),
+    )
+    .await;
+    let url = generated["data"]["qrcode_jump_url"].as_str().unwrap();
+    let id = url.rsplit_once('/').unwrap().1;
+
+    let login = send_raw(format!(
+        "GET /api/web/logins/{id} HTTP/1.1\r\n\
+         Host: remora.example\r\n\
+         Connection: close\r\n\r\n"
+    ))
+    .await;
+    assert_eq!(login["address"], "203.0.113.9");
+
+    server.abort();
+    let _ = std::fs::remove_file(&socket_path);
 }
 
 #[tokio::test]

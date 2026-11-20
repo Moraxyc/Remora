@@ -31,12 +31,12 @@ use axum::routing::{delete, get, post};
 use remora_proto::cloud::SignKey;
 use serde::Deserialize;
 
-pub use address::{TrustedProxies, TrustedProxy};
+pub use address::{PeerAddress, TrustedProxies, TrustedProxy};
 pub use database::{Database, DatabaseError};
 pub use ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use oidc::{InvalidOidc, OidcProvider, OidcRegistration};
 pub use password::{InvalidPasswordHash, OwnerPassword};
-pub use settings::{IceSettings, LoginSettings, Settings, SettingsError};
+pub use settings::{IceSettings, Listen, LoginSettings, Settings, SettingsError};
 pub use signaling::{Ping, ReconnectGrace};
 
 pub struct Config {
@@ -201,8 +201,8 @@ impl FromRef<Cloud> for signaling::Admission {
 }
 
 /// The REST API, signaling, and the web app with its API. Serve it with connection info
-/// (`into_make_service_with_connect_info::<SocketAddr>`), so that limits tell clients apart and
-/// login pages can show where a login came from.
+/// (`into_make_service_with_connect_info::<PeerAddress>`), so that limits tell clients apart
+/// and login pages can show where a login came from.
 pub fn router(config: Config) -> Router {
     let cloud = Cloud {
         devices: config.database.clone().into(),
@@ -287,10 +287,10 @@ mod tests {
             "wss://remora.example"
         );
         assert_eq!(
-            parse("http://127.0.0.1:8080/").unwrap(),
-            "ws://127.0.0.1:8080"
+            parse("http://127.0.0.1:8680/").unwrap(),
+            "ws://127.0.0.1:8680"
         );
-        assert_eq!(parse("http://[::1]:8080").unwrap(), "ws://[::1]:8080");
+        assert_eq!(parse("http://[::1]:8680").unwrap(), "ws://[::1]:8680");
     }
 
     #[test]

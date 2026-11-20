@@ -27,8 +27,8 @@ in
         services.remora = {
           enable = true;
           settings = {
-            listen = "0.0.0.0:8080";
-            public_url = "http://server:8080";
+            listen = "0.0.0.0:8680";
+            public_url = "http://server:8680";
             sign_key_file = signKey;
             ice = {
               turn_secret_file = turnSecret;
@@ -48,7 +48,7 @@ in
           listening-ips = [ address ];
           relay-ips = [ address ];
         };
-        networking.firewall.allowedTCPPorts = [ 8080 ];
+        networking.firewall.allowedTCPPorts = [ 8680 ];
       };
 
     client = {
@@ -75,11 +75,11 @@ in
 
       with subtest("remora starts on the first connection"):
           server.require_unit_state("remora.service", "inactive")
-          server.wait_for_open_port(8080)
+          server.wait_for_open_port(8680)
           server.wait_until_succeeds("systemctl is-active remora.service")
           server.succeed("journalctl -u remora.service -o cat | grep -q 'listening on the socket systemd passed'")
 
-      remora = "REMORA_OWNER_PASSWORD=${ownerPassword} python3 ${./session.py} http://server:8080 ${signKey}"
+      remora = "REMORA_OWNER_PASSWORD=${ownerPassword} python3 ${./session.py} http://server:8680 ${signKey}"
 
       with subtest("a host and a viewer start a session"):
           session = json.loads(client.succeed(f"{remora} session"))

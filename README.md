@@ -25,9 +25,11 @@ remora --config remora.toml
 [`contrib/remora.socket`](contrib/remora.socket) as well, or instead, to have systemd listen in
 Remora's place: it starts Remora on the first connection, and connections wait while Remora
 restarts. Keep its `ListenStream` the same as `listen`.
-Serve it over TLS through a reverse proxy that passes WebSocket upgrades through, and list the
-proxy in `trusted_proxies` so that Remora sees clients' addresses in `X-Forwarded-For`: rate
-limits and login pages go by them.
+Serve it over TLS through a reverse proxy that passes WebSocket upgrades through. When listening
+on TCP, list the proxy in `trusted_proxies` so that Remora sees clients' addresses in
+`X-Forwarded-For` (rate limits and login pages go by them); connections over a Unix socket
+(`listen = "/run/remora/remora.sock"`, which requires `public_url`) trust `X-Forwarded-For` by
+default, and `remora.socket` can set its group and mode for the proxy.
 
 Users sign in to the web app in one of two ways:
 
@@ -120,7 +122,7 @@ nix flake check   # includes a NixOS VM test
 ```
 
 The web app in `web/` is a SvelteKit single-page app. `npm run dev` there serves it with live
-reloading and passes `/api` on to a Remora at `REMORA_URL` (default `http://127.0.0.1:8080`);
+reloading and passes `/api` on to a Remora at `REMORA_URL` (default `http://[::1]:8680`);
 `npm run check` type-checks it. Nix fetches its dependencies as `web/package-lock.json` lists
 them.
 

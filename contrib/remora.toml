@@ -1,9 +1,14 @@
 # Remora settings. Apart from a way to confirm logins (`login.password_file`, `oidc` or
 # `login.auto_confirm`), every setting is optional; the values here are examples.
 
-# Address to serve the REST API and signaling on. Put a TLS proxy in front of it.
-listen = "127.0.0.1:8080"
-# Origin clients reach Remora at. Required when `listen` is an unspecified address.
+# Address or Unix socket path to serve the REST API and signaling on. Put a TLS proxy in front
+# of it.
+listen = "[::1]:8680"
+# Or listen on a Unix socket instead (requires `public_url`; connections over a Unix socket
+# are trusted proxies for `X-Forwarded-For`):
+# listen = "/run/remora/remora.sock"
+# Origin clients reach Remora at. Required when `listen` is an unspecified address or a Unix
+# socket.
 public_url = "https://remora.example"
 # Reverse proxies, by address or network, whose X-Forwarded-For header names the client. Rate
 # limits and login pages go by the client's address; without this, connections through a proxy

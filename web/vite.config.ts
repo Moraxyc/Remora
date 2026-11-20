@@ -3,7 +3,7 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
 // Remora embeds the build and serves it on its own origin, next to the API.
-const remora = process.env.REMORA_URL ?? 'http://127.0.0.1:8080';
+const remora = process.env.REMORA_URL ?? 'http://[::1]:8680';
 
 export default defineConfig({
 	plugins: [

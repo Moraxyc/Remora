@@ -5,11 +5,14 @@ use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
 use axum::http::HeaderMap;
 use axum::http::request::Parts;
+use axum::serve::IncomingStream;
 use ipnet::IpNet;
 use serde::Deserialize;
+use tokio::net::{TcpListener, UnixListener};
 
 const FORWARDED_FOR: &str = "x-forwarded-for";
 
@@ -27,12 +30,19 @@ impl TrustedProxies {
         self.0.iter().any(|net| net.contains(&address))
     }
 
-    /// The client behind a connection from `peer`. Each trusted proxy appends the address it
-    /// was connected from, so the client is the last one, from the right, that no trusted proxy
-    /// owns.
-    fn client(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
-        let mut client = peer;
-        if !self.trusts(peer) {
+    /// The client behind a connection from `peer`. Connections over a Unix socket and from
+    /// `trusted_proxies` are trusted to name the client in `X-Forwarded-For`; each trusted proxy
+    /// appends the address it was connected from, so the client is the last one, from the right,
+    /// that no trusted proxy owns.
+    fn client(&self, peer: PeerAddress, headers: &HeaderMap) -> Option<IpAddr> {
+        let (trusted, mut client) = match peer {
+            PeerAddress::Tcp(address) => {
+                let ip = address.ip().to_canonical();
+                (self.trusts(ip), Some(ip))
+            }
+            PeerAddress::Unix => (true, None),
+        };
+        if !trusted {
             return client;
         }
         let hops: Vec<&str> = headers
@@ -46,7 +56,7 @@ impl TrustedProxies {
             let Some(address) = parse_hop(hop.trim()) else {
                 break;
             };
-            client = address;
+            client = Some(address);
             if !self.trusts(address) {
                 break;
             }
@@ -80,6 +90,31 @@ impl TryFrom<String> for TrustedProxy {
     }
 }
 
+/// How a client connected to the server: over TCP or over a Unix domain socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAddress {
+    Tcp(SocketAddr),
+    Unix,
+}
+
+impl From<SocketAddr> for PeerAddress {
+    fn from(address: SocketAddr) -> Self {
+        Self::Tcp(address)
+    }
+}
+
+impl Connected<IncomingStream<'_, TcpListener>> for PeerAddress {
+    fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
+        Self::Tcp(*stream.remote_addr())
+    }
+}
+
+impl Connected<IncomingStream<'_, UnixListener>> for PeerAddress {
+    fn connect_info(_stream: IncomingStream<'_, UnixListener>) -> Self {
+        Self::Unix
+    }
+}
+
 /// The address a request came from, when the server knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientAddress(pub Option<IpAddr>);
@@ -92,12 +127,18 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Infallible> {
-        let address = parts
+        let peer = parts
             .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(peer)| {
-                TrustedProxies::from_ref(state).client(peer.ip().to_canonical(), &parts.headers)
+            .get::<ConnectInfo<PeerAddress>>()
+            .map(|ConnectInfo(peer)| *peer)
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<ConnectInfo<SocketAddr>>()
+                    .map(|ConnectInfo(address)| PeerAddress::Tcp(*address))
             });
+        let address =
+            peer.and_then(|peer| TrustedProxies::from_ref(state).client(peer, &parts.headers));
         Ok(Self(address))
     }
 }
@@ -126,42 +167,66 @@ mod tests {
         address.parse().unwrap()
     }
 
+    fn tcp(address: &str) -> PeerAddress {
+        PeerAddress::Tcp(SocketAddr::new(ip(address), 40000))
+    }
+
     #[test]
     fn untrusted_peers_are_the_client() {
         let headers = forwarded(&["203.0.113.9"]);
         assert_eq!(
-            TrustedProxies::default().client(ip("198.51.100.1"), &headers),
-            ip("198.51.100.1")
+            TrustedProxies::default().client(tcp("198.51.100.1"), &headers),
+            Some(ip("198.51.100.1"))
         );
         assert_eq!(
-            proxies(&["127.0.0.1"]).client(ip("198.51.100.1"), &headers),
-            ip("198.51.100.1")
+            proxies(&["127.0.0.1"]).client(tcp("198.51.100.1"), &headers),
+            Some(ip("198.51.100.1"))
         );
     }
 
     #[test]
     fn a_trusted_proxy_names_the_client() {
         let trusted = proxies(&["127.0.0.1", "10.0.0.0/8"]);
-        let client = |values: &[&str]| trusted.client(ip("127.0.0.1"), &forwarded(values));
-        assert_eq!(client(&["203.0.113.9"]), ip("203.0.113.9"));
+        let client = |values: &[&str]| trusted.client(tcp("127.0.0.1"), &forwarded(values));
+        assert_eq!(client(&["203.0.113.9"]), Some(ip("203.0.113.9")));
         // A client can claim any address; only what the proxies appended counts.
         assert_eq!(
             client(&["192.0.2.1, 203.0.113.9, 10.1.2.3"]),
-            ip("203.0.113.9")
+            Some(ip("203.0.113.9"))
         );
-        assert_eq!(client(&["192.0.2.1", "203.0.113.9"]), ip("203.0.113.9"));
-        assert_eq!(client(&["203.0.113.9:4711"]), ip("203.0.113.9"));
-        assert_eq!(client(&["[2001:db8::1]:4711"]), ip("2001:db8::1"));
-        assert_eq!(client(&["::ffff:203.0.113.9"]), ip("203.0.113.9"));
+        assert_eq!(
+            client(&["192.0.2.1", "203.0.113.9"]),
+            Some(ip("203.0.113.9"))
+        );
+        assert_eq!(client(&["203.0.113.9:4711"]), Some(ip("203.0.113.9")));
+        assert_eq!(client(&["[2001:db8::1]:4711"]), Some(ip("2001:db8::1")));
+        assert_eq!(client(&["::ffff:203.0.113.9"]), Some(ip("203.0.113.9")));
+    }
+
+    #[test]
+    fn unix_peers_are_trusted_by_default() {
+        let trusted = proxies(&["10.0.0.0/8"]);
+        assert_eq!(
+            TrustedProxies::default().client(PeerAddress::Unix, &forwarded(&["203.0.113.9"])),
+            Some(ip("203.0.113.9"))
+        );
+        assert_eq!(
+            trusted.client(PeerAddress::Unix, &forwarded(&["203.0.113.9, 10.1.2.3"])),
+            Some(ip("203.0.113.9"))
+        );
+        assert_eq!(
+            TrustedProxies::default().client(PeerAddress::Unix, &HeaderMap::new()),
+            None
+        );
     }
 
     #[test]
     fn what_proxies_cannot_name_stays_with_them() {
         let trusted = proxies(&["127.0.0.1", "10.0.0.0/8"]);
-        let client = |values: &[&str]| trusted.client(ip("127.0.0.1"), &forwarded(values));
-        assert_eq!(client(&[]), ip("127.0.0.1"));
-        assert_eq!(client(&["unknown, 10.1.2.3"]), ip("10.1.2.3"));
-        assert_eq!(client(&["10.1.2.3"]), ip("10.1.2.3"));
+        let client = |values: &[&str]| trusted.client(tcp("127.0.0.1"), &forwarded(values));
+        assert_eq!(client(&[]), Some(ip("127.0.0.1")));
+        assert_eq!(client(&["unknown, 10.1.2.3"]), Some(ip("10.1.2.3")));
+        assert_eq!(client(&["10.1.2.3"]), Some(ip("10.1.2.3")));
     }
 
     #[test]

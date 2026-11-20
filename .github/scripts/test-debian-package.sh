@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Installs, runs, upgrades, removes and purges a Remora .deb on this machine with sudo. Only for a
 # throwaway Debian or Ubuntu with systemd, such as a CI runner: it adds a system user, starts a
-# service on port 8080 and leaves /etc/remora behind.
+# service on port 8680 and leaves /etc/remora behind.
 set -Eeuo pipefail
 trap 'echo "FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 deb=$(realpath "$1")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-url=http://127.0.0.1:8080/
+url=http://[::1]:8680/
 wants=/etc/systemd/system/multi-user.target.wants/remora.service
 socket_wants=/etc/systemd/system/sockets.target.wants/remora.socket
 
@@ -36,7 +36,7 @@ id remora
 
 step "the service runs as remora and reads root's settings through its group"
 sudo install -m 0640 -g remora /dev/stdin /etc/remora/remora.toml << 'EOF'
-listen = "127.0.0.1:8080"
+listen = "[::1]:8680"
 database = "/var/lib/remora/remora.db"
 sign_key_file = "sign.key"
 

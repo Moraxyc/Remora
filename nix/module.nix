@@ -72,10 +72,10 @@ in
         options = {
           listen = lib.mkOption {
             type = lib.types.str;
-            default = "127.0.0.1:8080";
+            default = "[::1]:8680";
             description = ''
-              Address to serve the REST API and signaling on. systemd listens on it and starts
-              Remora on the first connection.
+              Address or Unix socket path to serve the REST API and signaling on. systemd listens on
+              it and starts Remora on the first connection.
             '';
           };
           public_url = lib.mkOption {
@@ -85,7 +85,7 @@ in
             description = ''
               Origin clients reach Remora at, when that is not `http://` plus
               {option}`services.remora.settings.listen`. Required when listening on all
-              addresses.
+              addresses or a Unix socket.
             '';
           };
           sign_key_file = lib.mkOption {

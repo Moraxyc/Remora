@@ -1,12 +1,11 @@
 use std::error::Error;
 use std::io::{BufRead, IsTerminal};
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use listenfd::ListenFd;
-use remora_cloud::{OwnerPassword, Settings};
+use remora_cloud::{Listen, OwnerPassword, PeerAddress, Settings};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
 
@@ -63,25 +62,69 @@ fn hash_password() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+enum PassedSocket {
+    Tcp(std::net::TcpListener),
+    Unix(std::os::unix::net::UnixListener),
+}
+
 /// The listening socket systemd passed, if it passed one. Reading it clears `LISTEN_FDS` and
 /// `LISTEN_PID`, which is only sound before any other thread runs.
-fn passed_socket() -> Result<Option<std::net::TcpListener>, Box<dyn Error>> {
-    ListenFd::from_env()
+fn passed_socket() -> Result<Option<PassedSocket>, Box<dyn Error>> {
+    let mut listen_fd = ListenFd::from_env();
+    if let Some(tcp) = listen_fd
         .take_tcp_listener(0)
-        .map_err(|error| format!("the socket systemd passed is unusable: {error}").into())
+        .map_err(|error| format!("the socket systemd passed is unusable: {error}"))?
+    {
+        return Ok(Some(PassedSocket::Tcp(tcp)));
+    }
+    if let Some(unix) = listen_fd
+        .take_unix_listener(0)
+        .map_err(|error| format!("the socket systemd passed is unusable: {error}"))?
+    {
+        return Ok(Some(PassedSocket::Unix(unix)));
+    }
+    Ok(None)
+}
+
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+    Ok(())
+}
+
+fn bind_unix(path: &Path) -> Result<tokio::net::UnixListener, Box<dyn Error>> {
+    use std::os::unix::fs::FileTypeExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => return Err(format!("{} is already in use", path.display()).into()),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!("cannot check {}: {error}", path.display()).into());
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(tokio::net::UnixListener::bind(path)?)
 }
 
 #[tokio::main]
-async fn serve(
-    config: PathBuf,
-    socket: Option<std::net::TcpListener>,
-) -> Result<(), Box<dyn Error>> {
+async fn serve(config: PathBuf, socket: Option<PassedSocket>) -> Result<(), Box<dyn Error>> {
     let settings = Settings::load(&config)?;
     let filter =
         EnvFilter::try_new(&settings.log).map_err(|error| format!("invalid log: {error}"))?;
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let listen = settings.listen;
+    let listen = settings.listen.clone();
     let in_memory = settings.database.is_none();
     let config = settings.into_config()?;
     if in_memory {
@@ -101,32 +144,62 @@ async fn serve(
         tracing::warn!("no signing key configured; request signatures are not checked");
     }
 
-    let listener = match socket {
-        Some(socket) => {
+    let app = remora_cloud::router(config).into_make_service_with_connect_info::<PeerAddress>();
+    let shutdown = shutdown_signal();
+    match (socket, listen) {
+        (Some(PassedSocket::Tcp(socket)), listen) => {
             socket.set_nonblocking(true)?;
             let listener = tokio::net::TcpListener::from_std(socket)?;
             let addr = listener.local_addr()?;
             tracing::info!(%addr, "listening on the socket systemd passed");
-            if addr != listen {
+            if Listen::Tcp(addr) != listen {
                 tracing::warn!(%addr, %listen, "the socket systemd passed is not on listen");
             }
-            listener
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown.await;
+                })
+                .await?;
         }
-        None => {
-            let listener = tokio::net::TcpListener::bind(listen).await?;
-            tracing::info!(addr = %listener.local_addr()?, "listening");
-            listener
-        }
-    };
-    let mut terminate = signal(SignalKind::terminate())?;
-    let app = remora_cloud::router(config).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = terminate.recv() => {}
+        (Some(PassedSocket::Unix(socket)), listen) => {
+            socket.set_nonblocking(true)?;
+            let listener = tokio::net::UnixListener::from_std(socket)?;
+            let addr = listener.local_addr()?;
+            let path = addr
+                .as_pathname()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(unnamed)".to_owned());
+            tracing::info!(%path, "listening on the socket systemd passed");
+            if !matches!(&listen, Listen::Unix(configured) if addr.as_pathname() == Some(configured.as_path()))
+            {
+                tracing::warn!(%path, %listen, "the socket systemd passed is not on listen");
             }
-        })
-        .await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown.await;
+                })
+                .await?;
+        }
+        (None, Listen::Tcp(addr)) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!(addr = %listener.local_addr()?, "listening");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown.await;
+                })
+                .await?;
+        }
+        (None, Listen::Unix(path)) => {
+            let listener = bind_unix(&path)?;
+            tracing::info!(path = %path.display(), "listening");
+            let result = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown.await;
+                })
+                .await;
+            let _ = std::fs::remove_file(&path);
+            result?;
+        }
+    }
     Ok(())
 }
