@@ -42,8 +42,7 @@ jobs:
         with:
           extra_nix_config: |
             build-dir = /nix/build
-            extra-substituters = https://nix-cache.qaq.li/remora
-            extra-trusted-public-keys = remora:iOVASnJtE6oEaK6QW9cHYAL/GIN0Ieh+zeV80XCa7D8=
+            accept-flake-config = true
 
       # Pushes every path the job built when it ends. Pull requests from forks get no token.
       - if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -89,8 +88,7 @@ jobs:
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
-            extra-substituters = https://nix-cache.qaq.li/remora
-            extra-trusted-public-keys = remora:iOVASnJtE6oEaK6QW9cHYAL/GIN0Ieh+zeV80XCa7D8=
+            accept-flake-config = true
 
       - run: nix build .#remora-deb --print-build-logs
 

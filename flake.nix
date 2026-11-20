@@ -1,6 +1,11 @@
 {
   description = "Self-hostable stand-in for the NetEase UU Remote cloud";
 
+  nixConfig = {
+    extra-substituters = [ "https://nix-cache.qaq.li/remora" ];
+    extra-trusted-public-keys = [ "remora:iOVASnJtE6oEaK6QW9cHYAL/GIN0Ieh+zeV80XCa7D8=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
