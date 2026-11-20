@@ -30,6 +30,8 @@ export interface ManagedDevice {
 	online: boolean;
 	/** Whether it reported its LAN, so that a device on that LAN can wake it. */
 	wakeable: boolean;
+	/** Path of the image its card shows, on this server. */
+	wallpaper: string | null;
 }
 
 export interface ClientSession {

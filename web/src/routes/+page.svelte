@@ -93,6 +93,9 @@
 			<ul class="items">
 				{#each data.devices as device (device.id)}
 					<li class="item">
+						{#if device.wallpaper}
+							<img class="wallpaper" src={device.wallpaper} alt="" />
+						{/if}
 						<div class="item-info">
 							<div class="item-title">
 								<span>{device.name || 'Unnamed device'}</span>

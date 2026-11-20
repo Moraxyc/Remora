@@ -461,7 +461,7 @@ async fn managing_devices_and_client_sessions() {
         .await;
     assert_eq!(
         devices.body,
-        json!([{ "id": host_device, "name": "Studio", "platform": 1, "online": true, "wakeable": false }])
+        json!([{ "id": host_device, "name": "Studio", "platform": 1, "online": true, "wakeable": false, "wallpaper": null }])
     );
 
     let sessions = browser

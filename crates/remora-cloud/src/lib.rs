@@ -187,6 +187,7 @@ impl FromRef<Cloud> for web::Web {
             users: cloud.users.clone(),
             devices: cloud.devices.clone(),
             lan_reports: cloud.lan_reports.clone(),
+            files: cloud.files.clone(),
             sessions: cloud.sessions.clone(),
             rooms: cloud.rooms.clone(),
             password: cloud.owner_password.clone(),

@@ -19,6 +19,7 @@ use crate::PublicUrl;
 use crate::address::ClientAddress;
 use crate::browser::{self, Browsers, SignedIn, read_cookie};
 use crate::device::Devices;
+use crate::files::Files;
 use crate::limit::Limits;
 use crate::login::{Logins, Progress};
 use crate::oidc::OidcProvider;
@@ -45,6 +46,7 @@ pub struct Web {
     pub users: Users,
     pub devices: Devices,
     pub lan_reports: LanReports,
+    pub files: Files,
     pub sessions: Sessions,
     pub rooms: Rooms,
     /// Without a password, nobody can sign in with one.
@@ -392,6 +394,8 @@ pub struct ManagedDevice {
     online: bool,
     /// Whether it reported its LAN identity, so that a device on its LAN may wake it.
     wakeable: bool,
+    /// The path of the image its card shows, on this server.
+    wallpaper: Option<String>,
 }
 
 /// `GET /api/web/devices`: the signed-in user's bound devices.
@@ -406,11 +410,13 @@ pub async fn devices(
         .into_iter()
         .map(|(id, _)| id)
         .collect();
+    let wallpapers = web.files.wallpapers_of_user(&signed_in.user.id)?;
     let list = owned
         .into_iter()
         .map(|device| ManagedDevice {
             online: web.rooms.is_online(&device.id),
             wakeable: reported.contains(&device.id),
+            wallpaper: wallpapers.get(&device.id).map(|file| file.path()),
             id: device.id,
             name: device.name,
             platform: device.platform,
