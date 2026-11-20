@@ -228,10 +228,10 @@ impl OidcProvider {
     /// The provider's client, discovered at most [`DISCOVERY_LIFETIME`] ago.
     async fn client(&self) -> Result<Client, Failure> {
         let mut discovered = self.discovered.lock().await;
-        if let Some((at, client)) = discovered.as_ref() {
-            if at.elapsed() < DISCOVERY_LIFETIME {
-                return Ok(client.clone());
-            }
+        if let Some((at, client)) = discovered.as_ref()
+            && at.elapsed() < DISCOVERY_LIFETIME
+        {
+            return Ok(client.clone());
         }
         let http = |request| send(self.http.clone(), request);
         let metadata = CoreProviderMetadata::discover_async(self.issuer.clone(), &http)
