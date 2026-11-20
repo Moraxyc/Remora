@@ -58,8 +58,8 @@
 
 | 接口 | 鉴权 | 请求体 | 响应与行为 |
 |---|---|---|---|
-| `GET /api/v1/tool/fp/token?filetype=1` | User Token | 空 | `{"token": "...", "req_url": "{public_url}/api/files", "ttl": 3600, "max_size": 10485760}`。上传令牌在 `ttl` 秒内可多次使用，前提是签发它的登录会话仍然有效。不检查 `filetype`。 |
-| `POST /api/files` | `Authorization: <上传令牌>`（可直接写令牌，也可加 `Bearer ` 前缀） | 原始图片字节，或 `multipart/form-data`（取第一个文件部分） | 不使用 UU 响应信封：成功时返回 HTTP `200` 与 `{"url": "{public_url}/api/files/{id}", "fsize": 123, "md5": "<hex>", "mime": "image/png"}`。按文件内容识别并接受 PNG、JPEG、WebP、GIF 与 BMP，大小不超过 `max_size` 字节。错误为 `{"error": ...}`：`401 unauthorized`、`400 empty`、`413 too_large`、`415 not_an_image`。每个用户的每台设备保留最近 4 次上传，正在使用的壁纸另外保留。 |
+| `GET /api/v1/tool/fp/token?filetype=1` | User Token | 空 | `{"token": "...", "req_url": "{public_url}/api/files", "ttl": 3600, "max_size": 10485760}`。客户端在 `ttl` 秒后才重新获取令牌，在此之前可多次复用。令牌在 `ttl` 到期后仍有效 10 分钟，确保客户端重新获取前的上传不会失败；前提是签发它的登录会话仍然有效。不检查 `filetype`。 |
+| `POST /api/files` | `Authorization: <上传令牌>`（可直接写令牌，也可加 `Bearer ` 前缀） | 原始图片字节，或 `multipart/form-data`（取第一个文件部分） | 不使用 UU 响应信封：成功时返回 HTTP `200` 与 `{"url": "{public_url}/api/files/{id}", "fsize": 123, "md5": "<hex>", "mime": "image/png"}`。按文件内容识别并接受 PNG、JPEG、WebP、GIF 与 BMP（不依赖 `Content-Type`，也可以不带），大小不超过 `max_size` 字节。错误为 `{"error": ...}`：`401 unauthorized`、`400 empty`、`413 too_large`、`415 not_an_image`。每个用户的每台设备保留最近 4 次上传，正在使用的壁纸另外保留。 |
 | `GET /api/files/{id}` | 无（URL 中的 `id` 即凭据） | — | 返回图片，附带图片类型、`Cache-Control: public, max-age=31536000, immutable`、`nosniff` 与沙箱 CSP。忽略查询串（如缩放参数）。 |
 | `POST /api/v1/device/wallpaper` | User Token + `X-Param-Device-Id` | `{"wallpaper_url": "<上传返回的 url>"}` | `{}`。把调用方已绑定设备的壁纸设为该用户上传过的某个文件；按路径中的 id 匹配，不论 URL 指向哪个源站；传 `""` 表示清除壁纸。URL 对应的文件不存在时返回 `422` / `1001`；调用方设备未绑定时返回 `400` / `2003`。 |
 
