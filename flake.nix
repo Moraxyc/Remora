@@ -11,6 +11,7 @@
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     systems.url = "github:nix-systems/default";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
@@ -19,6 +20,7 @@
       imports = [
         flake-parts.flakeModules.easyOverlay
         flake-parts.flakeModules.partitions
+        ./nix/flake-module.nix
       ];
 
       systems = import inputs.systems;
@@ -28,51 +30,6 @@
         devShells = "dev";
         formatter = "dev";
       };
-
-      perSystem =
-        {
-          config,
-          final,
-          lib,
-          ...
-        }:
-        {
-          overlayAttrs = {
-            inherit (config.packages) remora remora-web uu-remote-linux;
-          };
-          packages = {
-            remora = final.callPackage ./nix/package.nix { };
-            remora-web = final.callPackage ./nix/web.nix { };
-            uu-remote-linux = final.callPackage ./nix/uu-remote-linux.nix { };
-            default = config.packages.remora;
-          }
-          // lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
-            # A self-contained binary for release archives. The web app is platform-independent
-            # output, so it is built natively instead of with a static Node.js.
-            remora-static =
-              (final.pkgsStatic.callPackage ./nix/package.nix {
-                inherit (config.packages) remora-web;
-                # Prefixing AWS-LC's symbols fails to build in pkgsStatic: listing them runs a Go
-                # program that needs a C linker. The prefix only keeps AWS-LC apart from another
-                # OpenSSL in the same process, and the static binary links no other.
-                aws-lc = final.pkgsStatic.aws-lc.override { symbolPrefix = null; };
-              }).overrideAttrs
-                {
-                  # Drops the symbol table as well, as Debian requires of a packaged binary.
-                  stripAllList = [ "bin" ];
-                };
-            remora-deb = final.callPackage ./nix/deb.nix { inherit (config.packages) remora-static; };
-          };
-        };
-
-      flake.nixosModules.default =
-        { lib, pkgs, ... }:
-        {
-          imports = [ ./nix/module.nix ];
-          services.remora.package =
-            lib.mkDefault
-              inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        };
 
       partitions.dev = {
         extraInputsFlake = ./dev;

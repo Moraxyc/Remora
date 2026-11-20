@@ -19,21 +19,13 @@
 
       checks =
         lib.filterAttrs (_: lib.meta.availableOn pkgs.stdenv.hostPlatform) (
-          removeAttrs self'.packages [ "default" ]
+          removeAttrs self'.packages [
+            "default"
+            "uu-remote-linux"
+          ]
         )
         // {
-          clippy = self'.packages.remora.overrideAttrs (old: {
-            pname = "${old.pname}-clippy";
-            nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
-            buildPhase = ''
-              runHook preBuild
-              cargo clippy --workspace --all-targets --offline -- -D warnings
-              runHook postBuild
-            '';
-            doCheck = false;
-            installPhase = "touch $out";
-            dontFixup = true;
-          });
+          inherit (self'.packages.remora) clippy;
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           nixos = pkgs.testers.runNixOSTest (

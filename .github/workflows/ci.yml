@@ -19,15 +19,9 @@ jobs:
     name: nix flake check (${{ matrix.system }})
     strategy:
       fail-fast: false
+      # Run arm64 on main, manual runs and releases; pull requests only build and test x86_64.
       matrix:
-        include:
-          - system: x86_64-linux
-            runner: ubuntu-24.04
-            vm-test: true
-          # Arm runners have no KVM, which the NixOS VM test requires.
-          - system: aarch64-linux
-            runner: ubuntu-24.04-arm
-            vm-test: false
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"system":"x86_64-linux","runner":"ubuntu-24.04","vm-test":true}]' || '[{"system":"x86_64-linux","runner":"ubuntu-24.04","vm-test":true},{"system":"aarch64-linux","runner":"ubuntu-24.04-arm","vm-test":false}]') }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -61,11 +55,23 @@ jobs:
         env:
           checks: .#checks.${{ matrix.system }}
         # `--no-build` evaluates in read-only mode, which cannot copy the dev partition's flake
-        # into the store, so `nix eval` must copy it first.
+        # into the store, so `nix eval` must copy it first. Skip checks already covered on x86_64.
         run: |
-          read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" ]))')"
+          read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" "clippy" "treefmt" ]))')"
           nix flake check --no-build
           nix build --no-link --print-build-logs --keep-going "${names[@]/#/$checks.}"
+
+      - name: Pack Debian artifact
+        run: |
+          nix build .#remora-deb
+          install -Dm644 -t deb result/*.deb
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remora-deb-${{ matrix.system }}
+          path: deb/*.deb
+          retention-days: 1
+          if-no-files-found: error
 
   # The runner is a real Ubuntu, booted by systemd, so the package goes through apt, dpkg and
   # systemd as it would on a user's machine.
@@ -75,28 +81,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - system: x86_64-linux
-            runner: ubuntu-24.04
-          - system: aarch64-linux
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"system":"x86_64-linux","runner":"ubuntu-24.04"}]' || '[{"system":"x86_64-linux","runner":"ubuntu-24.04"},{"system":"aarch64-linux","runner":"ubuntu-24.04-arm"}]') }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
-      # The check job pushed the package to the cache, so this only downloads it.
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v8
         with:
-          extra_nix_config: |
-            accept-flake-config = true
-
-      - run: nix build .#remora-deb --print-build-logs
+          name: remora-deb-${{ matrix.system }}
+          path: deb
 
       - name: Lint
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends lintian
-          lintian --fail-on error,warning --display-info result/*.deb
+          lintian --fail-on error,warning --display-info deb/*.deb
 
       - name: Install, run, upgrade, remove and purge
-        run: .github/scripts/test-debian-package.sh result/*.deb
+        run: .github/scripts/test-debian-package.sh deb/*.deb
