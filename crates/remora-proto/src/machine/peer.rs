@@ -5,16 +5,105 @@ use std::fmt;
 use std::time::Duration;
 
 use rand_core::RngCore;
+use serde_json::{Value, json};
 
 use super::{Machine, Timestamp};
 use crate::pb;
 use crate::session::DataChannel;
+use crate::session::clipboard::{
+    CLIPBOARD_CHUNK_BYTES, ClipboardAssembler, ClipboardError, ClipboardMessage, TEXT_FORMAT_ID,
+    chunk_text, encode_clipboard_change, encode_text_rpc_response, extract_clipboard_message,
+};
 use crate::session::control::{
     ControlDecodeError, ControlMessage, decode_message, echo_request, echo_response, encode_message,
 };
-use crate::session::input::{InputDecodeError, InputMessage, decode_input};
+use crate::session::input::{InputDecodeError, InputMessage, decode_input, encode_input};
+use crate::signal::SoacEvent;
 
 const ECHO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_EARLY_CANDIDATES: usize = 256;
+
+/// Role of the local endpoint within a peer session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PeerRole {
+    #[default]
+    Host,
+    Viewer,
+}
+
+/// Parsed ICE (STUN / TURN) server entry from `be-controlled` or `control` ack.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IceServerSpec {
+    pub urls: Vec<String>,
+    pub username: String,
+    pub credential: String,
+}
+
+impl fmt::Debug for IceServerSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let schemes: Vec<&str> = self
+            .urls
+            .iter()
+            .filter_map(|u| u.split(':').next())
+            .collect();
+        f.debug_struct("IceServerSpec")
+            .field("schemes", &schemes)
+            .field("url_count", &self.urls.len())
+            .field("has_credentials", &(!self.credential.is_empty()))
+            .finish()
+    }
+}
+
+/// Parses `iceServers` JSON array from `be-controlled` or `control` ack.
+pub fn parse_ice_servers(value: &Value) -> Vec<IceServerSpec> {
+    let Some(list) = value.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in list.iter().take(16) {
+        let raw_urls = entry.get("urls").or_else(|| entry.get("url"));
+        let urls: Vec<String> = match raw_urls {
+            Some(Value::String(s)) => vec![s.clone()],
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(Value::as_str)
+                .take(16)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+        .into_iter()
+        .filter(|u| {
+            u.len() <= 2048
+                && ["stun:", "stuns:", "turn:", "turns:"]
+                    .iter()
+                    .any(|prefix| u.starts_with(prefix))
+        })
+        .collect();
+        if urls.is_empty() {
+            continue;
+        }
+        let username = entry
+            .get("username")
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= 4096)
+            .unwrap_or("")
+            .to_owned();
+        let credential = entry
+            .get("credential")
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= 4096)
+            .unwrap_or("")
+            .to_owned();
+        out.push(IceServerSpec {
+            urls,
+            username,
+            credential,
+        });
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -26,40 +115,176 @@ pub enum PeerState {
     Closed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerTransmit {
-    SendForwardSetting { ice_id: String },
-    SendIceFinishedLog { ice_id: String },
-    SendControlInitBurst { ice_id: String },
-    SendChannel { channel: DataChannel, data: Vec<u8> },
-    ClosePeer { ice_id: String },
+    SendSoac {
+        ice_id: String,
+        client_id: Option<String>,
+        payload: Value,
+    },
+    ApplyRemoteOffer {
+        ice_id: String,
+        sdp: String,
+    },
+    ApplyRemoteAnswer {
+        ice_id: String,
+        sdp: String,
+    },
+    AddRemoteCandidate {
+        ice_id: String,
+        candidate: String,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    },
+    SendForwardSetting {
+        ice_id: String,
+    },
+    SendIceFinishedLog {
+        ice_id: String,
+    },
+    SendControlInitBurst {
+        ice_id: String,
+    },
+    SendChannel {
+        channel: DataChannel,
+        data: Vec<u8>,
+    },
+    ClosePeer {
+        ice_id: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl fmt::Debug for PeerTransmit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SendSoac {
+                ice_id,
+                client_id,
+                payload,
+            } => f
+                .debug_struct("SendSoac")
+                .field("ice_id", ice_id)
+                .field("has_client_id", &client_id.is_some())
+                .field(
+                    "kind",
+                    &payload
+                        .get("data")
+                        .unwrap_or(payload)
+                        .get("type")
+                        .and_then(Value::as_str),
+                )
+                .finish(),
+            Self::ApplyRemoteOffer { ice_id, sdp } => f
+                .debug_struct("ApplyRemoteOffer")
+                .field("ice_id", ice_id)
+                .field("sdp_len", &sdp.len())
+                .finish(),
+            Self::ApplyRemoteAnswer { ice_id, sdp } => f
+                .debug_struct("ApplyRemoteAnswer")
+                .field("ice_id", ice_id)
+                .field("sdp_len", &sdp.len())
+                .finish(),
+            Self::AddRemoteCandidate {
+                ice_id,
+                sdp_mid,
+                sdp_mline_index,
+                ..
+            } => f
+                .debug_struct("AddRemoteCandidate")
+                .field("ice_id", ice_id)
+                .field("sdp_mid", sdp_mid)
+                .field("sdp_mline_index", sdp_mline_index)
+                .finish(),
+            Self::SendForwardSetting { ice_id } => f
+                .debug_struct("SendForwardSetting")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::SendIceFinishedLog { ice_id } => f
+                .debug_struct("SendIceFinishedLog")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::SendControlInitBurst { ice_id } => f
+                .debug_struct("SendControlInitBurst")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::SendChannel { channel, data } => f
+                .debug_struct("SendChannel")
+                .field("channel", channel)
+                .field("len", &data.len())
+                .finish(),
+            Self::ClosePeer { ice_id } => {
+                f.debug_struct("ClosePeer").field("ice_id", ice_id).finish()
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum PeerEvent {
     ControlChannelReady { ice_id: String },
+    PeerReady { ice_id: String },
     Control(Box<ControlMessage>),
     Input(InputMessage),
+    ClipboardText(String),
     RawChannelData { channel: DataChannel, data: Vec<u8> },
     EchoTimedOut { ice_id: String, request_seq: i64 },
+    Closed { ice_id: String },
+}
+
+impl fmt::Debug for PeerEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ControlChannelReady { ice_id } => f
+                .debug_struct("ControlChannelReady")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::PeerReady { ice_id } => {
+                f.debug_struct("PeerReady").field("ice_id", ice_id).finish()
+            }
+            Self::Control(msg) => f.debug_tuple("Control").field(msg).finish(),
+            Self::Input(input) => f.debug_tuple("Input").field(input).finish(),
+            Self::ClipboardText(text) => f
+                .debug_struct("ClipboardText")
+                .field("len", &text.len())
+                .finish(),
+            Self::RawChannelData { channel, data } => f
+                .debug_struct("RawChannelData")
+                .field("channel", channel)
+                .field("len", &data.len())
+                .finish(),
+            Self::EchoTimedOut {
+                ice_id,
+                request_seq,
+            } => f
+                .debug_struct("EchoTimedOut")
+                .field("ice_id", ice_id)
+                .field("request_seq", request_seq)
+                .finish(),
+            Self::Closed { ice_id } => f.debug_struct("Closed").field("ice_id", ice_id).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerError {
     MissingIceId,
+    InvalidSoac(&'static str),
     Control(ControlDecodeError),
     Input(InputDecodeError),
+    Clipboard(ClipboardError),
 }
 
 impl fmt::Display for PeerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingIceId => f.write_str("peer session has no active ice_id"),
+            Self::InvalidSoac(reason) => write!(f, "invalid signaling payload: {reason}"),
             Self::Control(err) => err.fmt(f),
             Self::Input(err) => err.fmt(f),
+            Self::Clipboard(err) => err.fmt(f),
         }
     }
 }
@@ -69,10 +294,18 @@ impl std::error::Error for PeerError {}
 /// Sans-IO per-`ice_id` peer session state machine.
 pub struct PeerMachine<R: RngCore> {
     state: PeerState,
+    role: PeerRole,
     ice_id: Option<String>,
+    remote_client_id: Option<String>,
+    app_control_id: Option<String>,
+    force_relay: bool,
+    remote_sdp_applied: bool,
+    early_candidates: Vec<(String, Option<String>, Option<u16>)>,
     host_features: Option<pb::FeatureFlag>,
     rng: R,
     next_seq: i64,
+    next_clipboard_id: u32,
+    clipboard_assembler: ClipboardAssembler,
     pending_echo: Option<(i64, Timestamp)>,
     transmits: VecDeque<PeerTransmit>,
     events: VecDeque<PeerEvent>,
@@ -82,7 +315,10 @@ impl<R: RngCore> fmt::Debug for PeerMachine<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PeerMachine")
             .field("state", &self.state)
+            .field("role", &self.role)
             .field("ice_id", &self.ice_id)
+            .field("force_relay", &self.force_relay)
+            .field("remote_sdp_applied", &self.remote_sdp_applied)
             .finish()
     }
 }
@@ -92,10 +328,18 @@ impl<R: RngCore> PeerMachine<R> {
         let initial_seq = i64::from((rng.next_u32() % 1000) + 1);
         Self {
             state: PeerState::Idle,
+            role: PeerRole::Host,
             ice_id: None,
+            remote_client_id: None,
+            app_control_id: None,
+            force_relay: false,
+            remote_sdp_applied: false,
+            early_candidates: Vec::new(),
             host_features: None,
             rng,
             next_seq: initial_seq,
+            next_clipboard_id: 1,
+            clipboard_assembler: ClipboardAssembler::new(),
             pending_echo: None,
             transmits: VecDeque::new(),
             events: VecDeque::new(),
@@ -111,11 +355,27 @@ impl<R: RngCore> PeerMachine<R> {
         self.state
     }
 
+    pub fn role(&self) -> PeerRole {
+        self.role
+    }
+
     pub fn ice_id(&self) -> Option<&str> {
         self.ice_id.as_deref()
     }
 
-    fn alloc_seq(&mut self) -> i64 {
+    pub fn remote_client_id(&self) -> Option<&str> {
+        self.remote_client_id.as_deref()
+    }
+
+    pub fn app_control_id(&self) -> Option<&str> {
+        self.app_control_id.as_deref()
+    }
+
+    pub fn force_relay(&self) -> bool {
+        self.force_relay
+    }
+
+    pub fn alloc_seq(&mut self) -> i64 {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
         seq
@@ -126,27 +386,223 @@ impl<R: RngCore> PeerMachine<R> {
         self.rng.fill_bytes(buf);
     }
 
-    /// Starts negotiating a peer connection for `ice_id`.
+    /// Starts negotiating a peer connection for `ice_id` (default [`PeerRole::Host`]).
     pub fn start(&mut self, _now: Timestamp, ice_id: impl Into<String>) {
+        self.start_session(Timestamp::ZERO, PeerRole::Host, ice_id, None, None, false);
+    }
+
+    /// Starts negotiating a peer connection with explicit role and signaling metadata.
+    pub fn start_session(
+        &mut self,
+        _now: Timestamp,
+        role: PeerRole,
+        ice_id: impl Into<String>,
+        remote_client_id: Option<String>,
+        app_control_id: Option<String>,
+        force_relay: bool,
+    ) {
+        self.role = role;
         self.ice_id = Some(ice_id.into());
+        self.remote_client_id = remote_client_id;
+        self.app_control_id = app_control_id;
+        self.force_relay = force_relay;
         self.state = PeerState::Negotiating;
+        self.remote_sdp_applied = false;
+        self.early_candidates.clear();
         self.pending_echo = None;
+        self.clipboard_assembler.reset();
+    }
+
+    /// Emits an outbound `soac` offer generated by the local WebRTC engine.
+    pub fn on_local_offer(&mut self, sdp: impl Into<String>) -> Result<(), PeerError> {
+        let ice_id = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
+        let mut data = json!({
+            "type": "offer",
+            "sdp": sdp.into(),
+            "ice_id": ice_id,
+            "ice_network_type": 3,
+        });
+        if let Some(app) = &self.app_control_id {
+            data["app_control_id"] = Value::String(app.clone());
+        }
+        let payload = self.wrap_soac_payload(data);
+        self.transmits.push_back(PeerTransmit::SendSoac {
+            ice_id,
+            client_id: self.remote_client_id.clone(),
+            payload,
+        });
+        Ok(())
+    }
+
+    /// Emits an outbound `soac` answer generated by the local WebRTC engine.
+    pub fn on_local_answer(&mut self, sdp: impl Into<String>) -> Result<(), PeerError> {
+        let ice_id = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
+        let mut data = json!({
+            "type": "answer",
+            "sdp": sdp.into(),
+            "ice_id": ice_id,
+        });
+        if let Some(app) = &self.app_control_id {
+            data["app_control_id"] = Value::String(app.clone());
+        }
+        let payload = self.wrap_soac_payload(data);
+        self.transmits.push_back(PeerTransmit::SendSoac {
+            ice_id,
+            client_id: self.remote_client_id.clone(),
+            payload,
+        });
+        Ok(())
+    }
+
+    /// Emits an outbound trickle ICE candidate over `soac`.
+    pub fn on_local_candidate(
+        &mut self,
+        candidate: impl Into<String>,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
+    ) -> Result<(), PeerError> {
+        let ice_id = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
+        let mut cand_obj = json!({
+            "candidate": candidate.into(),
+        });
+        if let Some(mid) = sdp_mid {
+            cand_obj["sdpMid"] = Value::String(mid);
+        }
+        if let Some(idx) = sdp_mline_index {
+            cand_obj["sdpMLineIndex"] = Value::Number(idx.into());
+        }
+        let mut data = json!({
+            "type": "candidate",
+            "candidate": cand_obj,
+            "ice_id": ice_id,
+        });
+        if let Some(app) = &self.app_control_id {
+            data["app_control_id"] = Value::String(app.clone());
+        }
+        let payload = self.wrap_soac_payload(data);
+        self.transmits.push_back(PeerTransmit::SendSoac {
+            ice_id,
+            client_id: self.remote_client_id.clone(),
+            payload,
+        });
+        Ok(())
+    }
+
+    fn wrap_soac_payload(&self, data: Value) -> Value {
+        let mut outer = serde_json::Map::new();
+        if let Some(cid) = &self.remote_client_id {
+            outer.insert("client_id".to_owned(), Value::String(cid.clone()));
+        }
+        outer.insert("data".to_owned(), data);
+        Value::Object(outer)
+    }
+
+    /// Processes an inbound `soac` event (`offer`, `answer`, or `candidate`).
+    ///
+    /// Events belonging to a different `ice_id` are ignored without error.
+    /// Remote candidates arriving before the remote SDP is applied are buffered
+    /// and emitted immediately after `ApplyRemoteOffer` / `ApplyRemoteAnswer`.
+    pub fn handle_soac(&mut self, _now: Timestamp, soac: &SoacEvent) -> Result<(), PeerError> {
+        let active_ice = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
+        if let Some(ev_ice) = soac.ice_id()
+            && ev_ice != active_ice
+        {
+            return Ok(());
+        }
+        if self.remote_client_id.is_none()
+            && let Some(cid) = &soac.client_id
+            && !cid.is_empty()
+        {
+            self.remote_client_id = Some(cid.clone());
+        }
+
+        let body = soac
+            .data
+            .as_ref()
+            .filter(|v| v.is_object())
+            .cloned()
+            .unwrap_or_else(|| Value::Object(soac.extra.clone()));
+        let kind = body.get("type").and_then(Value::as_str);
+
+        match kind {
+            Some("offer") => {
+                let sdp = body
+                    .get("sdp")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(PeerError::InvalidSoac("offer missing plain sdp"))?
+                    .to_owned();
+                self.transmits.push_back(PeerTransmit::ApplyRemoteOffer {
+                    ice_id: active_ice.clone(),
+                    sdp,
+                });
+                self.remote_sdp_applied = true;
+                self.flush_early_candidates(&active_ice);
+            }
+            Some("answer") => {
+                let sdp = body
+                    .get("sdp")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(PeerError::InvalidSoac("answer missing plain sdp"))?
+                    .to_owned();
+                self.transmits.push_back(PeerTransmit::ApplyRemoteAnswer {
+                    ice_id: active_ice.clone(),
+                    sdp,
+                });
+                self.remote_sdp_applied = true;
+                self.flush_early_candidates(&active_ice);
+            }
+            Some("candidate") => {
+                let Some((cand, mid, mline)) = extract_candidate(&body) else {
+                    return Ok(());
+                };
+                if cand.is_empty() {
+                    return Ok(());
+                }
+                if self.remote_sdp_applied {
+                    self.transmits.push_back(PeerTransmit::AddRemoteCandidate {
+                        ice_id: active_ice,
+                        candidate: cand,
+                        sdp_mid: mid,
+                        sdp_mline_index: mline,
+                    });
+                } else if self.early_candidates.len() < MAX_EARLY_CANDIDATES {
+                    self.early_candidates.push((cand, mid, mline));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn flush_early_candidates(&mut self, ice_id: &str) {
+        for (candidate, sdp_mid, sdp_mline_index) in self.early_candidates.drain(..) {
+            self.transmits.push_back(PeerTransmit::AddRemoteCandidate {
+                ice_id: ice_id.to_owned(),
+                candidate,
+                sdp_mid,
+                sdp_mline_index,
+            });
+        }
     }
 
     /// Marks the WebRTC ICE/DTLS transport as connected and queues initial signaling telemetry.
     pub fn on_ice_connected(&mut self, _now: Timestamp) -> Result<(), PeerError> {
         let ice_id = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
         self.state = PeerState::Connected;
-        self.transmits.push_back(PeerTransmit::SendForwardSetting {
-            ice_id: ice_id.clone(),
-        });
-        self.transmits
-            .push_back(PeerTransmit::SendIceFinishedLog { ice_id });
+        if self.role == PeerRole::Host {
+            self.transmits.push_back(PeerTransmit::SendForwardSetting {
+                ice_id: ice_id.clone(),
+            });
+            self.transmits
+                .push_back(PeerTransmit::SendIceFinishedLog { ice_id });
+        }
         Ok(())
     }
 
     /// Announces that a WebRTC data channel opened; for `CONTROL_DATA_CHANNEL`, queues the
-    /// initialization burst and sends an echo handshake probe.
+    /// initialization burst (for host) and sends an echo handshake probe.
     pub fn on_channel_open(
         &mut self,
         now: Timestamp,
@@ -154,10 +610,12 @@ impl<R: RngCore> PeerMachine<R> {
     ) -> Result<(), PeerError> {
         let ice_id = self.ice_id.clone().ok_or(PeerError::MissingIceId)?;
         if channel == DataChannel::Control {
-            self.transmits
-                .push_back(PeerTransmit::SendControlInitBurst {
-                    ice_id: ice_id.clone(),
-                });
+            if self.role == PeerRole::Host {
+                self.transmits
+                    .push_back(PeerTransmit::SendControlInitBurst {
+                        ice_id: ice_id.clone(),
+                    });
+            }
             let seq = self.alloc_seq();
             let probe = encode_message(&echo_request(
                 seq,
@@ -171,6 +629,45 @@ impl<R: RngCore> PeerMachine<R> {
             });
             self.events
                 .push_back(PeerEvent::ControlChannelReady { ice_id });
+        }
+        Ok(())
+    }
+
+    /// Encodes and queues an input message on `CONTROL_DATA_CHANNEL`.
+    pub fn queue_input(&mut self, input: &InputMessage) -> Result<(), PeerError> {
+        if self.ice_id.is_none() {
+            return Err(PeerError::MissingIceId);
+        }
+        self.transmits.push_back(PeerTransmit::SendChannel {
+            channel: DataChannel::Control,
+            data: encode_input(input),
+        });
+        Ok(())
+    }
+
+    /// Encodes and queues UTF-8 clipboard text as chunked `ClipboardChange` frames.
+    pub fn queue_clipboard_text(
+        &mut self,
+        now: Timestamp,
+        channel: DataChannel,
+        text: &str,
+    ) -> Result<(), PeerError> {
+        if self.ice_id.is_none() {
+            return Err(PeerError::MissingIceId);
+        }
+        let content_id = self.next_clipboard_id;
+        self.next_clipboard_id = self.next_clipboard_id.wrapping_add(1).max(1);
+        let ts = i64::try_from(now.as_millis()).unwrap_or(i64::MAX);
+        let chunks = chunk_text(text, CLIPBOARD_CHUNK_BYTES);
+        let total = chunks.len();
+        for (idx, chunk) in chunks.into_iter().enumerate() {
+            let seq = self.alloc_seq();
+            let more = idx + 1 < total;
+            let data = encode_clipboard_change(seq, ts, content_id, chunk, more);
+            self.transmits.push_back(PeerTransmit::SendChannel {
+                channel: channel.clone(),
+                data,
+            });
         }
         Ok(())
     }
@@ -190,15 +687,12 @@ impl<R: RngCore> PeerMachine<R> {
                     return Ok(());
                 }
                 let msg = decode_message(bytes).map_err(PeerError::Control)?;
+                let ts = i64::try_from(now.as_millis()).unwrap_or(i64::MAX);
                 match &msg {
                     ControlMessage::EchoRequest { seq, .. } => {
                         let reply_seq = self.alloc_seq();
-                        let reply = encode_message(&echo_response(
-                            reply_seq,
-                            i64::try_from(now.as_millis()).unwrap_or(i64::MAX),
-                            *seq,
-                            self.host_features,
-                        ));
+                        let reply =
+                            encode_message(&echo_response(reply_seq, ts, *seq, self.host_features));
                         self.transmits.push_back(PeerTransmit::SendChannel {
                             channel: channel.clone(),
                             data: reply,
@@ -209,9 +703,54 @@ impl<R: RngCore> PeerMachine<R> {
                             && *request_seq == Some(expected)
                         {
                             self.pending_echo = None;
+                            if let Some(ice_id) = &self.ice_id {
+                                self.events.push_back(PeerEvent::PeerReady {
+                                    ice_id: ice_id.clone(),
+                                });
+                            }
                         }
                     }
                     _ => {}
+                }
+                if let Some(clip) = extract_clipboard_message(&msg) {
+                    match clip {
+                        ClipboardMessage::Change {
+                            content_id,
+                            content,
+                            to_be_continued,
+                            ..
+                        } => {
+                            if let Some(full) = self
+                                .clipboard_assembler
+                                .accept(content_id, &content, to_be_continued)
+                                .map_err(PeerError::Clipboard)?
+                            {
+                                self.events.push_back(PeerEvent::ClipboardText(full));
+                            }
+                        }
+                        ClipboardMessage::TextRpcRequest {
+                            request_id,
+                            format_id,
+                            text,
+                            ..
+                        } => {
+                            if format_id == TEXT_FORMAT_ID {
+                                let reply_seq = self.alloc_seq();
+                                let reply = encode_text_rpc_response(
+                                    reply_seq,
+                                    ts,
+                                    request_id,
+                                    pb::ClipboardError::CbSucceeded as i32,
+                                );
+                                self.transmits.push_back(PeerTransmit::SendChannel {
+                                    channel: channel.clone(),
+                                    data: reply,
+                                });
+                                self.events.push_back(PeerEvent::ClipboardText(text));
+                            }
+                        }
+                        ClipboardMessage::TextRpcResponse { .. } => {}
+                    }
                 }
                 self.events.push_back(PeerEvent::Control(Box::new(msg)));
                 Ok(())
@@ -230,9 +769,53 @@ impl<R: RngCore> PeerMachine<R> {
     pub fn release(&mut self) {
         self.state = PeerState::Closed;
         self.pending_echo = None;
+        self.early_candidates.clear();
         if let Some(ice_id) = self.ice_id.take() {
-            self.transmits.push_back(PeerTransmit::ClosePeer { ice_id });
+            self.transmits.push_back(PeerTransmit::ClosePeer {
+                ice_id: ice_id.clone(),
+            });
+            self.events.push_back(PeerEvent::Closed { ice_id });
         }
+    }
+}
+
+fn extract_candidate(body: &Value) -> Option<(String, Option<String>, Option<u16>)> {
+    let cand_val = body.get("candidate")?;
+    if let Some(s) = cand_val.as_str() {
+        let mid = body
+            .get("sdpMid")
+            .or_else(|| body.get("sdp_mid"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mline = body
+            .get("sdpMLineIndex")
+            .or_else(|| body.get("sdp_mline_index"))
+            .and_then(Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok());
+        Some((s.to_owned(), mid, mline))
+    } else if cand_val.is_object() {
+        let cand = cand_val
+            .get("candidate")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let mid = cand_val
+            .get("sdpMid")
+            .or_else(|| cand_val.get("sdp_mid"))
+            .or_else(|| body.get("sdpMid"))
+            .or_else(|| body.get("sdp_mid"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mline = cand_val
+            .get("sdpMLineIndex")
+            .or_else(|| cand_val.get("sdp_mline_index"))
+            .or_else(|| body.get("sdpMLineIndex"))
+            .or_else(|| body.get("sdp_mline_index"))
+            .and_then(Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok());
+        Some((cand, mid, mline))
+    } else {
+        None
     }
 }
 
@@ -275,6 +858,7 @@ impl<R: RngCore> Machine for PeerMachine<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signal::{Event, SignalEvent};
 
     struct DeterministicRng(u64);
 
@@ -345,11 +929,17 @@ mod tests {
         );
         assert_eq!(peer.poll_timeout(), Some(t1 + ECHO_TIMEOUT));
 
-        // Echo response clears pending timeout
+        // Echo response clears pending timeout and emits PeerReady
         let resp = encode_message(&echo_response(1, 200, probe_seq, Some(ff)));
         peer.handle_input(t1 + Duration::from_millis(20), &resp)
             .unwrap();
         assert_eq!(peer.poll_timeout(), None);
+        assert_eq!(
+            peer.poll_event(),
+            Some(PeerEvent::PeerReady {
+                ice_id: "ice-1".into()
+            })
+        );
         assert!(matches!(
             peer.poll_event(),
             Some(PeerEvent::Control(msg)) if matches!(*msg, ControlMessage::EchoResponse { .. })
@@ -398,6 +988,98 @@ mod tests {
     }
 
     #[test]
+    fn buffers_early_candidates_until_remote_sdp_and_routes_clipboard() {
+        let mut viewer = PeerMachine::new(DeterministicRng(7));
+        let t0 = Timestamp::ZERO;
+        viewer.start_session(
+            t0,
+            PeerRole::Viewer,
+            "ice-v",
+            Some("host-cid".into()),
+            Some("app-1".into()),
+            true,
+        );
+
+        viewer
+            .on_local_offer("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n")
+            .unwrap();
+        assert!(matches!(
+            viewer.poll_transmit(),
+            Some(PeerTransmit::SendSoac { ice_id, .. }) if ice_id == "ice-v"
+        ));
+
+        // Early candidate before answer arrives
+        let early = SignalEvent::from_event(&Event {
+            name: "soac".into(),
+            args: vec![json!({
+                "client_id": "host-cid",
+                "data": {
+                    "type": "candidate",
+                    "ice_id": "ice-v",
+                    "candidate": {
+                        "candidate": "candidate:1 1 udp 1 127.0.0.1 9000 typ host",
+                        "sdpMid": "0",
+                        "sdpMLineIndex": 0
+                    }
+                }
+            })],
+            attachments: vec![],
+            ack_id: None,
+        });
+        let SignalEvent::Soac(early_soac) = early else {
+            panic!("expected soac");
+        };
+        viewer.handle_soac(t0, &early_soac).unwrap();
+        assert!(viewer.poll_transmit().is_none());
+
+        // Answer arrives: emits ApplyRemoteAnswer followed by flushed candidate
+        let ans = SignalEvent::from_event(&Event {
+            name: "soac".into(),
+            args: vec![json!({
+                "client_id": "host-cid",
+                "data": {
+                    "type": "answer",
+                    "ice_id": "ice-v",
+                    "sdp": "v=0\r\no=- 2 2 IN IP4 0.0.0.0\r\n"
+                }
+            })],
+            attachments: vec![],
+            ack_id: None,
+        });
+        let SignalEvent::Soac(ans_soac) = ans else {
+            panic!("expected soac");
+        };
+        viewer.handle_soac(t0, &ans_soac).unwrap();
+        assert!(matches!(
+            viewer.poll_transmit(),
+            Some(PeerTransmit::ApplyRemoteAnswer { .. })
+        ));
+        assert!(matches!(
+            viewer.poll_transmit(),
+            Some(PeerTransmit::AddRemoteCandidate {
+                sdp_mline_index: Some(0),
+                ..
+            })
+        ));
+
+        // Outbound clipboard & inbound clipboard
+        viewer
+            .queue_clipboard_text(t0, DataChannel::Text, "secret-clip-text")
+            .unwrap();
+        let Some(PeerTransmit::SendChannel { channel, data }) = viewer.poll_transmit() else {
+            panic!("expected queued clipboard transmit");
+        };
+        assert_eq!(channel, DataChannel::Text);
+        viewer
+            .handle_channel_input(t0, DataChannel::Text, &data)
+            .unwrap();
+        assert_eq!(
+            viewer.poll_event(),
+            Some(PeerEvent::ClipboardText("secret-clip-text".into()))
+        );
+    }
+
+    #[test]
     fn scripted_echo_timeout() {
         let mut peer = PeerMachine::new(DeterministicRng(3));
         peer.start(Timestamp::ZERO, "ice-t");
@@ -414,5 +1096,17 @@ mod tests {
             Some(PeerEvent::EchoTimedOut { ice_id, .. }) if ice_id == "ice-t"
         ));
         assert_eq!(peer.poll_timeout(), None);
+    }
+
+    #[test]
+    fn parse_ice_servers_redacts_credentials_in_debug() {
+        let servers = parse_ice_servers(&json!([
+            { "urls": ["stun:stun.test:3478"] },
+            { "urls": ["turn:turn.test:3478"], "username": "u1", "credential": "super-secret" }
+        ]));
+        assert_eq!(servers.len(), 2);
+        let dbg = format!("{servers:?}");
+        assert!(!dbg.contains("super-secret"));
+        assert!(!dbg.contains("u1"));
     }
 }

@@ -12,7 +12,7 @@ use crate::profile::FeatureCaps;
 ///
 /// Unknown protobuf tags or unrecognized `which` oneof variants decode into
 /// [`ControlMessage::Unknown`] without failing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ControlMessage {
     EchoRequest {
@@ -97,6 +97,11 @@ pub enum ControlMessage {
         seq: i64,
         timestamp: i64,
         event: pb::InputEvent,
+    },
+    ClipboardChange {
+        seq: i64,
+        timestamp: i64,
+        change: pb::ClipboardChange,
     },
     RpcRequest {
         seq: i64,
@@ -250,6 +255,11 @@ pub fn decode_message(bytes: &[u8]) -> Result<ControlMessage, ControlDecodeError
             seq,
             timestamp,
             event,
+        },
+        message::Which::ClipboardChange(change) => ControlMessage::ClipboardChange {
+            seq,
+            timestamp,
+            change,
         },
         message::Which::RpcRequest(request) => ControlMessage::RpcRequest {
             seq,
@@ -441,6 +451,15 @@ pub fn encode_message(msg: &ControlMessage) -> Vec<u8> {
             timestamp: *timestamp,
             which: Some(message::Which::InputEvent(event.clone())),
         },
+        ControlMessage::ClipboardChange {
+            seq,
+            timestamp,
+            change,
+        } => pb::Message {
+            seq: *seq,
+            timestamp: *timestamp,
+            which: Some(message::Which::ClipboardChange(change.clone())),
+        },
         ControlMessage::RpcRequest {
             seq,
             timestamp,
@@ -509,6 +528,180 @@ pub const fn feature_flag_from_caps(caps: &FeatureCaps) -> pb::FeatureFlag {
         ff_qos_stat: caps.qos_stat,
         ff_mumu_control: caps.mumu_control,
         ff_virtual_mouse_device: caps.virtual_mouse_device,
+    }
+}
+
+impl fmt::Debug for ControlMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EchoRequest {
+                seq,
+                timestamp,
+                feature_flag,
+                ..
+            } => f
+                .debug_struct("EchoRequest")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("has_feature_flag", &feature_flag.is_some())
+                .finish(),
+            Self::EchoResponse {
+                seq,
+                timestamp,
+                request_seq,
+                feature_flag,
+                ..
+            } => f
+                .debug_struct("EchoResponse")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("request_seq", request_seq)
+                .field("has_feature_flag", &feature_flag.is_some())
+                .finish(),
+            Self::SimpleAction {
+                seq,
+                timestamp,
+                action,
+            } => f
+                .debug_struct("SimpleAction")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("action", &action.action)
+                .finish(),
+            Self::ScreenSources {
+                seq,
+                timestamp,
+                sources,
+            } => f
+                .debug_struct("ScreenSources")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("screens", &sources.screens.len())
+                .finish(),
+            Self::CaptureChange {
+                seq,
+                timestamp,
+                change,
+            } => f
+                .debug_struct("CaptureChange")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("capture_type", &change.capture_type)
+                .finish(),
+            Self::CaptureConfig { seq, timestamp, .. } => f
+                .debug_struct("CaptureConfig")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::CaptureConfigResponse { seq, timestamp, .. } => f
+                .debug_struct("CaptureConfigResponse")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::CodecNegotiation {
+                seq,
+                timestamp,
+                negotiation,
+            } => f
+                .debug_struct("CodecNegotiation")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("caps", &negotiation.encoder_cap_list.len())
+                .finish(),
+            Self::CaptureSettingSync { seq, timestamp, .. } => f
+                .debug_struct("CaptureSettingSync")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::SystemMetrics { seq, timestamp, .. } => f
+                .debug_struct("SystemMetrics")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::SystemStateChange { seq, timestamp, .. } => f
+                .debug_struct("SystemStateChange")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::QuerySystemState { seq, timestamp, .. } => f
+                .debug_struct("QuerySystemState")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::ReportError {
+                seq,
+                timestamp,
+                error,
+            } => f
+                .debug_struct("ReportError")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("error_code", &error.error_code)
+                .finish(),
+            Self::ReportQosStats { seq, timestamp, .. } => f
+                .debug_struct("ReportQosStats")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::RemoteDownloadPath { seq, timestamp, .. } => f
+                .debug_struct("RemoteDownloadPath")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::InputEvent { seq, timestamp, .. } => f
+                .debug_struct("InputEvent")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::ClipboardChange {
+                seq,
+                timestamp,
+                change,
+            } => f
+                .debug_struct("ClipboardChange")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field("content_id", &change.content_id)
+                .field("len", &change.content.len())
+                .field("to_be_continued", &change.to_be_continued)
+                .finish(),
+            Self::RpcRequest {
+                seq,
+                timestamp,
+                request,
+            } => f
+                .debug_struct("RpcRequest")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field(
+                    "request_id",
+                    &request.request_header.as_ref().map(|h| h.request_id),
+                )
+                .finish(),
+            Self::RpcResponse {
+                seq,
+                timestamp,
+                response,
+            } => f
+                .debug_struct("RpcResponse")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .field(
+                    "request_id",
+                    &response.response_header.as_ref().map(|h| h.request_id),
+                )
+                .finish(),
+            Self::Other { seq, timestamp, .. } => f
+                .debug_struct("Other")
+                .field("seq", seq)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::Unknown { name, raw } => f
+                .debug_struct("Unknown")
+                .field("name", name)
+                .field("len", &raw.len())
+                .finish(),
+        }
     }
 }
 
