@@ -266,6 +266,7 @@ struct ActiveHostPeer {
     sender: PeerSender,
     is_desktop: bool,
     ready: bool,
+    closing: bool,
     forward_task: JoinHandle<()>,
 }
 
@@ -319,7 +320,7 @@ impl HostSupervisor {
                         }
                         SignalingEvent::Signal(SignalEvent::Released(rel)) => {
                             if let Some(ice_id) = rel.ice_id {
-                                self.remove_peer(&ice_id).await;
+                                self.begin_close_peer(&ice_id).await;
                             }
                         }
                         SignalingEvent::Signal(SignalEvent::Left(left)) => {
@@ -327,7 +328,7 @@ impl HostSupervisor {
                                 break;
                             }
                             if let Some(ice_id) = left.ice_id {
-                                self.remove_peer(&ice_id).await;
+                                self.begin_close_peer(&ice_id).await;
                             }
                         }
                         SignalingEvent::Signal(SignalEvent::Leave(left)) => {
@@ -335,7 +336,7 @@ impl HostSupervisor {
                                 break;
                             }
                             if let Some(ice_id) = left.ice_id {
-                                self.remove_peer(&ice_id).await;
+                                self.begin_close_peer(&ice_id).await;
                             }
                         }
                         _ => {}
@@ -381,7 +382,9 @@ impl HostSupervisor {
     }
 
     fn has_ready_desktop_peer(&self) -> bool {
-        self.peers.values().any(|p| p.ready && p.is_desktop)
+        self.peers
+            .values()
+            .any(|p| !p.closing && p.ready && p.is_desktop)
     }
 
     async fn handle_be_controlled(
@@ -465,6 +468,7 @@ impl HostSupervisor {
                         sender,
                         is_desktop,
                         ready: false,
+                        closing: false,
                         forward_task,
                     },
                 );
@@ -486,14 +490,14 @@ impl HostSupervisor {
                 self.publish_stats();
             }
             PeerSessionEvent::PeerReady { .. } => {
-                let mut is_desktop = false;
+                let mut should_pump = false;
                 if let Some(peer) = self.peers.get_mut(ice_id) {
                     peer.ready = true;
-                    is_desktop = peer.is_desktop;
+                    should_pump = !peer.closing && peer.is_desktop;
+                    self.stats.peer_ready = true;
+                    self.publish_stats();
                 }
-                self.stats.peer_ready = true;
-                self.publish_stats();
-                if is_desktop {
+                if should_pump {
                     self.pump_platform_media().await;
                 }
             }
@@ -556,7 +560,8 @@ impl HostSupervisor {
     async fn broadcast_video_frame(&mut self, frame: EncodedVideoFrame) {
         let mut sent_any = false;
         for peer in self.peers.values() {
-            if peer.is_desktop
+            if !peer.closing
+                && peer.is_desktop
                 && peer.ready
                 && peer.sender.send_video_frame(frame.clone()).await.is_ok()
             {
@@ -572,7 +577,8 @@ impl HostSupervisor {
     async fn broadcast_audio_frame(&mut self, frame: EncodedAudioFrame) {
         let mut sent_any = false;
         for peer in self.peers.values() {
-            if peer.is_desktop
+            if !peer.closing
+                && peer.is_desktop
                 && peer.ready
                 && peer.sender.send_audio_frame(frame.clone()).await.is_ok()
             {
@@ -588,13 +594,24 @@ impl HostSupervisor {
     async fn broadcast_clipboard(&mut self, text: &str) {
         let mut sent_any = false;
         for peer in self.peers.values() {
-            if peer.ready && peer.sender.send_clipboard(text).await.is_ok() {
+            if !peer.closing && peer.ready && peer.sender.send_clipboard(text).await.is_ok() {
                 sent_any = true;
             }
         }
         if sent_any {
             self.stats.clipboard_sent += 1;
             self.publish_stats();
+        }
+    }
+
+    async fn begin_close_peer(&mut self, ice_id: &str) {
+        if let Some(peer) = self.peers.get_mut(ice_id)
+            && !peer.closing
+        {
+            peer.closing = true;
+            peer.sender
+                .drain_and_close(Duration::from_millis(150))
+                .await;
         }
     }
 

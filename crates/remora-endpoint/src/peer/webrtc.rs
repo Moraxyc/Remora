@@ -6,7 +6,7 @@ use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -349,6 +349,7 @@ enum PeerCommand {
     SendControl(ControlMessage),
     SendChannelRaw { channel: DataChannel, data: Vec<u8> },
     RequestKeyframe,
+    DrainAndClose(Instant),
     Close,
 }
 
@@ -439,6 +440,13 @@ impl PeerSender {
 
     pub async fn close(&self) {
         let _ = self.cmd_tx.send(PeerCommand::Close).await;
+    }
+
+    pub(crate) async fn drain_and_close(&self, grace: Duration) {
+        let _ = self
+            .cmd_tx
+            .send(PeerCommand::DrainAndClose(Instant::now() + grace))
+            .await;
     }
 }
 
@@ -631,6 +639,7 @@ impl PeerHandle {
             local_candidates,
             last_tx_was_relay: false,
             last_rx_was_relay: false,
+            closing_deadline: None,
         };
 
         tokio::spawn(state.run());
@@ -718,6 +727,7 @@ struct PeerLoopState<R: SignalingRelay> {
     local_candidates: Vec<Candidate>,
     last_tx_was_relay: bool,
     last_rx_was_relay: bool,
+    closing_deadline: Option<Instant>,
 }
 
 impl<R: SignalingRelay> PeerLoopState<R> {
@@ -764,11 +774,21 @@ impl<R: SignalingRelay> PeerLoopState<R> {
             {
                 earliest = t;
             }
+            if let Some(c) = self.closing_deadline
+                && c < earliest
+            {
+                earliest = c;
+            }
             let sleep_until = tokio::time::Instant::from_std(earliest);
 
             tokio::select! {
                 _ = tokio::time::sleep_until(sleep_until) => {
                     let now = Instant::now();
+                    if self.closing_deadline.is_some_and(|d| now >= d) {
+                        self.machine.release();
+                        let _ = self.drain_machine().await;
+                        break;
+                    }
                     if now >= rtc_timeout {
                         let _ = self.rtc.handle_input(Str0mInput::Timeout(now));
                     }
@@ -913,6 +933,11 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                                     None,
                                     str0m::media::KeyframeRequestKind::Pli,
                                 );
+                            }
+                        }
+                        Some(PeerCommand::DrainAndClose(deadline)) => {
+                            if self.closing_deadline.is_none() {
+                                self.closing_deadline = Some(deadline);
                             }
                         }
                         Some(PeerCommand::Close) | None => {
