@@ -425,6 +425,55 @@ mod sdk {
             Ok(())
         }
 
+        /// Fetches this installation's remote-assistance share ID and display alias.
+        pub async fn device_share_info(
+            &self,
+        ) -> Result<remora_proto::control::DeviceShareInfoResponse, EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            Ok(self
+                .inner
+                .http
+                .device_share_info(&token, &device_id)
+                .await?)
+        }
+
+        /// Queries release update metadata for this client.
+        pub async fn release_fetch_update(
+            &self,
+        ) -> Result<remora_proto::control::ReleaseUpdateResponse, EndpointError> {
+            let (token, device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .release_fetch_update(&token, device_id.as_deref())
+                .await?)
+        }
+
+        /// Queries release update metadata for `target_device_id`.
+        pub async fn release_fetch_update_for_device(
+            &self,
+            target_device_id: impl AsRef<str>,
+            platform: Option<u8>,
+            version_name: Option<&str>,
+        ) -> Result<remora_proto::control::ReleaseUpdateResponse, EndpointError> {
+            let (token, device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .release_fetch_update_for_device(
+                    &token,
+                    target_device_id.as_ref(),
+                    device_id.as_deref(),
+                    platform,
+                    version_name,
+                )
+                .await?)
+        }
+
         /// Registers or updates this installation's device record and stores `device_id`.
         pub async fn register_device(&self) -> Result<DeviceInitResponse, EndpointError> {
             let resp = self
@@ -1291,6 +1340,31 @@ mod tests {
                                 }
                             }
                         }),
+                        ("GET", "/api/v1/device/share/info") => json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {
+                                "connect_id": "123456789",
+                                "connect_code": "",
+                                "alias": "My Mac"
+                            }
+                        }),
+                        ("GET", "/api/v1/release/fetch/update") => json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {
+                                "url": "",
+                                "md5": "",
+                                "version_name": "4.48.2",
+                                "version_code": 635,
+                                "change_logs": [],
+                                "subtitle": "",
+                                "user_external_force_upgrade": false,
+                                "upgrade_uri": {},
+                                "update_type": "NoUpdate",
+                                "update_prompt_type": ""
+                            }
+                        }),
                         ("POST", "/api/v1/room/create") => json!({
                             "code": 0,
                             "msg": "ok",
@@ -1351,6 +1425,11 @@ mod tests {
         endpoint.set_controllable(false).await.unwrap();
         let prefs = endpoint.device_preferences("dev-mac-1").await.unwrap();
         assert_eq!(prefs.device_preferences.device_id, "dev-mac-1");
+
+        let share = endpoint.device_share_info().await.unwrap();
+        assert_eq!(share.connect_id, "123456789");
+        let upd = endpoint.release_fetch_update().await.unwrap();
+        assert_eq!(upd.update_type, "NoUpdate");
 
         let mut host_room = endpoint.register_host().await.unwrap();
         assert_eq!(host_room.role(), RoomRole::Host);

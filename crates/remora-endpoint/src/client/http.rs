@@ -7,9 +7,10 @@ use rand::RngCore;
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
     ApiError, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse, DeviceListResponse,
-    DevicePreferencesResponse, LoginByQrcodeRequest, LoginResponse, MacControllableRequest,
-    QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse, RoomCreateResponse,
-    RoomJoinRequest, RoomJoinResponse, UserInfoResponse, parse_response,
+    DevicePreferencesResponse, DeviceShareInfoResponse, LoginByQrcodeRequest, LoginResponse,
+    MacControllableRequest, QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse,
+    ReleaseUpdateResponse, RoomCreateResponse, RoomJoinRequest, RoomJoinResponse, UserInfoResponse,
+    parse_response,
 };
 use remora_proto::machine::auth::SignedHttpRequest;
 use remora_proto::profile::Profile;
@@ -250,6 +251,58 @@ impl ControlClient {
             Some(&body),
         )
         .await
+    }
+
+    /// Fetches the calling device's share ID and display alias (`GET /api/v1/device/share/info`).
+    pub async fn device_share_info(
+        &self,
+        user_token: &str,
+        device_id: &str,
+    ) -> Result<DeviceShareInfoResponse, HttpError> {
+        self.get(
+            "/api/v1/device/share/info",
+            Some(user_token),
+            Some(device_id),
+        )
+        .await
+    }
+
+    /// Queries release update metadata for the calling client (`GET /api/v1/release/fetch/update`).
+    pub async fn release_fetch_update(
+        &self,
+        user_token: &str,
+        device_id: Option<&str>,
+    ) -> Result<ReleaseUpdateResponse, HttpError> {
+        self.get("/api/v1/release/fetch/update", Some(user_token), device_id)
+            .await
+    }
+
+    /// Queries release update metadata for a bound target device
+    /// (`GET /api/v1/release/fetch/update/{id}`).
+    pub async fn release_fetch_update_for_device(
+        &self,
+        user_token: &str,
+        target_device_id: &str,
+        caller_device_id: Option<&str>,
+        platform: Option<u8>,
+        version_name: Option<&str>,
+    ) -> Result<ReleaseUpdateResponse, HttpError> {
+        let query = {
+            let mut qs = url::form_urlencoded::Serializer::new(String::new());
+            if let Some(p) = platform {
+                qs.append_pair("platform", &p.to_string());
+            }
+            if let Some(vn) = version_name {
+                qs.append_pair("version_name", vn);
+            }
+            qs.finish()
+        };
+        let path = if query.is_empty() {
+            format!("/api/v1/release/fetch/update/{target_device_id}")
+        } else {
+            format!("/api/v1/release/fetch/update/{target_device_id}?{query}")
+        };
+        self.get(&path, Some(user_token), caller_device_id).await
     }
 
     /// Unbinds `target_device_id` from the authenticated user (`POST /api/v1/device/{id}/unbind`).
@@ -659,6 +712,62 @@ mod tests {
                     })
                     .to_string(),
                 ),
+                ("GET", "/api/v1/device/share/info") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "connect_id": "123456789",
+                            "connect_code": "",
+                            "alias": "Mac"
+                        }
+                    })
+                    .to_string(),
+                ),
+                ("GET", "/api/v1/release/fetch/update") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "url": "",
+                            "md5": "",
+                            "version_name": "4.48.2",
+                            "version_code": 635,
+                            "change_logs": [],
+                            "subtitle": "",
+                            "user_external_force_upgrade": false,
+                            "upgrade_uri": {},
+                            "update_type": "NoUpdate",
+                            "update_prompt_type": ""
+                        }
+                    })
+                    .to_string(),
+                ),
+                (
+                    "GET",
+                    "/api/v1/release/fetch/update/dev-1?platform=1&version_name=4.45.0.4318",
+                ) => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "url": "",
+                            "md5": "",
+                            "version_name": "4.45.0.4318",
+                            "version_code": 0,
+                            "change_logs": [],
+                            "subtitle": "",
+                            "user_external_force_upgrade": false,
+                            "upgrade_uri": {},
+                            "update_type": "NoUpdate",
+                            "update_prompt_type": ""
+                        }
+                    })
+                    .to_string(),
+                ),
                 ("POST", "/api/v1/room/create") => (
                     200,
                     json!({
@@ -753,6 +862,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(prefs.device_preferences.device_id, "dev-1");
+
+        let share = client
+            .device_share_info(&login.token, "dev-1")
+            .await
+            .unwrap();
+        assert_eq!(share.connect_id, "123456789");
+
+        let upd = client
+            .release_fetch_update(&login.token, Some("dev-1"))
+            .await
+            .unwrap();
+        assert_eq!(upd.update_type, "NoUpdate");
+
+        let dev_upd = client
+            .release_fetch_update_for_device(
+                &login.token,
+                "dev-1",
+                Some("dev-1"),
+                Some(1),
+                Some("4.45.0.4318"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dev_upd.version_name, "4.45.0.4318");
 
         let created = client.room_create(&login.token, "dev-1").await.unwrap();
         assert_eq!(created.ws_connect_timeout_ms, 10000);
