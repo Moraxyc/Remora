@@ -22,7 +22,13 @@
           removeAttrs self'.packages [ "default" ]
         )
         // {
-          inherit (self'.packages.remora) clippy;
+          fmt = config.treefmt.build.check self;
+          inherit (self'.packages.remora)
+            clippy
+            test
+            deny-workspace
+            deny-proto
+            ;
         }
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           nixos = pkgs.testers.runNixOSTest (
@@ -34,6 +40,7 @@
         inputsFrom = [ config.treefmt.build.devShell ];
         packages = with pkgs; [
           cargo
+          cargo-deny
           rustc
           clippy
           rustfmt

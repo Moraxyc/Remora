@@ -1,17 +1,11 @@
-# Dependency policy for the Remora workspace:
-# - Enforce crate boundary rules: `remora-cloud` must not depend on `remora-endpoint`
-#   (and `remora-proto` has its own `crates/remora-proto/deny.toml` forbidding I/O crates).
-# - Reject `webpki-roots` (TLS clients must use OS trust stores via `rustls-platform-verifier`).
-# - Enforce license compatibility across MIT/Apache-2.0 and GPL-3.0-or-later layers.
+# Workspace-wide dependency policy (licenses, sources, and crate boundaries).
+# - Governs `[licenses]` and `[sources]` for the entire Cargo workspace.
+# - Enforces workspace boundaries (`remora-cloud` and `remora-proto` must never depend on
+#   `remora-endpoint`; `webpki-roots` is banned everywhere).
+# - `remora-proto`'s strict sans-IO crate bans live in `crates/remora-proto/deny.toml`.
 
 [graph]
 all-features = true
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
-]
 
 [licenses]
 allow = [
@@ -23,6 +17,7 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "GPL-3.0-or-later",
     "ISC",
     "MPL-2.0",

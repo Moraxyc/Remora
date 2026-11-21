@@ -60,6 +60,15 @@
         inherit craneLib;
         workspace = lib.importTOML ../Cargo.toml;
         web = remora-web;
+        denySrc = lib.fileset.toSource {
+          root = ../.;
+          fileset = lib.fileset.unions [
+            ../Cargo.toml
+            ../Cargo.lock
+            ../deny.toml
+            ../crates
+          ];
+        };
         clippy = craneLib.cargoClippy {
           inherit (prevAttrs)
             pname
@@ -74,6 +83,36 @@
           nativeBuildInputs = [ pkg-config ];
           env.REMORA_WEB_DIR = finalAttrs.passthru.web;
           cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        };
+        test = craneLib.cargoTest {
+          inherit (prevAttrs)
+            pname
+            version
+            src
+            strictDeps
+            cargoArtifacts
+            AWS_LC_SYS_USE_SYSTEM
+            LIBSQLITE3_SYS_USE_PKG_CONFIG
+            buildInputs
+            ;
+          nativeBuildInputs = [ pkg-config ];
+          nativeCheckInputs = [ cacert ];
+          env.REMORA_WEB_DIR = finalAttrs.passthru.web;
+          cargoTestExtraArgs = "--workspace";
+        };
+        deny-workspace = craneLib.cargoDeny {
+          pname = "remora-workspace";
+          inherit (prevAttrs) version;
+          src = finalAttrs.passthru.denySrc;
+          cargoDenyExtraArgs = "--config deny.toml";
+          cargoDenyChecks = "bans licenses sources";
+        };
+        deny-proto = craneLib.cargoDeny {
+          pname = "remora-proto";
+          inherit (prevAttrs) version;
+          src = finalAttrs.passthru.denySrc;
+          cargoDenyExtraArgs = "--manifest-path crates/remora-proto/Cargo.toml --config crates/remora-proto/deny.toml";
+          cargoDenyChecks = "bans";
         };
       };
 
