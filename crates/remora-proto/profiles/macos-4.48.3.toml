@@ -1,0 +1,8 @@
+id = "macos-4.48.3"
+inherits = "macos-4.48.1"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of uuyc_4.48.3_nochannel.pkg (build 635): Info.plist, UURemote, UURemoteServer, libstreamer.dylib",
+]
+version = "4.48.3"
+build = 635

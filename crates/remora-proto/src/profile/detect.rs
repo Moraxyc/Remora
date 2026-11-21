@@ -83,10 +83,50 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_or_incomplete_headers() {
         assert_eq!(
-            detect_from_headers([("x-param-plat", "1"), ("x-param-vn", "4.45.0.4318")]),
+            detect_from_headers([("x-param-plat", "1"), ("x-param-vn", "4.99.0.0")]),
             None
         );
         assert_eq!(detect_from_headers([("x-param-plat", "4")]), None);
+    }
+
+    #[test]
+    fn detects_new_windows_macos_and_android_profiles() {
+        assert_eq!(
+            detect_from_headers([
+                ("x-param-plat", "1"),
+                ("x-param-vn", "4.45.0.4318"),
+                ("x-param-vc", "4318"),
+            ])
+            .map(|p| p.id.as_str()),
+            Some("windows-4.45.0")
+        );
+        assert_eq!(
+            detect_from_headers([
+                ("x-param-plat", "4"),
+                ("x-param-vn", "4.48.3"),
+                ("x-param-vc", "635"),
+            ])
+            .map(|p| p.id.as_str()),
+            Some("macos-4.48.3")
+        );
+        assert_eq!(
+            detect_from_headers([
+                ("x-param-plat", "2"),
+                ("x-param-vn", "4.48.2"),
+                ("x-param-vc", "448002"),
+            ])
+            .map(|p| p.id.as_str()),
+            Some("android-4.48.2")
+        );
+        assert_eq!(
+            detect_from_headers([
+                ("x-param-plat", "5"),
+                ("x-param-vn", "3.5.0"),
+                ("x-param-vc", "30500"),
+            ])
+            .map(|p| p.id.as_str()),
+            Some("android-tv-3.5.0")
+        );
     }
 
     #[test]

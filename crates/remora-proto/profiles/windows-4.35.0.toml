@@ -1,0 +1,11 @@
+id = "windows-4.35.0"
+inherits = "windows-4.38.3"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of uuyc_4.35.0.9113_tj.exe (build 9113): GameViewer.exe, GameViewerServer.exe, streamer.dll",
+]
+version = "4.35.0.9113"
+build = 9113
+
+[quirks]
+device_preferences = false

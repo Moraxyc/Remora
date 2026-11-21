@@ -97,6 +97,37 @@ wallpaper_raw_post = true
         assert_eq!(p482.caps, p481.caps);
         assert_eq!(p482.quirks, p481.quirks);
         assert_eq!(p482.init_endpoint, p481.init_endpoint);
+
+        let p483 = by_id("macos-4.48.3").expect("macos-4.48.3 embedded");
+        assert_eq!(p483.build, 635);
+        assert!(p483.quirks.join_share_v1);
+        assert!(p483.quirks.share_saved_favorites_only);
+
+        let w435 = by_id("windows-4.35.0").expect("windows-4.35.0 embedded");
+        assert!(!w435.quirks.device_preferences);
+        assert!(w435.quirks.share_refresh_legacy);
+        assert!(!w435.quirks.entitlements);
+
+        let w445 = by_id("windows-4.45.0").expect("windows-4.45.0 embedded");
+        assert!(w445.quirks.device_preferences);
+        assert!(w445.quirks.share_refresh_legacy);
+        assert!(!w445.quirks.entitlements);
+
+        let w448 = by_id("windows-4.48.2").expect("windows-4.48.2 embedded");
+        assert!(w448.quirks.entitlements);
+        assert!(!w448.quirks.share_refresh_legacy);
+        assert!(w448.quirks.guest_upload_control_mode);
+
+        let a448 = by_id("android-4.48.2").expect("android-4.48.2 embedded");
+        assert_eq!(a448.platform, Platform::Android);
+        assert!(a448.quirks.response_sign_user_info);
+        assert_eq!(a448.caps.features.capture_setting, 2);
+
+        let tv350 = by_id("android-tv-3.5.0").expect("android-tv-3.5.0 embedded");
+        assert_eq!(tv350.platform, Platform::AndroidTv);
+        assert!(!tv350.quirks.kcp_quic_optional);
+        assert!(!tv350.quirks.entitlements);
+        assert_eq!(all().len(), 15);
     }
 
     #[test]

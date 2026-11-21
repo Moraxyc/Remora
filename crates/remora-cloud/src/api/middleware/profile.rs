@@ -93,7 +93,7 @@ mod tests {
 
         let unknown = Request::get("/test")
             .header("X-Param-PLAT", "1")
-            .header("X-Param-VN", "4.45.0.4318")
+            .header("X-Param-VN", "4.99.0.0")
             .body(Body::empty())
             .unwrap();
         let res = app.oneshot(unknown).await.unwrap();

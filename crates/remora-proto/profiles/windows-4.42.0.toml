@@ -1,0 +1,8 @@
+id = "windows-4.42.0"
+inherits = "windows-4.45.0"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of uuyc_4.42.0.2770_tj.exe (build 2770): GameViewer.exe, GameViewerServer.exe, streamer.dll",
+]
+version = "4.42.0.2770"
+build = 2770

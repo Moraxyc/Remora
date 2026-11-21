@@ -60,3 +60,7 @@ virtual_mouse_device = 1
 kcp_quic_optional = true
 log_archive_push_only = true
 wallpaper_raw_post = true
+join_share_v1 = true
+share_saved_favorites_only = true
+entitlements = true
+device_preferences = true

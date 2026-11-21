@@ -1,0 +1,60 @@
+id = "android-tv-3.5.0"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of UURemote-tvProduction-3.5.0-30500-2b0f97d4-TV_gwqd.apk (versionCode 30500): AndroidManifest.xml, classes.dex, libstreamer.so",
+]
+platform = "android_tv"
+plat = "5"
+version = "3.5.0"
+build = 30500
+bundle_id = "com.netease.uuremote"
+channel = "gwqd"
+min_os = "6.0"
+init_endpoint = "/api/v1/device/android_tv/init"
+sign_headers = [
+    "X-Param-PLAT",
+    "X-Param-VN",
+    "X-Param-VC",
+    "X-Param-PKGN",
+    "X-Param-CHN",
+    "X-Param-LANG",
+    "X-Param-CNT",
+    "X-Param-REL",
+    "X-Param-OPR",
+    "X-Param-ABI",
+    "X-Param-OAID",
+    "X-Param-TS",
+    "X-Param-client-id",
+    "X-Param-device-id",
+    "X-Param-user-id",
+]
+
+[caps]
+codecs = ["h264", "h265"]
+audio_codecs = ["opus"]
+transports = ["webrtc"]
+data_channels = [
+    "CONTROL_DATA_CHANNEL",
+    "TEXT_DATA_CHANNEL",
+    "FILE_DATA_CHANNEL",
+    "BINARY_DATA_CHANNEL",
+    "STREAMER_DATA_CHANNEL",
+]
+
+[caps.features]
+capture_setting = 2
+simple_action = 1
+system_metrics = 2
+private_screen = 0
+update_acquire = 0
+file_transfer_ftp = 2
+file_transfer_ftp2 = 2
+clipboard = 0
+qos_stat = 0
+mumu_control = 0
+virtual_mouse_device = 0
+
+[quirks]
+kcp_quic_optional = false
+log_archive_push_only = false
+wallpaper_raw_post = false

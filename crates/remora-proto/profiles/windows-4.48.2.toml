@@ -60,3 +60,6 @@ virtual_mouse_device = 1
 kcp_quic_optional = true
 log_archive_push_only = true
 wallpaper_raw_post = true
+guest_upload_control_mode = true
+entitlements = true
+device_preferences = true

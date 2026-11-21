@@ -14,6 +14,8 @@ pub enum Platform {
     Linux,
     Ios,
     Android,
+    #[serde(rename = "android_tv")]
+    AndroidTv,
 }
 
 /// How the profile data was obtained.
@@ -68,12 +70,26 @@ pub struct Caps {
 }
 
 /// Version-specific transport and protocol quirks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct Quirks {
     pub kcp_quic_optional: bool,
     pub log_archive_push_only: bool,
     pub wallpaper_raw_post: bool,
+    /// Uses `/api/v1/room/join/share/by_code` instead of `/api/v2/room/join/share/by_code`.
+    pub join_share_v1: bool,
+    /// Host reports assist control mode via `.../upload_control_mode`.
+    pub guest_upload_control_mode: bool,
+    /// Only queries `/api/v1/device/share/saved/favorites` rather than `/saved` or `/recent`.
+    pub share_saved_favorites_only: bool,
+    /// Retains the legacy `/api/v1/device/share/info/refresh` route alongside `refresh_id`.
+    pub share_refresh_legacy: bool,
+    /// Queries `/api/v1/member/entitlements` at startup.
+    pub entitlements: bool,
+    /// Queries `/api/v1/device/{id}/preferences`.
+    pub device_preferences: bool,
+    /// Validates `SHA1withRSA` `X-Param-Sign` response headers on `/api/v1/user/info`.
+    pub response_sign_user_info: bool,
 }
 
 /// Engine.IO / Socket.IO signaling timing and reconnect backoff parameters.

@@ -1,0 +1,65 @@
+id = "android-4.48.2"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of uuyc_4.48.2.apk (versionCode 448002): AndroidManifest.xml, classes*.dex, libstreamer.so",
+]
+platform = "android"
+plat = "2"
+version = "4.48.2"
+build = 448002
+bundle_id = "com.netease.uuremote"
+channel = "nochannel"
+min_os = "8.0"
+init_endpoint = "/api/v1/device/android/init"
+sign_headers = [
+    "X-Param-PLAT",
+    "X-Param-VN",
+    "X-Param-VC",
+    "X-Param-PKGN",
+    "X-Param-CHN",
+    "X-Param-3RD-CHN",
+    "X-Param-LANG",
+    "X-Param-CNT",
+    "X-Param-REL",
+    "X-Param-OPR",
+    "X-Param-ABI",
+    "X-Param-OAID",
+    "X-Param-TS",
+    "X-Param-Nonce",
+    "X-Param-client-id",
+    "X-Param-device-id",
+    "X-Param-user-id",
+]
+
+[caps]
+codecs = ["h264", "h265"]
+audio_codecs = ["opus"]
+transports = ["webrtc", "mix-kcp", "quic"]
+data_channels = [
+    "CONTROL_DATA_CHANNEL",
+    "TEXT_DATA_CHANNEL",
+    "FILE_DATA_CHANNEL",
+    "BINARY_DATA_CHANNEL",
+    "STREAMER_DATA_CHANNEL",
+]
+
+[caps.features]
+capture_setting = 2
+simple_action = 1
+system_metrics = 2
+private_screen = 2
+update_acquire = 0
+file_transfer_ftp = 2
+file_transfer_ftp2 = 2
+clipboard = 3
+qos_stat = 0
+mumu_control = 0
+virtual_mouse_device = 0
+
+[quirks]
+kcp_quic_optional = true
+log_archive_push_only = true
+wallpaper_raw_post = false
+entitlements = true
+device_preferences = true
+response_sign_user_info = true
