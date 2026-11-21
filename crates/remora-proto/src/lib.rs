@@ -7,4 +7,5 @@ pub mod machine;
 pub mod pb;
 pub mod profile;
 pub mod server;
+pub mod session;
 pub mod signal;

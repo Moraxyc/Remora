@@ -2437,6 +2437,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protox",
+ "rand_core 0.9.5",
  "serde",
  "serde_json",
  "sha2 0.11.1",

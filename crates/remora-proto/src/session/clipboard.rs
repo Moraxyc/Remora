@@ -1,0 +1,1 @@
+//! Clipboard session messages (placeholder).
