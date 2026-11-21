@@ -316,6 +316,56 @@ pub struct DevicePreferencesResponse {
     pub device_preferences: DevicePreferences,
 }
 
+/// Response `data` from `GET /api/v1/device/share/info`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceShareInfoResponse {
+    pub connect_id: String,
+    #[serde(default)]
+    pub connect_code: String,
+    #[serde(default)]
+    pub alias: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for DeviceShareInfoResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceShareInfoResponse")
+            .field("connect_id", &self.connect_id)
+            .field("connect_code", &"<redacted>")
+            .field("alias", &self.alias)
+            .finish()
+    }
+}
+
+/// Response `data` from `GET /api/v1/release/fetch/update` and
+/// `GET /api/v1/release/fetch/update/{device_id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseUpdateResponse {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub md5: String,
+    #[serde(default)]
+    pub version_name: String,
+    #[serde(default)]
+    pub version_code: u64,
+    #[serde(default)]
+    pub change_logs: Vec<String>,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub user_external_force_upgrade: bool,
+    #[serde(default)]
+    pub upgrade_uri: Map<String, Value>,
+    #[serde(default)]
+    pub update_type: String,
+    #[serde(default)]
+    pub update_prompt_type: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 /// Optional request body for `POST /api/v1/room/create`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomCreateRequest {

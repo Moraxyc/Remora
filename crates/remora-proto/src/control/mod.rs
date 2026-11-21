@@ -6,8 +6,9 @@ pub mod types;
 pub use signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign, verify};
 pub use types::{
     ApiError, DeviceEntry, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse,
-    DeviceListResponse, DevicePreferences, DevicePreferencesResponse, DeviceStatus, DeviceTools,
-    LoginByQrcodeRequest, LoginResponse, MacControllableRequest, ParticipantInfo, QrCodeStatus,
-    QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse, RoomCreateRequest,
-    RoomCreateResponse, RoomJoinRequest, RoomJoinResponse, UserInfoResponse, parse_response,
+    DeviceListResponse, DevicePreferences, DevicePreferencesResponse, DeviceShareInfoResponse,
+    DeviceStatus, DeviceTools, LoginByQrcodeRequest, LoginResponse, MacControllableRequest,
+    ParticipantInfo, QrCodeStatus, QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse,
+    ReleaseUpdateResponse, RoomCreateRequest, RoomCreateResponse, RoomJoinRequest,
+    RoomJoinResponse, UserInfoResponse, parse_response,
 };
