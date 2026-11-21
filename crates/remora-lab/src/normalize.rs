@@ -103,6 +103,7 @@ impl SymbolTable {
         }
         match key_hint {
             Some("device_id" | "current_device_id") => self.intern("device", raw),
+            Some("connect_id") => self.intern("connect_id", raw),
             Some("client_id") => self.intern("client", raw),
             Some("ice_id") => self.intern("ice", raw),
             Some("token") => {

@@ -144,8 +144,14 @@ impl FakeCloudInstance {
                 "/api/v1/device/{device_id}/preferences",
                 get(device_preferences),
             )
+            .route("/api/v1/device/share/info", get(device_share_info))
             .route("/api/v1/device/{device_id}/unbind", post(device_unbind))
             .route("/api/v1/member/entitlements", get(member_entitlements))
+            .route("/api/v1/release/fetch/update", get(release_fetch_update))
+            .route(
+                "/api/v1/release/fetch/update/{device_id}",
+                get(release_fetch_update_device),
+            )
             .route("/api/v1/room/create", post(room_create))
             .route("/api/v1/room/join/by_device/{device_id}", post(room_join))
             .route("/socket.io/", get(ws_connect))
@@ -810,6 +816,148 @@ async fn member_entitlements(
             "features": {}
         })))
         .unwrap(),
+    )
+}
+
+fn connect_id_for(device_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in device_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:09}", 100_000_000 + (hash % 900_000_000))
+}
+
+async fn device_share_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let Some(device_id) = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    let Some(dev) = guard.devices_by_id.get(device_id) else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    let alias = if dev.name.is_empty() {
+        dev.device_id.clone()
+    } else {
+        dev.name.clone()
+    };
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "connect_id": connect_id_for(&dev.device_id),
+            "connect_code": "",
+            "alias": alias,
+        })))
+        .unwrap(),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct ReleaseUpdateQuery {
+    #[serde(default)]
+    version_name: Option<String>,
+}
+
+fn no_update_json(version_name: &str, version_code: u64) -> Value {
+    json!({
+        "url": "",
+        "md5": "",
+        "version_name": version_name,
+        "version_code": version_code,
+        "change_logs": [],
+        "subtitle": "",
+        "user_external_force_upgrade": false,
+        "upgrade_uri": {},
+        "update_type": "NoUpdate",
+        "update_prompt_type": "",
+    })
+}
+
+async fn release_fetch_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let version_name = headers
+        .get("x-param-vn")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    let version_code = headers
+        .get("x-param-vc")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(no_update_json(version_name, version_code))).unwrap(),
+    )
+}
+
+async fn release_fetch_update_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Query(query): Query<ReleaseUpdateQuery>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let Some(dev) = guard
+        .devices_by_id
+        .get(&device_id)
+        .filter(|d| d.owner.as_deref() == Some("1"))
+    else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    let version_name = query
+        .version_name
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| dev.version_name.clone());
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(no_update_json(&version_name, 0))).unwrap(),
     )
 }
 

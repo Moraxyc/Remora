@@ -186,6 +186,22 @@ pub enum StepAction {
         #[serde(default)]
         device_id: Option<String>,
     },
+    DeviceShareInfo {
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    ReleaseFetchUpdate {
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        platform: Option<u8>,
+        #[serde(default)]
+        version_name: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+    },
     DeviceUnbind {
         target: String,
         #[serde(default)]

@@ -805,6 +805,72 @@ async fn execute_action_step(
             };
             ("mac_controllable", out)
         }
+        StepAction::DeviceShareInfo { token, device_id } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let dev = explicit_dev
+                .or_else(|| actor.device_id.clone())
+                .unwrap_or_default();
+            let out = match actor.http.device_share_info(&tok, &dev).await {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_share_info", out)
+        }
+        StepAction::ReleaseFetchUpdate {
+            target,
+            platform,
+            version_name,
+            token,
+        } => {
+            let target_id = match target {
+                Some(t) => Some(resolve_target_device(env, t).await?),
+                None => None,
+            };
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let out = match target_id {
+                Some(dev_id) => {
+                    actor
+                        .http
+                        .release_fetch_update_for_device(
+                            &tok,
+                            &dev_id,
+                            actor.device_id.as_deref(),
+                            *platform,
+                            version_name.as_deref(),
+                        )
+                        .await
+                }
+                None => {
+                    actor
+                        .http
+                        .release_fetch_update(&tok, actor.device_id.as_deref())
+                        .await
+                }
+            };
+            let out = match out {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("release_fetch_update", out)
+        }
         StepAction::DeviceUnbind { target, token } => {
             let target_id = resolve_target_device(env, target).await?;
             let explicit_tok = match token {
