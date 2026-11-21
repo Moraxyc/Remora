@@ -6,6 +6,7 @@ pub use remora_proto;
 pub mod client;
 #[cfg(feature = "peer")]
 pub mod peer {}
+pub mod platform;
 #[cfg(feature = "record")]
 pub mod record;
 
