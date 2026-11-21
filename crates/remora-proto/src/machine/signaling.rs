@@ -8,6 +8,7 @@ use rand_core::RngCore;
 use serde_json::{Value, json};
 
 use super::{Machine, Timestamp};
+use crate::profile::SignalProfile;
 use crate::signal::events::{ControlAck, RefreshReconnectKeyAck, SignalEvent, names};
 use crate::signal::{
     CONNECT, DecodeError, Decoder, Handshake, PONG, Packet, encode_binary_event, encode_event,
@@ -94,7 +95,10 @@ pub struct SignalingMachine<R: RngCore> {
     next_ack_id: u64,
     pending_refresh_acks: HashSet<u64>,
     pending_control_acks: HashSet<u64>,
+    handshake_timeout: Duration,
+    default_liveness_window: Duration,
     liveness_window: Duration,
+    refresh_success_interval: Duration,
     liveness_deadline: Option<Timestamp>,
     next_refresh_at: Option<Timestamp>,
     transmits: VecDeque<SignalingTransmit>,
@@ -121,7 +125,32 @@ impl<R: RngCore> SignalingMachine<R> {
             next_ack_id: initial_ack,
             pending_refresh_acks: HashSet::new(),
             pending_control_acks: HashSet::new(),
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            default_liveness_window: DEFAULT_LIVENESS_WINDOW,
             liveness_window: DEFAULT_LIVENESS_WINDOW,
+            refresh_success_interval: REFRESH_SUCCESS_INTERVAL,
+            liveness_deadline: None,
+            next_refresh_at: None,
+            transmits: VecDeque::new(),
+            events: VecDeque::new(),
+        }
+    }
+
+    pub fn with_signal_profile(mut rng: R, signal: &SignalProfile) -> Self {
+        let initial_ack = u64::from(rng.next_u32() % 1000) + 1;
+        let liveness = signal.liveness_timeout();
+        Self {
+            state: SignalingState::Disconnected,
+            handshake: None,
+            decoder: Decoder::new(),
+            rng,
+            next_ack_id: initial_ack,
+            pending_refresh_acks: HashSet::new(),
+            pending_control_acks: HashSet::new(),
+            handshake_timeout: signal.handshake_timeout(),
+            default_liveness_window: liveness,
+            liveness_window: liveness,
+            refresh_success_interval: signal.reconnect_key_refresh(),
             liveness_deadline: None,
             next_refresh_at: None,
             transmits: VecDeque::new(),
@@ -157,8 +186,8 @@ impl<R: RngCore> SignalingMachine<R> {
         self.handshake = None;
         self.pending_refresh_acks.clear();
         self.pending_control_acks.clear();
-        self.liveness_window = DEFAULT_LIVENESS_WINDOW;
-        self.liveness_deadline = Some(now + DEFAULT_HANDSHAKE_TIMEOUT);
+        self.liveness_window = self.default_liveness_window;
+        self.liveness_deadline = Some(now + self.handshake_timeout);
         self.next_refresh_at = None;
     }
 
@@ -276,7 +305,7 @@ impl<R: RngCore> SignalingMachine<R> {
                 if self.pending_refresh_acks.remove(&ack.id) {
                     match RefreshReconnectKeyAck::decode(&ack.args) {
                         RefreshReconnectKeyAck::Success { .. } => {
-                            self.next_refresh_at = Some(now + REFRESH_SUCCESS_INTERVAL);
+                            self.next_refresh_at = Some(now + self.refresh_success_interval);
                             self.events.push_back(SignalingEvent::ReconnectKeyRefreshed);
                         }
                         _ => {

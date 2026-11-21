@@ -47,6 +47,27 @@ pub struct ProfileToml {
     pub caps: Option<CapsToml>,
     #[serde(default)]
     pub quirks: Option<QuirksToml>,
+    #[serde(default)]
+    pub signal: Option<SignalToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignalToml {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub handshake_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub ping_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub ping_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub reconnect_initial_ms: Option<u64>,
+    #[serde(default)]
+    pub reconnect_max_ms: Option<u64>,
+    #[serde(default)]
+    pub reconnect_key_refresh_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +158,32 @@ pub struct ResolvedProfile {
     pub data_channels: Vec<String>,
     pub features: ResolvedFeatures,
     pub quirks: ResolvedQuirks,
+    pub signal: ResolvedSignal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSignal {
+    pub path: String,
+    pub handshake_timeout_ms: u64,
+    pub ping_interval_ms: u64,
+    pub ping_timeout_ms: u64,
+    pub reconnect_initial_ms: u64,
+    pub reconnect_max_ms: u64,
+    pub reconnect_key_refresh_ms: u64,
+}
+
+impl Default for ResolvedSignal {
+    fn default() -> Self {
+        Self {
+            path: "/socket.io/?EIO=4&transport=websocket".to_owned(),
+            handshake_timeout_ms: 20_000,
+            ping_interval_ms: 25_000,
+            ping_timeout_ms: 20_000,
+            reconnect_initial_ms: 1_000,
+            reconnect_max_ms: 30_000,
+            reconnect_key_refresh_ms: 300_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +489,40 @@ fn merge_profile(
         )?,
     };
 
+    let rs = raw.signal.as_ref();
+    let ps = parent.map(|p| &p.signal);
+    let def_sig = ResolvedSignal::default();
+    let signal = ResolvedSignal {
+        path: rs
+            .and_then(|s| s.path.clone())
+            .or_else(|| ps.map(|s| s.path.clone()))
+            .unwrap_or(def_sig.path),
+        handshake_timeout_ms: rs
+            .and_then(|s| s.handshake_timeout_ms)
+            .or_else(|| ps.map(|s| s.handshake_timeout_ms))
+            .unwrap_or(def_sig.handshake_timeout_ms),
+        ping_interval_ms: rs
+            .and_then(|s| s.ping_interval_ms)
+            .or_else(|| ps.map(|s| s.ping_interval_ms))
+            .unwrap_or(def_sig.ping_interval_ms),
+        ping_timeout_ms: rs
+            .and_then(|s| s.ping_timeout_ms)
+            .or_else(|| ps.map(|s| s.ping_timeout_ms))
+            .unwrap_or(def_sig.ping_timeout_ms),
+        reconnect_initial_ms: rs
+            .and_then(|s| s.reconnect_initial_ms)
+            .or_else(|| ps.map(|s| s.reconnect_initial_ms))
+            .unwrap_or(def_sig.reconnect_initial_ms),
+        reconnect_max_ms: rs
+            .and_then(|s| s.reconnect_max_ms)
+            .or_else(|| ps.map(|s| s.reconnect_max_ms))
+            .unwrap_or(def_sig.reconnect_max_ms),
+        reconnect_key_refresh_ms: rs
+            .and_then(|s| s.reconnect_key_refresh_ms)
+            .or_else(|| ps.map(|s| s.reconnect_key_refresh_ms))
+            .unwrap_or(def_sig.reconnect_key_refresh_ms),
+    };
+
     let detect_plat = raw
         .detect
         .as_ref()
@@ -480,6 +561,7 @@ fn merge_profile(
         data_channels,
         features,
         quirks,
+        signal,
     })
 }
 

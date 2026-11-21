@@ -1,11 +1,11 @@
 //! Stateless `{code, msg, data}` response envelope builders.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
 
 /// Empty JSON object `{}` used as `data` when an endpoint returns no fields.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmptyData {}
 
 /// Wire response envelope `{code, msg, data}`.

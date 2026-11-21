@@ -5,11 +5,13 @@ use std::fmt;
 use std::time::Duration;
 
 use rand_core::RngCore;
-use serde::Deserialize;
-use serde_json::json;
 
 use super::{Machine, Timestamp};
-use crate::control::{ApiError, PARAM_PREFIX, SIGN_HEADER, SignKey, parse_response, sign};
+use crate::control::{
+    ApiError, DeviceInitRequest, DeviceInitResponse, LoginByQrcodeRequest, LoginResponse,
+    PARAM_PREFIX, QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse, SIGN_HEADER,
+    SignKey, parse_response, sign,
+};
 
 /// QR code validity window (180 seconds).
 const QR_LIFETIME: Duration = Duration::from_secs(180);
@@ -138,30 +140,6 @@ impl fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-#[derive(Deserialize)]
-struct DeviceInitData {
-    device_id: String,
-}
-
-#[derive(Deserialize)]
-struct QrGenData {
-    qrcode_jump_url: String,
-    status_query_ticket: String,
-}
-
-#[derive(Deserialize)]
-struct QrStatusData {
-    status: u8,
-}
-
-#[derive(Deserialize)]
-struct LoginData {
-    token: String,
-    user_id: String,
-    #[serde(default)]
-    nickname: String,
-}
-
 /// Sans-IO authentication state machine with injected [`SignKey`], Unix epoch anchor, and
 /// [`RngCore`].
 pub struct AuthMachine<R: RngCore> {
@@ -229,10 +207,10 @@ impl<R: RngCore> AuthMachine<R> {
         client_id: &str,
         name: &str,
     ) {
-        let body = serde_json::to_vec(&json!({
-            "client_id": client_id,
-            "name": name,
-        }))
+        let body = serde_json::to_vec(&DeviceInitRequest {
+            client_id: client_id.to_owned(),
+            name: name.to_owned(),
+        })
         .expect("init body serializes");
         let req = self.build_signed_request(now, "POST", endpoint, None, None, body);
         self.state = AuthState::DeviceInitPending;
@@ -277,11 +255,11 @@ impl<R: RngCore> AuthMachine<R> {
         let (Some(ticket), Some(jump_url)) = (&self.qr_ticket, &self.qr_jump_url) else {
             return;
         };
-        let body = serde_json::to_vec(&json!({
-            "token": ticket,
-            "qrcode_jump_url": jump_url,
-            "login_status": self.last_qr_status,
-        }))
+        let body = serde_json::to_vec(&QrLoginStatusRequest {
+            token: ticket.clone(),
+            qrcode_jump_url: jump_url.clone(),
+            login_status: self.last_qr_status,
+        })
         .expect("qr poll serializes");
         let req =
             self.build_signed_request(now, "POST", "/api/v1/qrcode/login/status", None, None, body);
@@ -294,10 +272,10 @@ impl<R: RngCore> AuthMachine<R> {
         let (Some(ticket), Some(jump_url)) = (&self.qr_ticket, &self.qr_jump_url) else {
             return;
         };
-        let body = serde_json::to_vec(&json!({
-            "token": ticket,
-            "qrcode_jump_url": jump_url,
-        }))
+        let body = serde_json::to_vec(&LoginByQrcodeRequest {
+            token: ticket.clone(),
+            qrcode_jump_url: jump_url.clone(),
+        })
         .expect("qr redeem serializes");
         let req =
             self.build_signed_request(now, "POST", "/api/v1/login/by_qrcode", None, None, body);
@@ -394,7 +372,7 @@ impl<R: RngCore> Machine for AuthMachine<R> {
         let (status, body) = split_http_response(input);
 
         match op {
-            PendingOp::DeviceInit => match parse_response::<DeviceInitData>(status, body) {
+            PendingOp::DeviceInit => match parse_response::<DeviceInitResponse>(status, body) {
                 Ok(data) => {
                     self.state = AuthState::Idle;
                     self.events.push_back(AuthEvent::DeviceInitialized {
@@ -406,7 +384,7 @@ impl<R: RngCore> Machine for AuthMachine<R> {
                     self.events.push_back(AuthEvent::ApiFailed(err));
                 }
             },
-            PendingOp::QrGenerate => match parse_response::<QrGenData>(status, body) {
+            PendingOp::QrGenerate => match parse_response::<QrLoginGenResponse>(status, body) {
                 Ok(data) => {
                     self.state = AuthState::QrPending;
                     self.last_qr_status = 1;
@@ -424,38 +402,40 @@ impl<R: RngCore> Machine for AuthMachine<R> {
                     self.events.push_back(AuthEvent::ApiFailed(err));
                 }
             },
-            PendingOp::QrStatusPoll => match parse_response::<QrStatusData>(status, body) {
-                Ok(data) => {
-                    if data.status != self.last_qr_status {
-                        self.last_qr_status = data.status;
-                        self.events.push_back(AuthEvent::QrStatusChanged {
-                            status: data.status,
-                        });
+            PendingOp::QrStatusPoll => {
+                match parse_response::<QrLoginStatusResponse>(status, body) {
+                    Ok(data) => {
+                        if data.status != self.last_qr_status {
+                            self.last_qr_status = data.status;
+                            self.events.push_back(AuthEvent::QrStatusChanged {
+                                status: data.status,
+                            });
+                        }
+                        match data.status {
+                            3 => {
+                                self.clear_qr();
+                                self.state = AuthState::Expired;
+                                self.events.push_back(AuthEvent::QrExpired);
+                            }
+                            4 => {
+                                self.enqueue_qr_redeem(now);
+                            }
+                            _ => {
+                                self.next_poll_at = Some(now + QR_POLL_INTERVAL);
+                            }
+                        }
                     }
-                    match data.status {
-                        3 => {
-                            self.clear_qr();
-                            self.state = AuthState::Expired;
-                            self.events.push_back(AuthEvent::QrExpired);
-                        }
-                        4 => {
-                            self.enqueue_qr_redeem(now);
-                        }
-                        _ => {
-                            self.next_poll_at = Some(now + QR_POLL_INTERVAL);
-                        }
+                    Err(ApiError::QrCodeExpired) => {
+                        self.clear_qr();
+                        self.state = AuthState::Expired;
+                        self.events.push_back(AuthEvent::QrExpired);
+                    }
+                    Err(err) => {
+                        self.events.push_back(AuthEvent::ApiFailed(err));
                     }
                 }
-                Err(ApiError::QrCodeExpired) => {
-                    self.clear_qr();
-                    self.state = AuthState::Expired;
-                    self.events.push_back(AuthEvent::QrExpired);
-                }
-                Err(err) => {
-                    self.events.push_back(AuthEvent::ApiFailed(err));
-                }
-            },
-            PendingOp::QrRedeem => match parse_response::<LoginData>(status, body) {
+            }
+            PendingOp::QrRedeem => match parse_response::<LoginResponse>(status, body) {
                 Ok(data) => {
                     self.clear_qr();
                     self.state = AuthState::Authenticated;

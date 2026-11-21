@@ -1,9 +1,10 @@
-//! Cloud REST API response envelope and errors.
+//! Cloud REST API response envelope, errors, and control-plane message types.
 
 use std::fmt;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// Result of one cloud call, from the HTTP status and the `{code, msg, data}` body.
 ///
@@ -59,6 +60,246 @@ impl fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+/// Request body for `POST /api/v1/device/{platform}/init`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInitRequest {
+    pub client_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Response `data` from `POST /api/v1/device/{platform}/init`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceInitResponse {
+    pub device_id: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Response `data` from `POST /api/v1/qrcode/gen/login`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct QrLoginGenResponse {
+    pub qrcode_jump_url: String,
+    pub status_query_ticket: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for QrLoginGenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QrLoginGenResponse")
+            .field("qrcode_jump_url", &"<redacted>")
+            .field("status_query_ticket", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Semantic QR login status codes returned by `/api/v1/qrcode/login/status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum QrCodeStatus {
+    Waiting,
+    Scanned,
+    Expired,
+    Confirmed,
+    Unknown(u8),
+}
+
+impl From<u8> for QrCodeStatus {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => Self::Waiting,
+            2 => Self::Scanned,
+            3 => Self::Expired,
+            4 => Self::Confirmed,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<QrCodeStatus> for u8 {
+    fn from(status: QrCodeStatus) -> Self {
+        match status {
+            QrCodeStatus::Waiting => 1,
+            QrCodeStatus::Scanned => 2,
+            QrCodeStatus::Expired => 3,
+            QrCodeStatus::Confirmed => 4,
+            QrCodeStatus::Unknown(v) => v,
+        }
+    }
+}
+
+/// Request body for `POST /api/v1/qrcode/login/status`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QrLoginStatusRequest {
+    pub token: String,
+    pub qrcode_jump_url: String,
+    #[serde(default)]
+    pub login_status: u8,
+}
+
+impl fmt::Debug for QrLoginStatusRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QrLoginStatusRequest")
+            .field("token", &"<redacted>")
+            .field("qrcode_jump_url", &"<redacted>")
+            .field("login_status", &self.login_status)
+            .finish()
+    }
+}
+
+/// Response `data` from `POST /api/v1/qrcode/login/status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QrLoginStatusResponse {
+    pub status: u8,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Request body for `POST /api/v1/login/by_qrcode`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginByQrcodeRequest {
+    pub token: String,
+    pub qrcode_jump_url: String,
+}
+
+impl fmt::Debug for LoginByQrcodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoginByQrcodeRequest")
+            .field("token", &"<redacted>")
+            .field("qrcode_jump_url", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Response `data` from `POST /api/v1/login/by_qrcode`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub token: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("token", &"<redacted>")
+            .field("user_id", &self.user_id)
+            .field("nickname", &self.nickname)
+            .finish()
+    }
+}
+
+/// Response `data` from `GET /api/v1/user/info`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserInfoResponse {
+    pub user_id: String,
+    #[serde(default)]
+    pub nickname: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Online status of a device in `/api/v1/device/list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
+pub enum DeviceStatus {
+    Connected,
+    Disconnected,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A single device entry in `/api/v1/device/list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceEntry {
+    pub device_id: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    pub platform: u8,
+    pub status: DeviceStatus,
+    #[serde(default)]
+    pub wallpaper_url: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Response `data` from `GET /api/v1/device/list`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    #[serde(default)]
+    pub current_device: Option<DeviceEntry>,
+    #[serde(default)]
+    pub my_binded_devices: Vec<DeviceEntry>,
+    #[serde(default)]
+    pub others_shared_devices: Vec<DeviceEntry>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Response `data` from `POST /api/v1/room/create`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomCreateResponse {
+    pub signaling_server: String,
+    #[serde(default)]
+    pub signaling_list: Vec<String>,
+    pub token: String,
+    pub ws_connect_timeout_ms: u32,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for RoomCreateResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RoomCreateResponse")
+            .field("signaling_server", &self.signaling_server)
+            .field("signaling_list", &self.signaling_list)
+            .field("token", &"<redacted>")
+            .field("ws_connect_timeout_ms", &self.ws_connect_timeout_ms)
+            .finish()
+    }
+}
+
+/// Request body for `POST /api/v1/room/join/by_device/{device_id}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomJoinRequest {
+    #[serde(default)]
+    pub force_join: bool,
+}
+
+/// Response `data` from `POST /api/v1/room/join/by_device/{device_id}`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoomJoinResponse {
+    #[serde(default)]
+    pub signaling_list: Vec<String>,
+    pub token: String,
+    pub ws_connect_timeout_ms: u32,
+    #[serde(default)]
+    pub report_token: String,
+    #[serde(default)]
+    pub report_url: String,
+    pub publisher_platform: u8,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for RoomJoinResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RoomJoinResponse")
+            .field("signaling_list", &self.signaling_list)
+            .field("token", &"<redacted>")
+            .field("ws_connect_timeout_ms", &self.ws_connect_timeout_ms)
+            .field("report_token", &"<redacted>")
+            .field("report_url", &self.report_url)
+            .field("publisher_platform", &self.publisher_platform)
+            .finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {

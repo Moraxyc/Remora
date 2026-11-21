@@ -1,5 +1,7 @@
 //! Compile-time embedded official client profiles and capabilities.
 
+use std::time::Duration;
+
 pub mod detect;
 #[cfg(test)]
 #[allow(dead_code)]
@@ -72,6 +74,49 @@ pub struct Quirks {
     pub wallpaper_raw_post: bool,
 }
 
+/// Engine.IO / Socket.IO signaling timing and reconnect backoff parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalProfile {
+    pub path: &'static str,
+    pub handshake_timeout_ms: u64,
+    pub ping_interval_ms: u64,
+    pub ping_timeout_ms: u64,
+    pub reconnect_initial_ms: u64,
+    pub reconnect_max_ms: u64,
+    pub reconnect_key_refresh_ms: u64,
+}
+
+impl SignalProfile {
+    pub const fn handshake_timeout(&self) -> Duration {
+        Duration::from_millis(self.handshake_timeout_ms)
+    }
+
+    pub const fn ping_interval(&self) -> Duration {
+        Duration::from_millis(self.ping_interval_ms)
+    }
+
+    pub const fn ping_timeout(&self) -> Duration {
+        Duration::from_millis(self.ping_timeout_ms)
+    }
+
+    pub fn liveness_timeout(&self) -> Duration {
+        let ms = self.ping_interval_ms.saturating_add(self.ping_timeout_ms);
+        Duration::from_millis(ms).clamp(Duration::from_secs(5), Duration::from_secs(300))
+    }
+
+    pub const fn reconnect_initial(&self) -> Duration {
+        Duration::from_millis(self.reconnect_initial_ms)
+    }
+
+    pub const fn reconnect_max(&self) -> Duration {
+        Duration::from_millis(self.reconnect_max_ms)
+    }
+
+    pub const fn reconnect_key_refresh(&self) -> Duration {
+        Duration::from_millis(self.reconnect_key_refresh_ms)
+    }
+}
+
 /// Static description of an official client release, embedded from `profiles/*.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Profile {
@@ -94,6 +139,7 @@ pub struct Profile {
     pub detect: DetectRule,
     pub caps: Caps,
     pub quirks: Quirks,
+    pub signal: SignalProfile,
 }
 
 include!(concat!(env!("OUT_DIR"), "/profiles.rs"));
@@ -153,6 +199,7 @@ mod tests {
                 log_archive_push_only: Some(true),
                 wallpaper_raw_post: Some(true),
             }),
+            signal: None,
         }
     }
 

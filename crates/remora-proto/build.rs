@@ -134,6 +134,45 @@ fn emit_profiles(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .unwrap();
         writeln!(out, "        }},").unwrap();
+        writeln!(out, "        signal: SignalProfile {{").unwrap();
+        writeln!(out, "            path: {:?},", profile.signal.path).unwrap();
+        writeln!(
+            out,
+            "            handshake_timeout_ms: {},",
+            profile.signal.handshake_timeout_ms
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            ping_interval_ms: {},",
+            profile.signal.ping_interval_ms
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            ping_timeout_ms: {},",
+            profile.signal.ping_timeout_ms
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            reconnect_initial_ms: {},",
+            profile.signal.reconnect_initial_ms
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            reconnect_max_ms: {},",
+            profile.signal.reconnect_max_ms
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "            reconnect_key_refresh_ms: {},",
+            profile.signal.reconnect_key_refresh_ms
+        )
+        .unwrap();
+        writeln!(out, "        }},").unwrap();
         writeln!(out, "    }},").unwrap();
     }
     out.push_str("];\n");
