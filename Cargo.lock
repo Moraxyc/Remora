@@ -2429,6 +2429,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "remora-endpoint"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "hex",
+ "http",
+ "rand 0.9.5",
+ "remora-proto",
+ "reqwest",
+ "rustls",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "remora-proto"
 version = "0.1.0"
 dependencies = [
@@ -2643,6 +2665,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
