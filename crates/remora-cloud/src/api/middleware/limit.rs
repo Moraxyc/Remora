@@ -56,6 +56,11 @@ const WAKE_PER_CLIENT: Rate = Rate {
     every: Duration::from_secs(30),
 };
 
+const SHARE_JOIN_PER_CLIENT: Rate = Rate {
+    burst: 10,
+    every: Duration::from_secs(30),
+};
+
 /// Counts attempts per client with the generic cell rate algorithm: each client has the time
 /// at which its allowance is whole again.
 #[derive(Debug)]
@@ -112,6 +117,7 @@ pub struct Limits {
     qr_login: Limiter,
     registration: Limiter,
     wake: Limiter,
+    share_join: Limiter,
 }
 
 impl Default for Limits {
@@ -122,6 +128,7 @@ impl Default for Limits {
             qr_login: Limiter::new(QR_LOGIN_PER_CLIENT),
             registration: Limiter::new(REGISTRATION_PER_CLIENT),
             wake: Limiter::new(WAKE_PER_CLIENT),
+            share_join: Limiter::new(SHARE_JOIN_PER_CLIENT),
         }
     }
 }
@@ -147,6 +154,10 @@ impl Limits {
 
     pub fn wake(&self, client: Option<IpAddr>) -> bool {
         Self::check(&self.wake, "wake", client)
+    }
+
+    pub fn share_join(&self, client: Option<IpAddr>) -> bool {
+        Self::check(&self.share_join, "share_join", client)
     }
 
     fn check(limiter: &Limiter, limit: &'static str, client: Option<IpAddr>) -> bool {

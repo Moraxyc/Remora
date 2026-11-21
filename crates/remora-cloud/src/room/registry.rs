@@ -215,6 +215,14 @@ impl RoomRegistry {
                     reply.send(());
                 }
             }
+            RoomCommand::KickSharedViewers { device_id, reply } => {
+                if let Some(ActorMessage::KickSharedViewers { reply }) = self
+                    .send_if_exists(&device_id, ActorMessage::KickSharedViewers { reply })
+                    .await
+                {
+                    reply.send(());
+                }
+            }
             RoomCommand::PushToHost {
                 device_id,
                 name,
@@ -339,6 +347,9 @@ enum ActorMessage {
     KickHost {
         reply: Reply<()>,
     },
+    KickSharedViewers {
+        reply: Reply<()>,
+    },
     PushToHost {
         name: String,
         body: Value,
@@ -362,6 +373,7 @@ enum ActorMessage {
 #[derive(Debug)]
 struct PeerInfo {
     id: String,
+    shared: bool,
     #[allow(
         dead_code,
         reason = "retained for capability-aware session negotiation"
@@ -376,6 +388,7 @@ struct Session {
     /// The device the viewer runs on, if known.
     from_device: Option<String>,
     desktop: bool,
+    shared: bool,
     started_at: Instant,
 }
 
@@ -474,6 +487,10 @@ impl RoomActor {
                 self.kick_host().await;
                 reply.send(());
             }
+            ActorMessage::KickSharedViewers { reply } => {
+                self.kick_shared_viewers().await;
+                reply.send(());
+            }
             ActorMessage::PushToHost { name, body, reply } => {
                 let sent = if let Some(host) = &self.host {
                     let host_id = host.id.clone();
@@ -519,6 +536,7 @@ impl RoomActor {
     async fn join(&mut self, room: &Room, client_id: String, profile: Option<&'static Profile>) {
         let peer = PeerInfo {
             id: client_id.clone(),
+            shared: room.shared,
             profile,
         };
         match &room.role {
@@ -647,6 +665,7 @@ impl RoomActor {
                         &client_id,
                         from_device.as_deref(),
                         *take_over,
+                        room.shared,
                         ctrl.app_control_id.as_deref(),
                         ctrl.streamer_data.as_ref(),
                         &ctrl.connect_options,
@@ -738,6 +757,7 @@ impl RoomActor {
         viewer_id: &str,
         from_device: Option<&str>,
         take_over: bool,
+        shared: bool,
         app_control_id: Option<&str>,
         streamer_data: Option<&Value>,
         connect_options: &[u8],
@@ -800,6 +820,7 @@ impl RoomActor {
             viewer: viewer_id.to_owned(),
             from_device: from_device.map(str::to_owned),
             desktop,
+            shared,
             started_at: Instant::now(),
         };
         self.sessions.insert(ice_id, session);
@@ -857,6 +878,42 @@ impl RoomActor {
                 json!({ "ice_id": ice_id, "client_id": host_id }),
             )
             .await;
+        }
+    }
+
+    /// Terminates all shared (remote-assist) sessions and disconnects shared viewers, leaving any
+    /// account-owner sessions untouched.
+    async fn kick_shared_viewers(&mut self) {
+        let shared_ice: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.shared)
+            .map(|(ice_id, _)| ice_id.clone())
+            .collect();
+        let host_id = self
+            .host
+            .as_ref()
+            .map(|h| h.id.clone())
+            .or_else(|| self.departed.clone());
+        for ice_id in shared_ice {
+            if let Some(host_id) = host_id.as_deref() {
+                self.end_session(&ice_id, host_id).await;
+            } else if let Some(session) = self.sessions.remove(&ice_id)
+                && self.viewers.contains_key(&session.viewer)
+            {
+                self.send_event(&session.viewer, names::LEFT, json!({ "ice_id": ice_id }))
+                    .await;
+            }
+        }
+        let shared_viewers: Vec<String> = self
+            .viewers
+            .iter()
+            .filter(|(_, peer)| peer.shared)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for viewer_id in shared_viewers {
+            self.viewers.remove(&viewer_id);
+            self.send_kick(&viewer_id).await;
         }
     }
 
@@ -991,6 +1048,8 @@ mod tests {
                 sub: "1".into(),
                 device_id: "d".into(),
                 role,
+                guest: false,
+                shared: false,
             };
             let (reply, rx) = Reply::channel();
             self.bus

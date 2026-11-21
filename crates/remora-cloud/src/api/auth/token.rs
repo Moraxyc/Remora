@@ -33,6 +33,9 @@ pub const UPLOAD_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
 /// expiry and the client's next fetch still succeed.
 const UPLOAD_TOKEN_GRACE: Duration = Duration::from_secs(10 * 60);
 
+/// How long a guest identity token stays valid before the host refreshes via `guest/create`.
+const GUEST_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Secret that signs every token.
 pub struct TokenKey([u8; 32]);
 
@@ -42,6 +45,7 @@ enum Kind {
     User,
     Room,
     Upload,
+    Guest,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,13 +64,80 @@ pub struct UserToken {
     pub session_id: String,
 }
 
-/// What a room token grants: signaling for the room of `device_id`, on behalf of user `sub`.
+/// What a room token grants: signaling for the room of `device_id`, on behalf of user `sub`
+/// (or a guest host when `guest` is true).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Room {
     pub sub: String,
     pub device_id: String,
     #[serde(flatten)]
     pub role: Role,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub guest: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shared: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Room {
+    pub fn host(user_id: impl Into<String>, device_id: impl Into<String>) -> Self {
+        Self {
+            sub: user_id.into(),
+            device_id: device_id.into(),
+            role: Role::Host,
+            guest: false,
+            shared: false,
+        }
+    }
+
+    pub fn guest_host(guest_id: impl Into<String>, device_id: impl Into<String>) -> Self {
+        Self {
+            sub: guest_id.into(),
+            device_id: device_id.into(),
+            role: Role::Host,
+            guest: true,
+            shared: false,
+        }
+    }
+
+    pub fn viewer(
+        user_id: impl Into<String>,
+        device_id: impl Into<String>,
+        from_device: Option<String>,
+        take_over: bool,
+    ) -> Self {
+        Self {
+            sub: user_id.into(),
+            device_id: device_id.into(),
+            role: Role::Viewer {
+                from_device,
+                take_over,
+            },
+            guest: false,
+            shared: false,
+        }
+    }
+
+    pub fn shared_viewer(
+        user_id: impl Into<String>,
+        device_id: impl Into<String>,
+        from_device: Option<String>,
+        take_over: bool,
+    ) -> Self {
+        Self {
+            sub: user_id.into(),
+            device_id: device_id.into(),
+            role: Role::Viewer {
+                from_device,
+                take_over,
+            },
+            guest: false,
+            shared: true,
+        }
+    }
 }
 
 /// Which side of the room a connection is.
@@ -98,6 +169,21 @@ struct UploadClaims {
     kind: Kind,
     #[serde(flatten)]
     upload: Upload,
+    exp: u64,
+}
+
+/// What an unexpired guest token grants: guest remote-assist endpoints for `device_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestToken {
+    pub guest_id: String,
+    pub device_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GuestClaims {
+    kind: Kind,
+    #[serde(flatten)]
+    guest: GuestToken,
     exp: u64,
 }
 
@@ -160,6 +246,20 @@ impl TokenKey {
     pub fn verify_upload(&self, token: &str) -> Option<Upload> {
         let claims: UploadClaims = self.verify(token)?;
         (claims.kind == Kind::Upload && claims.exp > now()).then_some(claims.upload)
+    }
+
+    pub fn issue_guest(&self, guest: &GuestToken) -> String {
+        self.sign(&GuestClaims {
+            kind: Kind::Guest,
+            guest: guest.clone(),
+            exp: now() + GUEST_TOKEN_LIFETIME.as_secs(),
+        })
+    }
+
+    /// What an unexpired guest token this key issued grants.
+    pub fn verify_guest(&self, token: &str) -> Option<GuestToken> {
+        let claims: GuestClaims = self.verify(token)?;
+        (claims.kind == Kind::Guest && claims.exp > now()).then_some(claims.guest)
     }
 
     fn sign(&self, claims: &impl Serialize) -> String {
@@ -232,11 +332,7 @@ mod tests {
     }
 
     fn room() -> Room {
-        Room {
-            sub: "1".into(),
-            device_id: "d".into(),
-            role: Role::Host,
-        }
+        Room::host("1", "d")
     }
 
     #[test]
@@ -309,6 +405,13 @@ mod tests {
         assert_eq!(key.verify_user(&key.issue_room(room())), None);
         assert_eq!(key.verify_upload(&key.issue_room(room())), None);
         assert_eq!(key.verify_room(&key.issue_upload(upload())), None);
+        let guest = GuestToken {
+            guest_id: "g".into(),
+            device_id: "d".into(),
+        };
+        assert_eq!(key.verify_user(&key.issue_guest(&guest)), None);
+        assert_eq!(key.verify_guest(&key.issue_user(&user())), None);
+        assert_eq!(key.verify_guest(&key.issue_guest(&guest)), Some(guest));
     }
 
     #[test]

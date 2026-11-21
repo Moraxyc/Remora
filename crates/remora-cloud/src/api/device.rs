@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::api::address::ClientAddress;
 use crate::api::files::{FileId, Files};
 use crate::api::middleware::limit::Limits;
+use crate::api::share::Shares;
 use crate::api::user::User;
 use crate::api::wake::LanReports;
 use crate::api::{self, ApiError, Body, Empty};
@@ -218,6 +219,14 @@ impl Devices {
         transaction.execute("DELETE FROM wallpapers WHERE device_id = ?1", [device_id])?;
         transaction.execute("DELETE FROM files WHERE device_id = ?1", [device_id])?;
         transaction.execute("DELETE FROM device_apps WHERE device_id = ?1", [device_id])?;
+        transaction.execute(
+            "DELETE FROM device_shares WHERE device_id = ?1",
+            [device_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM shared_devices WHERE device_id = ?1",
+            [device_id],
+        )?;
         transaction.commit()?;
         Ok(true)
     }
@@ -465,8 +474,7 @@ pub struct ListResponse {
     /// The calling device, when it is registered.
     current_device: Option<Entry>,
     my_binded_devices: Vec<Entry>,
-    /// Sharing devices between users is not supported.
-    others_shared_devices: [Entry; 0],
+    others_shared_devices: Vec<Entry>,
 }
 
 #[derive(Serialize)]
@@ -480,6 +488,7 @@ pub struct GroupsResponse {
 struct DeviceSnapshot {
     current_device: Option<Entry>,
     owned: Vec<Entry>,
+    shared: Vec<Entry>,
 }
 
 fn build_participants(
@@ -518,55 +527,67 @@ fn build_participants(
         .collect()
 }
 
+#[derive(Clone)]
+pub struct DeviceListService {
+    pub devices: Devices,
+    pub shares: Shares,
+    pub rooms: RoomClient,
+    pub files: Files,
+    pub lan_reports: LanReports,
+    pub public_url: PublicUrl,
+}
+
 async fn snapshot_for_user(
     user: &User,
-    devices: &Devices,
-    rooms: &RoomClient,
-    files: &Files,
-    lan_reports: &LanReports,
-    public_url: &PublicUrl,
+    service: &DeviceListService,
     caller: Option<&str>,
 ) -> Result<DeviceSnapshot, ApiError> {
     let caller_device = match caller {
-        Some(id) => devices.get(id)?,
+        Some(id) => service.devices.get(id)?,
         None => None,
     };
-    let owned = devices.owned_by(&user.id)?;
+    let owned = service.devices.owned_by(&user.id)?;
+    let shared = service.shares.shared_devices_for(&user.id)?;
     let mut query_ids: Vec<String> = owned.iter().map(|d| d.id.clone()).collect();
+    for device in &shared {
+        if !query_ids.contains(&device.id) {
+            query_ids.push(device.id.clone());
+        }
+    }
     if let Some(device) = &caller_device
         && !query_ids.contains(&device.id)
     {
         query_ids.push(device.id.clone());
     }
-    let online = rooms.online_devices(query_ids.clone()).await;
-    let mut participants_by_device = rooms.desktop_participants(query_ids).await;
-    let reported: HashSet<String> = lan_reports.reported_devices(&user.id)?;
+    let online = service.rooms.online_devices(query_ids.clone()).await;
+    let mut participants_by_device = service.rooms.desktop_participants(query_ids).await;
+    let reported: HashSet<String> = service.lan_reports.reported_devices(&user.id)?;
     let mut device_cache: HashMap<String, Option<Device>> = HashMap::new();
 
     let current_device = match caller_device {
         Some(device) => {
-            let wallpaper = files.wallpaper_of(&device.id)?;
+            let wallpaper = service.files.wallpaper_of(&device.id)?;
             let is_online = online.contains(&device.id);
             let support_wol =
-                reported.contains(&device.id) || lan_reports.has_report(&device.id)?;
+                reported.contains(&device.id) || service.lan_reports.has_report(&device.id)?;
             let raw_parts = participants_by_device
                 .get(&device.id)
                 .cloned()
                 .unwrap_or_default();
-            let participants = build_participants(devices, &mut device_cache, raw_parts);
+            let participants = build_participants(&service.devices, &mut device_cache, raw_parts);
             Some(entry(
                 device,
                 wallpaper.as_ref(),
                 is_online,
                 support_wol,
                 participants,
-                public_url,
+                &service.public_url,
             ))
         }
         None => None,
     };
 
-    let wallpapers = files.wallpapers_of_user(&user.id)?;
+    let wallpapers = service.files.wallpapers_of_user(&user.id)?;
     let owned_entries = owned
         .into_iter()
         .map(|device| {
@@ -576,14 +597,33 @@ async fn snapshot_for_user(
             let raw_parts = participants_by_device
                 .remove(&device.id)
                 .unwrap_or_default();
-            let participants = build_participants(devices, &mut device_cache, raw_parts);
+            let participants = build_participants(&service.devices, &mut device_cache, raw_parts);
             entry(
                 device,
                 wallpaper,
                 is_online,
                 support_wol,
                 participants,
-                public_url,
+                &service.public_url,
+            )
+        })
+        .collect();
+
+    let shared_entries = shared
+        .into_iter()
+        .map(|device| {
+            let is_online = online.contains(&device.id);
+            let raw_parts = participants_by_device
+                .remove(&device.id)
+                .unwrap_or_default();
+            let participants = build_participants(&service.devices, &mut device_cache, raw_parts);
+            entry(
+                device,
+                None,
+                is_online,
+                false,
+                participants,
+                &service.public_url,
             )
         })
         .collect();
@@ -591,56 +631,31 @@ async fn snapshot_for_user(
     Ok(DeviceSnapshot {
         current_device,
         owned: owned_entries,
+        shared: shared_entries,
     })
 }
 
 /// `GET /api/v1/device/list`: the user's devices.
 pub async fn list(
     user: User,
-    State(devices): State<Devices>,
-    State(rooms): State<RoomClient>,
-    State(files): State<Files>,
-    State(lan_reports): State<LanReports>,
-    State(public_url): State<PublicUrl>,
+    State(service): State<DeviceListService>,
     CallerDevice(caller): CallerDevice,
 ) -> Result<api::Ok<ListResponse>, ApiError> {
-    let snapshot = snapshot_for_user(
-        &user,
-        &devices,
-        &rooms,
-        &files,
-        &lan_reports,
-        &public_url,
-        caller.as_deref(),
-    )
-    .await?;
+    let snapshot = snapshot_for_user(&user, &service, caller.as_deref()).await?;
     Ok(api::Ok(ListResponse {
         current_device: snapshot.current_device,
         my_binded_devices: snapshot.owned,
-        others_shared_devices: [],
+        others_shared_devices: snapshot.shared,
     }))
 }
 
 /// `GET /api/v1/device/groups/of/my`: the user's devices grouped by form factor.
 pub async fn groups(
     user: User,
-    State(devices): State<Devices>,
-    State(rooms): State<RoomClient>,
-    State(files): State<Files>,
-    State(lan_reports): State<LanReports>,
-    State(public_url): State<PublicUrl>,
+    State(service): State<DeviceListService>,
     CallerDevice(caller): CallerDevice,
 ) -> Result<api::Ok<GroupsResponse>, ApiError> {
-    let snapshot = snapshot_for_user(
-        &user,
-        &devices,
-        &rooms,
-        &files,
-        &lan_reports,
-        &public_url,
-        caller.as_deref(),
-    )
-    .await?;
+    let snapshot = snapshot_for_user(&user, &service, caller.as_deref()).await?;
     let mut mobile_devices = Vec::new();
     let mut desktop_devices = Vec::new();
     let mut tv_devices = Vec::new();
@@ -726,18 +741,20 @@ pub async fn share_info(
     user: User,
     CallerDevice(caller): CallerDevice,
     State(devices): State<Devices>,
+    State(shares): State<Shares>,
 ) -> Result<api::Ok<ShareInfoResponse>, ApiError> {
     let device_id = caller.ok_or(ApiError::UNKNOWN_DEVICE)?;
     let device = devices
         .get_for_caller(&device_id, &user.id)?
         .ok_or(ApiError::UNKNOWN_DEVICE)?;
+    let connect_id = shares.ensure_share(&device.id, None, true)?;
     let alias = if device.name.is_empty() {
         device.id.clone()
     } else {
         device.name
     };
     Ok(api::Ok(ShareInfoResponse {
-        connect_id: connect_id_for(&device.id),
+        connect_id,
         connect_code: String::new(),
         alias,
     }))

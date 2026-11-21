@@ -25,6 +25,7 @@ use tokio::time::{Instant, sleep_until};
 use crate::api::ApiError;
 use crate::api::auth::token::{Room, TokenKey, random};
 use crate::api::device::Devices;
+use crate::api::share::Shares;
 use crate::bus::{
     Bus, BusMessage, EndpointFrame, PresenceChanged, Reply, RoomCommand, TOPIC_PRESENCE,
     TOPIC_ROOM_COMMAND,
@@ -67,20 +68,26 @@ pub struct Switchboard {
 pub struct Admission {
     pub tokens: Arc<TokenKey>,
     pub devices: Devices,
+    pub shares: Shares,
 }
 
 impl Admission {
     /// The room an unexpired token grants, unless its device has been unbound from the token's
-    /// user since.
+    /// user (or its guest/share permission was revoked) since.
     fn admit(&self, token: &str) -> rusqlite::Result<Option<Room>> {
         let Some(room) = self.tokens.verify_room(token) else {
             return Ok(None);
         };
-        let owned = self
-            .devices
-            .platform_of_owned(&room.device_id, &room.sub)?
-            .is_some();
-        Ok(owned.then_some(room))
+        let allowed = if room.guest {
+            self.shares.guest_exists(&room.sub, &room.device_id)?
+        } else if room.shared {
+            self.shares.is_share_active(&room.device_id)?
+        } else {
+            self.devices
+                .platform_of_owned(&room.device_id, &room.sub)?
+                .is_some()
+        };
+        Ok(allowed.then_some(room))
     }
 }
 

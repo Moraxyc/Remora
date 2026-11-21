@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::PublicUrl;
-use crate::api::auth::token::{Role, Room, TokenKey};
+use crate::api::auth::token::{Room, TokenKey};
 use crate::api::device::{CallerDevice, CallerVersion, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
@@ -141,6 +141,23 @@ impl RoomClient {
         }
     }
 
+    pub async fn kick_shared_viewers(&self, device_id: &str) {
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::KickSharedViewers {
+                    device_id: device_id.to_owned(),
+                    reply,
+                }),
+            )
+            .await;
+        if delivered > 0 {
+            let _ = rx.await;
+        }
+    }
+
     pub async fn push_to_host(&self, device_id: &str, name: &str, body: Value) -> bool {
         let (reply, rx) = Reply::channel();
         let delivered = self
@@ -171,7 +188,7 @@ pub struct Tickets {
 
 impl Tickets {
     /// A room token and the signaling URL it is for.
-    fn issue(&self, room: Room) -> (String, String) {
+    pub(crate) fn issue(&self, room: Room) -> (String, String) {
         (self.tokens.issue_room(room), self.public_url.signaling())
     }
 }
@@ -206,11 +223,7 @@ pub async fn create(
     }
 
     tracing::info!(user_id = %user.id, %device_id, "room created");
-    let (token, signaling_server) = tickets.issue(Room {
-        sub: user.id,
-        device_id,
-        role: Role::Host,
-    });
+    let (token, signaling_server) = tickets.issue(Room::host(user.id, device_id));
     let sni_required_signaling_list = if tickets.public_url.requires_sni() {
         vec![signaling_server.clone()]
     } else {
@@ -278,14 +291,12 @@ pub async fn join_by_device(
     }
 
     tracing::info!(user_id = %user.id, %device_id, take_over = request.force_join, "room joined");
-    let (token, signaling_server) = tickets.issue(Room {
-        sub: user.id,
+    let (token, signaling_server) = tickets.issue(Room::viewer(
+        user.id,
         device_id,
-        role: Role::Viewer {
-            from_device,
-            take_over: request.force_join,
-        },
-    });
+        from_device,
+        request.force_join,
+    ));
     let sni_required_signaling_list = if tickets.public_url.requires_sni() {
         vec![signaling_server.clone()]
     } else {

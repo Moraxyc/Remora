@@ -16,6 +16,8 @@ use crate::{CloudRole, Config, Ping, PublicUrl, TrustedProxies, api, gateway, re
 #[derive(Clone, FromRef)]
 struct Cloud {
     devices: api::device::Devices,
+    shares: api::share::Shares,
+    share_challenges: api::share::ShareChallenges,
     lan_reports: api::wake::LanReports,
     files: api::files::Files,
     sessions: api::user::Sessions,
@@ -86,6 +88,35 @@ impl FromRef<Cloud> for api::web::Web {
     }
 }
 
+impl FromRef<Cloud> for api::device::DeviceListService {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            devices: cloud.devices.clone(),
+            shares: cloud.shares.clone(),
+            rooms: cloud.rooms.clone(),
+            files: cloud.files.clone(),
+            lan_reports: cloud.lan_reports.clone(),
+            public_url: cloud.public_url.clone(),
+        }
+    }
+}
+
+impl FromRef<Cloud> for api::share::ShareService {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            shares: cloud.shares.clone(),
+            devices: cloud.devices.clone(),
+            rooms: cloud.rooms.clone(),
+            tickets: room::Tickets {
+                tokens: cloud.tokens.clone(),
+                public_url: cloud.public_url.clone(),
+            },
+            challenges: cloud.share_challenges.clone(),
+            limits: cloud.limits.clone(),
+        }
+    }
+}
+
 impl FromRef<Cloud> for gateway::Switchboard {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
@@ -101,6 +132,7 @@ impl FromRef<Cloud> for gateway::Admission {
         Self {
             tokens: cloud.tokens.clone(),
             devices: cloud.devices.clone(),
+            shares: cloud.shares.clone(),
         }
     }
 }
@@ -123,6 +155,8 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
 
     let cloud = Cloud {
         devices: config.database.clone().into(),
+        shares: config.database.clone().into(),
+        share_challenges: api::share::ShareChallenges::default(),
         lan_reports: config.database.clone().into(),
         files: config.database.clone().into(),
         sessions: config.database.clone().into(),
@@ -161,6 +195,96 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 get(api::device::preferences),
             )
             .route("/api/v1/device/share/info", get(api::device::share_info))
+            .route(
+                "/api/v1/device/share/info/refresh_id",
+                post(api::share::device_share_info_refresh),
+            )
+            .route(
+                "/api/v1/device/share/info/refresh",
+                post(api::share::device_share_info_refresh),
+            )
+            .route(
+                "/api/v1/device/share/cancel",
+                post(api::share::device_share_cancel),
+            )
+            .route(
+                "/api/v1/device/share/{id}/unbind",
+                post(api::share::device_share_unbind),
+            )
+            .route(
+                "/api/v1/device/share/saved",
+                get(api::share::device_share_saved),
+            )
+            .route(
+                "/api/v1/device/share/saved/favorites",
+                get(api::share::device_share_saved_favorites_get)
+                    .post(api::share::device_share_saved_favorites_post),
+            )
+            .route(
+                "/api/v1/device/share/saved/{kind}",
+                get(api::share::device_share_saved_kind),
+            )
+            .route(
+                "/api/v1/device/share/saved/{kind}/{publisher_device_id}",
+                delete(api::share::device_share_saved_delete),
+            )
+            .route("/api/v1/guest/create", post(api::share::guest_create))
+            .route(
+                "/api/v1/guest/room/create",
+                post(api::share::guest_room_create),
+            )
+            .route(
+                "/api/v1/guest/share/info",
+                post(api::share::guest_share_info),
+            )
+            .route(
+                "/api/v1/guest/share/cancel",
+                post(api::share::guest_share_cancel),
+            )
+            .route(
+                "/api/v1/guest/room/share/upload_control_mode",
+                post(api::share::guest_upload_control_mode),
+            )
+            .route(
+                "/api/v1/guest/room/share/upload/sign",
+                post(api::share::guest_upload_sign),
+            )
+            .route(
+                "/api/v1/guest/room/share/confirmation",
+                post(api::share::guest_confirmation),
+            )
+            .route(
+                "/api/v2/room/share/control_mode",
+                post(api::share::room_share_control_mode),
+            )
+            .route(
+                "/api/v2/room/share/upload_control_mode",
+                post(api::share::room_share_upload_control_mode),
+            )
+            .route(
+                "/api/v2/room/share/upload_sign",
+                post(api::share::room_share_upload_sign),
+            )
+            .route(
+                "/api/v2/room/share/confirmation",
+                post(api::share::room_share_confirmation),
+            )
+            .route(
+                "/api/v1/room/join/share/by_code",
+                post(api::share::room_join_share_by_code),
+            )
+            .route(
+                "/api/v2/room/join/share/by_code",
+                post(api::share::room_join_share_by_code),
+            )
+            .route(
+                "/api/v2/room/join/share/by_confirmation",
+                post(api::share::room_join_share_by_confirmation),
+            )
+            .route(
+                "/api/v2/room/share/cancel_remote_assist",
+                post(api::share::room_share_cancel_remote_assist),
+            )
             .route(
                 "/api/v1/app/list/of/device/{device_id}",
                 get(api::device::app_list_of_device),

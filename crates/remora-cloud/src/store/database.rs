@@ -96,6 +96,31 @@ const MIGRATIONS: &[&str] = &[
         apps_json TEXT NOT NULL
     ) STRICT;
 ",
+    "
+    CREATE TABLE guests (
+        id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        room_created INTEGER NOT NULL DEFAULT 0,
+        created INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX guests_by_device ON guests (device_id);
+    CREATE TABLE device_shares (
+        device_id TEXT PRIMARY KEY,
+        connect_id TEXT NOT NULL UNIQUE,
+        guest_id TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        updated INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE shared_devices (
+        user_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        remark TEXT NOT NULL DEFAULT '',
+        is_favorite INTEGER NOT NULL DEFAULT 0,
+        last_connected_at INTEGER NOT NULL DEFAULT 0,
+        favorited_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, device_id)
+    ) STRICT;
+",
 ];
 
 /// What `PRAGMA user_version` says once every migration is applied.

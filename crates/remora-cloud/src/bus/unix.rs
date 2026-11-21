@@ -141,6 +141,9 @@ enum WireBusMessage {
     RoomKickHost {
         device_id: String,
     },
+    RoomKickSharedViewers {
+        device_id: String,
+    },
     RoomPushToHost {
         device_id: String,
         name: String,
@@ -234,6 +237,7 @@ impl WireBusMessage {
             self,
             Self::RoomJoin { .. }
                 | Self::RoomKickHost { .. }
+                | Self::RoomKickSharedViewers { .. }
                 | Self::RoomPushToHost { .. }
                 | Self::RoomIsOnline { .. }
                 | Self::RoomOnlineDevices { .. }
@@ -330,6 +334,10 @@ impl WireBusMessage {
                 }
                 RoomCommand::KickHost { device_id, reply } => (
                     Self::RoomKickHost { device_id },
+                    Some(PendingReply::Unit(reply)),
+                ),
+                RoomCommand::KickSharedViewers { device_id, reply } => (
+                    Self::RoomKickSharedViewers { device_id },
                     Some(PendingReply::Unit(reply)),
                 ),
                 RoomCommand::PushToHost {
@@ -457,6 +465,11 @@ impl WireBusMessage {
                 let (reply, rx) = Reply::channel();
                 bridge_reply(reply_to, out_tx.clone(), rx, |()| WireReply::Unit);
                 BusMessage::RoomCommand(RoomCommand::KickHost { device_id, reply })
+            }
+            Self::RoomKickSharedViewers { device_id } => {
+                let (reply, rx) = Reply::channel();
+                bridge_reply(reply_to, out_tx.clone(), rx, |()| WireReply::Unit);
+                BusMessage::RoomCommand(RoomCommand::KickSharedViewers { device_id, reply })
             }
             Self::RoomPushToHost {
                 device_id,

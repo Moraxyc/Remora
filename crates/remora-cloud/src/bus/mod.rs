@@ -127,6 +127,10 @@ pub enum RoomCommand {
         device_id: String,
         reply: Reply<()>,
     },
+    KickSharedViewers {
+        device_id: String,
+        reply: Reply<()>,
+    },
     PushToHost {
         device_id: String,
         name: String,

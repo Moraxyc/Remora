@@ -6,18 +6,22 @@ pub(crate) mod compat;
 pub(crate) mod device;
 pub(crate) mod files;
 pub(crate) mod middleware;
+pub(crate) mod share;
 pub(crate) mod user;
 pub(crate) mod wake;
 pub(crate) mod web;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::FromRequest;
+use axum::extract::Request;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use remora_proto::error::ErrorCode;
 use remora_proto::server::{EmptyData, error_envelope, ok_envelope};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Success: HTTP 200, `code` 0.
 pub struct Ok<T>(pub T);
@@ -104,6 +108,69 @@ impl ApiError {
         code: ErrorCode::TooManyRequests,
         msg: "too many requests",
     };
+
+    /// Guest share info requested before creating a guest room.
+    pub const GUEST_ROOM_REQUIRED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::GuestRoomRequired,
+        msg: "guest room required",
+    };
+
+    /// Same-account remote assistance is refused.
+    pub const SAME_ACCOUNT_ASSIST: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::CannotInitiateRemoteConnection,
+        msg: "无法对同账号的设备发起远程协助",
+    };
+
+    /// The target host has not enabled remote assistance.
+    pub const ASSIST_DISABLED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::CannotInitiateRemoteConnection,
+        msg: "对方未开启协助",
+    };
+
+    /// Incorrect share device ID or verification code.
+    pub const INCORRECT_SHARE_CODE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::IncorrectShareCode,
+        msg: "验证码错误",
+    };
+
+    /// Confirmation was denied or cancelled by the target host.
+    pub const SHARE_CONFIRMATION_DENIED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::ShareConfirmationDenied,
+        msg: "对方已拒绝远程协助",
+    };
+
+    /// Confirmation is still pending on the target host.
+    pub const SHARE_CONFIRMATION_REQUIRED: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::ShareConfirmationRequired,
+        msg: "等待对方确认",
+    };
+
+    /// Cannot favorite a same-account device in share favorites.
+    pub const SAME_ACCOUNT_SHARE_FAVORITE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::SameAccountShareFavorite,
+        msg: "无法对同账号的设备发起远程协助",
+    };
+}
+
+impl ApiError {
+    pub fn into_response_with_data<T: Serialize>(self, data: T) -> Response {
+        (
+            self.status,
+            Json(remora_proto::server::ResponseEnvelope {
+                code: self.code.code(),
+                msg: self.msg,
+                data,
+            }),
+        )
+            .into_response()
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -129,3 +196,26 @@ impl From<JsonRejection> for ApiError {
 #[derive(FromRequest)]
 #[from_request(via(Json), rejection(ApiError))]
 pub struct Body<T>(pub T);
+
+/// JSON request body that also accepts an empty body (`""` / whitespace) as `T::default()`.
+pub struct OptionalBody<T>(pub T);
+
+impl<S, T> FromRequest<S> for OptionalBody<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Default,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = Bytes::from_request(req, state)
+            .await
+            .map_err(|_| ApiError::INVALID_REQUEST)?;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return std::result::Result::Ok(Self(T::default()));
+        }
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|_| ApiError::INVALID_REQUEST)
+    }
+}
