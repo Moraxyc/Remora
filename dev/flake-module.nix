@@ -34,6 +34,13 @@
           nixos = pkgs.testers.runNixOSTest (
             import ../nix/tests/remora.nix { module = self.nixosModules.default; }
           );
+          interop-linux = pkgs.testers.runNixOSTest (
+            import ../nix/tests/interop-linux.nix {
+              remoraModule = self.nixosModules.default;
+              uuRemoteModule = inputs.uu-remote-linux.nixosModules.default;
+              uuRemotePackage = inputs.uu-remote-linux.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            }
+          );
         };
 
       devShells.default = pkgs.mkShell {
