@@ -1,0 +1,31 @@
+{
+  "suite": "control_signing",
+  "cases": [
+    {
+      "name": "post_room_create_sorted_params_and_braces_body",
+      "key": "test-sign-key",
+      "method": "post",
+      "path": "/api/v1/room/create",
+      "headers": [
+        ["X-Param-TS", "1700000000"],
+        ["x-param-plat", "1"],
+        ["Authorization", "Bearer t"],
+        ["X-Param-SIGN", "stale"],
+        ["x-param-chn", "gwqd"]
+      ],
+      "body_hex": "7b7d",
+      "expected_signature": "62856610dd4ccad2c56b434460347d335e41ffcf7e963e5c5e409dfca077e473"
+    },
+    {
+      "name": "get_fp_token_query_string_and_empty_body",
+      "key": "test-sign-key",
+      "method": "GET",
+      "path": "/api/v1/tool/fp/token?filetype=1",
+      "headers": [
+        ["x-param-plat", "1"]
+      ],
+      "body_hex": "",
+      "expected_signature": "a577257f61e702192f237f5292022ce51f27caeb56b2b611185599d23eab30d4"
+    }
+  ]
+}

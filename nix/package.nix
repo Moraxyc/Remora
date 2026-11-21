@@ -19,6 +19,7 @@
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
+      (lib.fileset.maybeMissing ../compat)
       ../crates
       ../contrib
     ];

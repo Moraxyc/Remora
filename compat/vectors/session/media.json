@@ -1,0 +1,23 @@
+{
+  "suite": "session_media",
+  "cases": [
+    {
+      "name": "rtp_capture_index_ext",
+      "kind": "rtp_capture_index",
+      "bytes_hex": "0003",
+      "expected_index": 3
+    },
+    {
+      "name": "rtp_new_frame_ext",
+      "kind": "rtp_new_frame",
+      "bytes_hex": "01",
+      "expected_new_frame": true
+    },
+    {
+      "name": "forward_setting_device_capability",
+      "kind": "forward_setting",
+      "bytes_hex": "7b2274797065223a226465766963655f6361706162696c697479222c226465766963655f6361706162696c697479223a7b226963655f6964223a226963652d31222c22646973706c61795f696e666f223a5b5d2c22766964656f5f636f6465635f6361706162696c697479223a5b5d7d7d",
+      "expected_variant": "device_capability"
+    }
+  ]
+}

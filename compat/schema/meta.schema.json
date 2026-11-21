@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remora.local/compat/schema/meta.schema.json",
+  "title": "Remora Trace Metadata v0",
+  "description": "Metadata describing a recorded protocol observation directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recorded_at",
+    "target",
+    "role",
+    "source",
+    "redacted",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v0"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "platform", "version"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["official", "remora", "uu-remote-linux", "custom"]
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["windows", "macos", "linux", "ios", "android", "cloud"]
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "build": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "profile_id": {
+          "type": "string"
+        }
+      }
+    },
+    "role": {
+      "type": "string",
+      "enum": ["host", "viewer", "cloud", "pair"]
+    },
+    "source": {
+      "type": "string",
+      "enum": ["capture", "driver", "endpoint_record", "synthetic"]
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "scenario": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\.jsonl$"
+      },
+      "minItems": 1
+    }
+  }
+}

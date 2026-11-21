@@ -1,0 +1,35 @@
+{
+  "suite": "control_responses",
+  "cases": [
+    {
+      "name": "success_envelope_with_extra_field",
+      "http_status": 200,
+      "body_hex": "7b22636f6465223a302c226d7367223a226f6b222c2264617461223a7b22746f6b656e223a2274222c226578747261223a317d7d",
+      "expected": { "outcome": "ok", "data": { "token": "t", "extra": 1 } }
+    },
+    {
+      "name": "token_expired_1120",
+      "http_status": 422,
+      "body_hex": "7b22636f6465223a313132302c226d7367223a22546f6b656ee697a0e69588e68896e5b7b2e8bf87e69c9f227d",
+      "expected": { "outcome": "token_expired" }
+    },
+    {
+      "name": "qr_code_expired_1190",
+      "http_status": 400,
+      "body_hex": "7b22636f6465223a313139302c226d7367223a2265787069726564227d",
+      "expected": { "outcome": "qr_code_expired" }
+    },
+    {
+      "name": "invalid_request_1001",
+      "http_status": 422,
+      "body_hex": "7b22636f6465223a313030312c226d7367223a22222c2264617461223a5b7b226c6f63223a5b22626f6479225d7d5d7d",
+      "expected": { "outcome": "rejected", "http_status": 422, "code": 1001 }
+    },
+    {
+      "name": "html_502_malformed",
+      "http_status": 502,
+      "body_hex": "3c68746d6c3e",
+      "expected": { "outcome": "malformed", "http_status": 502 }
+    }
+  ]
+}

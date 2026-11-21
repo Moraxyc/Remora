@@ -1,0 +1,31 @@
+{
+  "suite": "session_control",
+  "cases": [
+    {
+      "name": "echo_response_with_feature_flag_capture_setting_4",
+      "bytes_hex": "080110021a130801120b7b22736571223a3230307d22020804",
+      "expected": {
+        "kind": "echo_response",
+        "seq": 1,
+        "timestamp": 2,
+        "request_seq": 200,
+        "ff_capture_setting": 4
+      }
+    },
+    {
+      "name": "simple_action_unknown_enum_preserved",
+      "bytes_hex": "1a02087f",
+      "expected": {
+        "kind": "simple_action",
+        "action": 127
+      }
+    },
+    {
+      "name": "unknown_message_which_field_yields_unknown",
+      "bytes_hex": "0805980601",
+      "expected": {
+        "kind": "unknown"
+      }
+    }
+  ]
+}

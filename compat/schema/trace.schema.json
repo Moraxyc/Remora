@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://remora.local/compat/schema/trace.schema.json",
+  "title": "Remora Wire Trace Record v0",
+  "description": "One JSONL entry recorded by remora-endpoint, tools/capture, or remora-lab.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "seq",
+    "ts_ms",
+    "plane",
+    "direction",
+    "actor",
+    "kind",
+    "redacted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "v0"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "plane": {
+      "type": "string",
+      "enum": ["control", "signal", "session"]
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["in", "out", "c2s", "s2c", "v2h", "h2v"]
+    },
+    "actor": {
+      "type": "string",
+      "enum": ["host", "viewer", "cloud"]
+    },
+    "channel": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "http_request",
+        "http_response",
+        "ws_text",
+        "ws_binary",
+        "dc_message",
+        "rtp_ext",
+        "timeout",
+        "event"
+      ]
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "payload_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]*$"
+    },
+    "payload_json": {},
+    "redacted": {
+      "type": "boolean"
+    }
+  }
+}
