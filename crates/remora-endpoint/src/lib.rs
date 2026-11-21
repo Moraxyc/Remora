@@ -5,10 +5,12 @@ pub use remora_proto;
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "peer")]
-pub mod peer {}
+pub mod peer;
 pub mod platform;
 #[cfg(feature = "record")]
 pub mod record;
+#[cfg(all(feature = "client", feature = "peer"))]
+pub mod role;
 
 #[cfg(feature = "client")]
 mod sdk {
@@ -66,6 +68,9 @@ mod sdk {
         QrExpired,
         NoSignalingServer,
         SignalingClosed,
+        ControlRefused(String),
+        #[cfg(feature = "peer")]
+        Peer(crate::peer::PeerSessionError),
     }
 
     impl fmt::Display for EndpointError {
@@ -79,6 +84,9 @@ mod sdk {
                 Self::QrExpired => f.write_str("QR login expired"),
                 Self::NoSignalingServer => f.write_str("cloud returned no signaling server URL"),
                 Self::SignalingClosed => f.write_str("signaling room handle is closed"),
+                Self::ControlRefused(reason) => write!(f, "control request refused: {reason}"),
+                #[cfg(feature = "peer")]
+                Self::Peer(err) => err.fmt(f),
             }
         }
     }
@@ -93,7 +101,10 @@ mod sdk {
                 | Self::MissingUserToken
                 | Self::QrExpired
                 | Self::NoSignalingServer
-                | Self::SignalingClosed => None,
+                | Self::SignalingClosed
+                | Self::ControlRefused(_) => None,
+                #[cfg(feature = "peer")]
+                Self::Peer(err) => Some(err),
             }
         }
     }
@@ -110,6 +121,13 @@ mod sdk {
     impl From<SocketError> for EndpointError {
         fn from(err: SocketError) -> Self {
             Self::Socket(err)
+        }
+    }
+
+    #[cfg(feature = "peer")]
+    impl From<crate::peer::PeerSessionError> for EndpointError {
+        fn from(err: crate::peer::PeerSessionError) -> Self {
+            Self::Peer(err)
         }
     }
 
