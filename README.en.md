@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Remora is an unofficial, self-hostable NetEase UU Remote (网易 UU 远程) cloud server written in Rust. Existing hosts (`uuremote-server`) and viewers (`uuremote-viewer`) that speak the UU protocol point their base URL at Remora to log in, list devices, create and join rooms, and exchange WebRTC signaling. Once signaling completes, desktop media, input, terminal, and file transfer traffic flows directly between host and viewer over WebRTC, either peer-to-peer or relayed through `coturn`.
+Remora is an unofficial, self-hostable reimplementation of the NetEase UU Remote (网易 UU 远程) protocol ecosystem written in Rust. The workspace comprises the self-hostable cloud server `remora` (`remora-cloud`), the sans-IO wire protocol library `remora-proto`, the `str0m`-based endpoint SDK `remora-endpoint`, and the conformance lab `remora-lab`. Existing hosts (`uuremote-server`) and viewers (`uuremote-viewer`) that speak the UU protocol point their base URL at Remora to log in, list devices, create and join rooms, and exchange WebRTC signaling. Once signaling completes, desktop media, input, clipboard, terminal, and file transfer traffic flows directly between host and viewer over WebRTC, either peer-to-peer or relayed through `coturn`.
 
 This project is developed independently and has no affiliation with or endorsement from NetEase.
 
@@ -13,7 +13,9 @@ uuremote-viewer ──REST + Socket.IO──► remora ◄──REST + Socket.IO
 
 ## Status
 
-Remora is in early development and supports end-to-end sessions with `uu-remote-linux`. A client's login QR code opens Remora's embedded web app, where a user signs in with an OpenID Connect provider or the owner password and confirms the device login. From the same web app, users inspect bound devices and their desktop wallpapers, unbind hosts, wake offline devices through an online device on the same LAN (Wake-on-LAN), and revoke active client or browser sessions.
+Remora is under active development. It supports end-to-end sessions with `uu-remote-linux`, alongside macOS and Windows client control-plane compatibility endpoints and compile-time embedded client profiles (`macos-4.48.1`, `macos-4.48.2`, `windows-4.48.2`). A client's login QR code opens Remora's embedded web app, where a user signs in with an OpenID Connect provider or the owner password and confirms the device login. From the same web app, users inspect bound devices and their desktop wallpapers, unbind hosts, wake offline devices through an online device on the same LAN (Wake-on-LAN), and revoke active client or browser sessions.
+
+The cloud server runs either as a single process or split by role (`--roles api,gateway,room,relay`) across processes communicating over a local Unix-socket bus (`--bus-listen` / `--bus-connect`). The workspace also includes `remora-endpoint` (control plane, signaling driver, and `str0m` WebRTC host/viewer sessions) and `remora-lab` (YAML scenario runner, P2P/TURN relay verification, and cross-implementation compatibility matrix).
 
 ## Quick Start
 
@@ -31,10 +33,11 @@ Prebuilt packages and client integrations:
 
 ## Documentation
 
-- [Deployment and Operations](docs/en/deployment.md): Reverse proxy and `trusted_proxies`, `.deb` / NixOS / static binary setup, Owner password and OIDC configuration, `coturn` relay setup, client connection, and troubleshooting.
-- [Architecture and Security](docs/en/architecture.md): Workspace crates, HTTP routing and CSP headers, JWT and browser session storage, room state machine and 30-second reconnect grace, GCRA rate limiting, and log redaction.
-- [Wire Protocol and API Reference](docs/en/protocol.md): `x-param-*` request signing, `{code, msg, data}` envelope and error codes, REST endpoints, Engine.IO v4 / Socket.IO v5 frames, and TURN credential derivation.
-- [Development and Build Guide](docs/en/development.md): `nix develop` shell, embedded SvelteKit frontend workflow, linting, and the NixOS VM integration test.
+- [Deployment and Operations](docs/en/deployment.md): Reverse proxy and `trusted_proxies`, standalone vs role-split deployment (`--roles` + `--bus-listen` / `--bus-connect`), `.deb` / NixOS / static binary setup, Owner password and OIDC configuration, `coturn` relay setup, client connection, and troubleshooting.
+- [Architecture and Security](docs/en/architecture.md): Workspace crate boundaries and dependency policies, sans-IO state machines (`remora-proto`), role bus and per-room actor model (`remora-cloud`), endpoint SDK (`remora-endpoint`) and lab (`remora-lab`), HTTP routing and CSP headers, JWT and browser session storage, GCRA rate limiting, and log redaction.
+- [Wire Protocol and API Reference](docs/en/protocol.md): `x-param-*` request signing, `{code, msg, data}` envelope and error codes, REST endpoints (including desktop client compatibility and update endpoints), Engine.IO v4 / Socket.IO v5 frames, session data channels, and TURN credential derivation.
+- [Development and Build Guide](docs/en/development.md): `nix develop` shell, embedded SvelteKit frontend workflow, `cargo-deny` boundary checks, `remora-lab` scenarios and matrix runs, and NixOS VM integration tests.
+- [Endpoint Driver Protocol](compat/driver-protocol.md): JSON-RPC 2.0 protocol used by `remora-lab` to drive external endpoint processes.
 
 ## Acknowledgements
 
@@ -44,8 +47,8 @@ Much of what Remora knows about the UU Remote protocol comes from [uu-remote-lin
 
 | Path | License |
 |---|---|
-| `crates/remora-proto` | MIT OR Apache-2.0 |
+| `crates/remora-proto`, `crates/remora-endpoint`, `crates/remora-lab` | MIT OR Apache-2.0 |
 | `crates/remora-cloud` | GPL-3.0-or-later |
-| everything else, including `web` | MIT |
+| everything else, including `web` and `compat` | MIT |
 
 See the license files in each directory.

@@ -12,7 +12,7 @@ Clients (Host / Viewer)
    └── STUN / TURN (UDP/TCP) ──────────► coturn (used across NAT or to hide peer IPs)
 ```
 
-Remora checks two configuration rules at startup. First, `public_url` must be a bare origin consisting of scheme, host, and optional port (such as `https://remora.example` or `https://remora.example:8443`); UU clients sign the raw `/api/v1/...` request path with HMAC-SHA256, so the reverse proxy must forward paths at the root and a `public_url` with a path prefix is rejected. Second, at least one login confirmation method must be enabled in `remora.toml`: `login.password_file`, `[oidc]`, or `login.auto_confirm = true`.
+Remora checks three configuration rules at startup. First, `roles` must enable at least one service role (`api`, `gateway`, `room`, or `relay`; all four are enabled by default). Second, `public_url` must be a bare origin consisting of scheme, host, and optional port (such as `https://remora.example` or `https://remora.example:8443`); UU clients sign the raw `/api/v1/...` request path with HMAC-SHA256, so the reverse proxy must forward paths at the root and a `public_url` with a path prefix is rejected. Third, when the `api` role is enabled, at least one login confirmation method must be active in `remora.toml`: `login.password_file`, `[oidc]`, or `login.auto_confirm = true`.
 
 On internet-facing deployments, configure `sign_key_file` as well. Device registration and QR login generation run before a client holds a user token; sharing a signing key between Remora and your clients requires every `/api/v1/*` request to carry a valid `x-param-sign` signature.
 
@@ -130,6 +130,16 @@ Remora supports three ways to confirm client QR logins. You can enable the Owner
 2. **OpenID Connect (`[oidc]`)**: Connect an identity provider such as Authelia, Authentik, or Keycloak registered with the redirect URI `{public_url}/api/web/oidc/callback`. Set `issuer` and `client_id`; add `client_secret_file` for a confidential client or omit it to use PKCE as a public client, and optionally set `name` for the sign-in button label (defaults to the `issuer` host name). Each authenticated `(issuer, sub)` identity maps to a distinct Remora user with an isolated device list. When `[oidc]` is configured alone, the login page redirects straight to the provider; when combined with `login.password_file`, the login page offers both methods.
 3. **Automatic Confirmation (`login.auto_confirm = true`)**: Marks every generated QR login as confirmed by `Owner` (`id = "1"`) immediately so clients log in without opening a browser. Because anyone who can reach the server logs in as the owner, use this option only on isolated private networks.
 
+### Service Roles and Multi-Process Splitting
+
+By default, `remora` runs all four roles in one process (`roles = ["api", "gateway", "room", "relay"]`). To split roles across processes on the same host, set `roles` in `remora.toml` or pass `--roles` on the CLI, and connect them over the internal Unix-socket bus:
+
+- **Bus hub (`--bus-listen <PATH>`)**: bound by one process (for example, the `api,relay` instance).
+- **Bus client (`--bus-connect <PATH>`)**: used by worker processes (for example, the `gateway,room` instance) to join the same bus.
+- **Background-only processes**: instances enabling only `room` or `relay` (neither `api` nor `gateway`) run without opening an HTTP/WebSocket listener.
+
+When running split processes, point them at the same WAL-mode SQLite `database` and `public_url`, and configure the reverse proxy to route `/socket.io/` to the `gateway` instance and all other paths to the `api` instance.
+
 ### Request Signing, Database, and Logging
 
 `sign_key_file` points to a file containing the shared request signing key (use 32 or more random bytes). When configured, Remora verifies the `x-param-sign` HMAC-SHA256 header on all `/api/v1/*` endpoints. The web console API (`/api/web/*`) authenticates with session cookies and CSRF tokens, and signaling (`/socket.io/`) authenticates with Room JWTs.
@@ -219,6 +229,7 @@ To migrate Remora to another machine, copy both the backed-up `remora.db` and `/
 
 | Symptom or Error Message | Cause | Fix |
 |---|---|---|
+| Startup error: `at least one role must be enabled` | `roles` is set to an empty list | Remove the empty `roles` setting or enable at least one role via `roles` / `--roles`. |
 | Startup error: `nobody can confirm logins` | No login confirmation method is enabled | Configure `login.password_file`, `[oidc]`, or `login.auto_confirm = true` in `remora.toml`. |
 | Startup error: `public_url is required when listening on all addresses or a Unix socket` | `listen` is `0.0.0.0`, `[::]`, or a Unix socket and `public_url` is unset | Set `public_url = "https://..."` with scheme, host, and optional port only. |
 | Startup error: `relaying every session needs a TURN server` | `ice.force_relay = true` is set without a `turn:` or `turns:` URL | Add a TURN URL to `ice.servers` and set `ice.turn_secret_file`. |

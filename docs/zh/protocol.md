@@ -4,7 +4,7 @@
 
 ## 1. 请求签名（`x-param-*`）
 
-当服务端配置了 `sign_key_file` 时，所有 `/api/v1/*` 请求必须携带 `x-param-sign` 请求头通过 HMAC-SHA256 校验（单次请求体上限为 `1 MiB`）。签名与常时间验签实现位于 [`crates/remora-proto/src/cloud.rs`](../../crates/remora-proto/src/cloud.rs)。
+当服务端配置了 `sign_key_file` 时，所有 `/api/v1/*` 请求必须携带 `x-param-sign` 请求头通过 HMAC-SHA256 校验（单次请求体上限为 `1 MiB`）。签名与常时间验签实现位于 [`crates/remora-proto/src/control/signing.rs`](../../crates/remora-proto/src/control/signing.rs) 与 [`crates/remora-proto/src/server/verify.rs`](../../crates/remora-proto/src/server/verify.rs)。
 
 签名按以下顺序计算：
 
@@ -47,9 +47,16 @@
 
 | 方法与路径 | 鉴权 | 请求体 | 响应 `data` 与行为 |
 |---|---|---|---|
-| `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "..."}`（`name` 可选，其余硬件字段被忽略） | `{"device_id": "..."}`。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称，平台记为 `1`（Windows）。 |
-| `GET /api/v1/device/list` | User Token | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）与可选 `wallpaper_url`。 |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话、局域网信息、壁纸与上传的文件，并向在线被控端发送踢出信令。 |
+| `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选，其余硬件字段被忽略） | 返回完整 `Entry`（包含 `device_id`）。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称及 `X-Param-VN`，平台记为 `1`（Windows）。 |
+| `POST /api/v1/device/macos/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选） | 与 `windows/init` 行为一致，平台记为 `4`（macOS）。 |
+| `POST /api/v1/device/mac_controllable` | User Token + `X-Param-Device-Id` | `{"controllable": true\|false}` | `{}`。更新调用方设备（未绑定或归属于当前用户）是否允许被远程控制。 |
+| `GET /api/v1/device/list` | User Token（可选 `X-Param-Device-Id`） | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）、`participants_info`、可选 `wallpaper_url`、`version_name`、`support_wol`、`controllable`、`publisher_availability_status`、`controlled_support` 与 `update_started_at`。 |
+| `GET /api/v1/device/groups/of/my` | User Token（可选 `X-Param-Device-Id`） | 空 | 按形态分组返回名下设备：`{"current_device_id": string \| null, "mobile_devices": [Entry], "desktop_devices": [Entry], "tv_devices": [Entry]}`。 |
+| `GET /api/v1/device/{device_id}/preferences` | User Token | 空 | 返回指定已绑定设备的工具栏排序配置 `{"device_preferences": {"device_id", "tools": {"sequence": [...]}}}`。 |
+| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | 空 | 返回调用方设备的远程协助 9 位确定性识别码 `connect_id`、`connect_code`（`""`）与显示名称 `alias`。 |
+| `GET /api/v1/app/list/of/device/{device_id}` | User Token | 空 | 返回指定已绑定设备上报的应用列表 `{"device_app_list": [...]}`。 |
+| `POST /api/v1/app/list/of/current_device` | User Token + `X-Param-Device-Id` | `{"device_app_list": [...]}` | 持久化当前已绑定被控端上报的应用列表并回显载荷。 |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话、局域网信息、壁纸、上传文件与应用列表，并向在线被控端发送踢出信令。 |
 | `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`。保存调用方已绑定设备最近一次上报的局域网信息，用于网络唤醒。`inner_ip` 为局域网地址且必填；字段缺失或无效（MAC 须为以 `:` 或 `-` 分隔的 6 个十六进制字节，地址须为 IPv4，子网掩码须连续）时返回 HTTP `422`、code `1001`。 |
 
 ### 文件与壁纸
@@ -75,10 +82,24 @@
 
 | 方法与路径 | 鉴权 | 请求体 | 响应 `data` 与行为 |
 |---|---|---|---|
-| `GET /api/v1/user/info` | User Token | 空 | `{"user_id": "...", "nickname": "..."}`。 |
+| `GET /api/v1/user/info` | User Token | 空 | 返回 `{"user_id": "...", "nickname": "..."}` 及官方桌面端兼容字段（`member_type`、`member_display_status`、`member_expired_at`、`coin_balance` 等）。 |
 | `POST /api/v1/user/logout` | User Token | `{}` | `{}`。从 SQLite `sessions` 表删除当前令牌的 `sid`。 |
-| `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | 将该设备绑定至当前用户并关联当前会话，返回 `{"signaling_server": "wss://...", "signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 10000}`。 |
-| `POST /api/v1/room/join/by_device/{device_id}` | User Token（可选 `X-Param-Device-Id`） | `{"force_join": false}` | 校验设备归属、被控端在线状态与桌面占用冲突，返回 `{"signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 10000, "report_token": "", "report_url": "", "publisher_platform": <u8>}`。 |
+| `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | 将该设备绑定至当前用户、记录 `X-Param-VN` 并关联当前会话，返回 `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false}`。 |
+| `POST /api/v1/room/join/by_device/{device_id}` | User Token（可选 `X-Param-Device-Id`） | `{"force_join": false}` | 校验设备归属、被控端在线状态与桌面占用冲突，返回 `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false, "report_token": "", "report_url": "", "publisher_platform": <u8>}`。 |
+
+### 客户端兼容与更新存根接口
+
+为防止官方桌面客户端（macOS / Windows）在启动与会话期间限制画质或拉取上游二进制更新，Remora 提供了以下兼容接口：
+
+| 方法与路径 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /api/v1/member/entitlements` | User Token | 解锁自托管串流与输入能力（`bluray` 画质、`144` FPS、最高 `500 Mbps` 自定义码率、HDR、真彩、第二屏幕、多通道、不限速文件与剪贴板传输等）。 |
+| `POST /api/v1/tool/configures_with_version` | 匿名 / 签名 | 按请求的配置名返回 `status: 1 \| 2` 与 `data: null`，指示客户端保留内置默认配置。 |
+| `GET /api/v1/cloud_pc/ui_switch` | User Token | 返回 `{"switch": false}`。 |
+| `GET /api/v1/message/summary` | User Token | 返回 `{"no_read_num": 0}`。 |
+| `GET /api/v1/campaign/strategies` | User Token | 返回 `{"strategy": null}`。 |
+| `GET /api/v1/release/fetch/popups/info` | User Token | 返回 `{"popups": []}`。 |
+| `GET /api/v1/release/fetch/update`、`GET /api/v1/release/fetch/update/{device_id}` | User Token | 返回 `{"update_type": "NoUpdate", "url": "", ...}`，避免自托管客户端从上游下载安装包覆盖自身。 |
 
 ## 4. Web 控制台接口（`/api/web/*`）
 
@@ -103,7 +124,7 @@
 
 ## 5. Socket.IO / Engine.IO 信令协议
 
-### 握手、心跳与二进制帧（`crates/remora-proto/src/socketio.rs`）
+### 握手、心跳与二进制帧（`crates/remora-proto/src/signal/`）
 
 客户端通过 `GET /socket.io/?EIO=4&transport=websocket` 发起连接，并在 `X-NRD-AUTH` 请求头中携带 Room JWT（令牌无效、过期或设备已解绑时返回 HTTP `401`）。WebSocket 升级完成后，服务端立即下发 Engine.IO Open 文本帧 `0{"sid":"...","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}`。此后服务端每 25 秒发送文本帧 `"2"`（Ping），客户端需在 20 秒内回复文本帧 `"3"`（Pong）。
 
@@ -123,6 +144,14 @@ Engine.IO 建立后，客户端发送 `"40"` 加入 Socket.IO 默认命名空间
 | Cloud → Host | `left`（无 `ice_id`） | 被控端被新连接顶替或设备被解绑时发送 `{}`，随后服务端关闭该 WebSocket。 |
 | Cloud → Viewer | `left`（带 `ice_id`） | 被控端断线超过 30 秒宽限期、被踢出或当前控制端被 `force_join` 抢占时发送：`{"ice_id": "...", "client_id": "<host_id>"}`。 |
 
-## 6. TURN 临时凭据派生（`crates/remora-cloud/src/ice.rs`）
+## 6. TURN 临时凭据派生（`crates/remora-cloud/src/relay/ice.rs`）
 
 当 `ice.servers` 包含 TURN 地址且配置了 `ice.turn_secret_file` 时，Remora 按 `coturn` 的 `use-auth-secret`（TURN REST API）规范为每次 `control` 会话派生短期凭据，并写入返回给控制端与被控端的 `iceServers` 列表。凭据自签发时刻起有效期为 24 小时（`CREDENTIAL_LIFETIME = 86400` 秒）：`username` 格式为 `<unix_expiry_timestamp>:<user_id>`（如 `1700086400:1`），`credential` 为 `base64(HMAC-SHA1(turn_secret, username))`。配置中的 STUN 地址（`stun:` / `stuns:`）与 TURN 地址（`turn:` / `turns:`）会拆分为独立的 `iceServers` 条目，仅在 TURN 条目上附带 `username` 与 `credential`。
+
+## 7. WebRTC 会话层与数据通道（`crates/remora-proto/src/session/`）
+
+信令握手与 ICE 连通后，端点间直接通过 WebRTC 传输媒体轨道与五个 SCTP 数据通道，其线协议类型定义在 [`crates/remora-proto/proto/gv_pb.proto`](../../crates/remora-proto/proto/gv_pb.proto) 与 `crates/remora-proto/src/session/`：
+
+- **数据通道**：`CONTROL_DATA_CHANNEL`（`gv_pb.Message` 控制信封与 JSON 输入事件）、`TEXT_DATA_CHANNEL`（文本/剪贴板 RPC）、`FILE_DATA_CHANNEL`（文件传输 RPC）、`BINARY_DATA_CHANNEL`（终端 `TERM` 帧与端口映射隧道）及 `STREAMER_DATA_CHANNEL`。
+- **控制握手与输入**：`CONTROL_DATA_CHANNEL` 打开后双方通过 `gv_pb.Message` 交换 `EchoRequest`/`EchoResponse`（携带 `FeatureFlag` 版本协商）、`SimpleAction`、`CaptureConfig`、`CodecNegotiation` 与 `RpcRequest`/`RpcResponse`；控制端以 JSON 格式发送键盘、鼠标与文本输入事件。
+- **剪贴板与音视频**：支持分片 `ClipboardChange`（每片最大 8192 字节）与 `ClipboardTextChangeRequest` RPC（最大 1 MiB）；音视频使用 H.264 / H.265 与 Opus，并附带 `video-capture-index`、`video-frame-is-new-frame`、`video-feedback-latency` 与 `video-frame-sending-delay` RTP 头扩展。

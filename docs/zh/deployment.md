@@ -12,7 +12,7 @@ Remora 提供客户端所需的 REST 接口、Web 登录与管理控制台以及
    └── STUN / TURN (UDP/TCP) ─────────► coturn (跨 NAT 或隐藏两端 IP 时启用)
 ```
 
-Remora 启动时会校验两项配置约束。第一，`public_url` 只填写协议、主机名与可选端口（例如 `https://remora.example` 或 `https://remora.example:8443`）；因为 UU 客户端对 `/api/v1/...` 原始请求路径计算 HMAC-SHA256 签名，反向代理必须在根路径下原样转发请求，带有路径后缀的 `public_url` 会在启动时报错退出。第二，配置文件中必须至少启用一种登录确认方式：`login.password_file`、`[oidc]` 或 `login.auto_confirm = true`。
+Remora 启动时会校验三项配置约束。第一，`roles` 至少包含一个角色（`api`、`gateway`、`room`、`relay`，默认全部启用）。第二，`public_url` 只填写协议、主机名与可选端口（例如 `https://remora.example` 或 `https://remora.example:8443`）；因为 UU 客户端对 `/api/v1/...` 原始请求路径计算 HMAC-SHA256 签名，反向代理必须在根路径下原样转发请求，带有路径后缀的 `public_url` 会在启动时报错退出。第三，当启用 `api` 角色时，配置文件中必须至少启用一种登录确认方式：`login.password_file`、`[oidc]` 或 `login.auto_confirm = true`。
 
 公网可达的实例还应配置 `sign_key_file`。设备初始化注册与生成登录二维码两个接口在客户端尚未获取用户令牌时调用，配置共享签名密钥后，只有持有同一密钥的客户端才能通过 `x-param-sign` 校验。
 
@@ -130,6 +130,16 @@ Remora 支持三种登录确认方式，可单独使用或同时启用 Owner 密
 2. **OpenID Connect（`[oidc]`）**：对接 Authelia、Authentik、Keycloak 等身份提供商，并在提供商处注册回调地址 `{public_url}/api/web/oidc/callback`。配置 `issuer` 与 `client_id` 后，若设置 `client_secret_file` 则作为机密客户端认证，留空则作为公共客户端通过 PKCE 认证；可选通过 `name` 自定义登录按钮文字（默认显示 `issuer` 主机名）。每个经提供商认证的 `(issuer, sub)` 自动映射为独立的 Remora 用户，拥有各自独立的设备列表。只配置 `[oidc]` 时，打开登录页会直接跳转至身份提供商；同时配置 `login.password_file` 时，页面会并列提供两种登录入口。
 3. **内网自动确认（`login.auto_confirm = true`）**：二维码一经生成即自动以 `Owner`（`id = "1"`）身份确认，客户端跳过浏览器扫码直接完成登录。该模式会让任何能访问服务的客户端直接登录为 Owner，仅适用于完全受控的隔离内网。
 
+### 服务角色与多进程拆分
+
+默认情况下，`remora` 在单进程内运行全部四个角色（`roles = ["api", "gateway", "room", "relay"]`）。若需按职责拆分进程，可通过配置文件的 `roles` 或命令行 `--roles` 指定各进程承担的角色，并使用本地 Unix 域套接字总线协同：
+
+- **总线枢纽（`--bus-listen <PATH>`）**：在一个进程（如承载 `api,relay` 的主进程）启动时绑定内部总线套接字。
+- **总线接入（`--bus-connect <PATH>`）**：在其余工作进程（如承载 `gateway,room` 的信令进程）连接同一总线套接字。
+- **纯后台角色**：仅启用 `room` 或 `relay`（未启用 `api` 与 `gateway`）的进程不会绑定 HTTP/WebSocket 监听端口。
+
+拆分部署时，各进程需指向同一份 SQLite 数据库文件（WAL 模式）与相同的 `public_url`，并由前置反向代理把 `/socket.io/` 转发至 `gateway` 进程、其余路径转发至 `api` 进程。
+
 ### 请求签名、数据库与日志
 
 `sign_key_file` 指定客户端请求签名密钥文件的路径。建议填入 32 字节以上的随机字符串，并在所有客户端配置相同密钥，使 `/api/v1/*` 接口强制校验 `x-param-sign` 请求头。Web 控制台接口（`/api/web/*`）与信令 WebSocket（`/socket.io/`，使用 Room JWT 鉴权）使用各自的会话凭据。
@@ -219,6 +229,7 @@ sudo sqlite3 /var/lib/remora/remora.db ".backup /tmp/remora-backup.db"
 
 | 现象或报错信息 | 原因 | 解决办法 |
 |---|---|---|
+| 启动报错：`at least one role must be enabled` | `roles` 配置为空 | 在 `remora.toml` 中移除空的 `roles` 配置或通过 `--roles` 至少启用一个角色。 |
 | 启动报错：`nobody can confirm logins` | 未配置任何登录确认方式 | 在 `remora.toml` 中配置 `login.password_file`、`[oidc]` 或 `login.auto_confirm = true`。 |
 | 启动报错：`public_url is required when listening on all addresses or a Unix socket` | `listen` 为 `0.0.0.0`、`[::]` 或 Unix 套接字时未设置 `public_url` | 设置只含协议、域名与可选端口的 `public_url = "https://..."`。 |
 | 启动报错：`relaying every session needs a TURN server` | 开启了 `ice.force_relay = true`，但 `ice.servers` 中没有 `turn:` / `turns:` 地址 | 在 `ice.servers` 中加入 TURN 地址并配置 `ice.turn_secret_file`。 |

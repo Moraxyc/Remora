@@ -1,6 +1,6 @@
 # Tools
 
-Static-analysis helpers used to produce [../proto/gv_pb.proto](../proto/gv_pb.proto). They read an
+Static-analysis helpers used to produce [../../crates/remora-proto/proto/gv_pb.proto](../../crates/remora-proto/proto/gv_pb.proto). They read an
 official Mach-O binary; they never execute it.
 
 | File | Purpose |
@@ -19,12 +19,12 @@ xar -xf /path/to/uuyc_<version>.pkg
 mkdir payload && cd payload && gzip -dc ../UURemote.pkg/Payload | cpio -id
 
 # 2. reconstruct
-cd <repo>/docs/tools
+cd <repo>/tools/protogen
 ./run.sh protogen.py /tmp/uupkg/payload/Applications/UURemote.app/Contents/Helpers/UURemoteServer \
     /tmp/raw.proto /tmp/schema.json
 python3 emit_proto.py /tmp/schema.json /tmp/gv_pb.proto proto_header.txt
 protoc --proto_path=/tmp --descriptor_set_out=/dev/null /tmp/gv_pb.proto   # sanity check
-diff ../proto/gv_pb.proto /tmp/gv_pb.proto
+diff ../../crates/remora-proto/proto/gv_pb.proto /tmp/gv_pb.proto
 ```
 
 `protogen.py` prints `UNASSIGNED` maps (names it could not attach to a `GvPb_` type) and `LOW`

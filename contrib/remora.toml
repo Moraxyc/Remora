@@ -1,6 +1,10 @@
 # Remora settings. Apart from a way to confirm logins (`login.password_file`, `oidc` or
 # `login.auto_confirm`), every setting is optional; the values here are examples.
 
+# Service roles to enable in this process; defaults to all four. Split deployments can also
+# pass `--roles` on the command line alongside `--bus-listen` / `--bus-connect`.
+# roles = ["api", "gateway", "room", "relay"]
+
 # Address or Unix socket path to serve the REST API and signaling on. Put a TLS proxy in front
 # of it.
 listen = "[::1]:8680"

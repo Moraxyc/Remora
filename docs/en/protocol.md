@@ -4,7 +4,7 @@
 
 ## 1. Request Signing (`x-param-*`)
 
-When `sign_key_file` is configured, every `/api/v1/*` endpoint requires a valid `x-param-sign` HMAC-SHA256 signature header (with request bodies capped at `1 MiB`). The signing and constant-time verification implementation lives in [`crates/remora-proto/src/cloud.rs`](../../crates/remora-proto/src/cloud.rs).
+When `sign_key_file` is configured, every `/api/v1/*` endpoint requires a valid `x-param-sign` HMAC-SHA256 signature header (with request bodies capped at `1 MiB`). The signing and constant-time verification implementation lives in [`crates/remora-proto/src/control/signing.rs`](../../crates/remora-proto/src/control/signing.rs) and [`crates/remora-proto/src/server/verify.rs`](../../crates/remora-proto/src/server/verify.rs).
 
 Compute the signature in four steps:
 
@@ -47,9 +47,16 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 
 | Endpoint | Auth | Request Body | Response `data` and Behavior |
 |---|---|---|---|
-| `POST /api/v1/device/windows/init` | None (rate-limited) | `{"client_id": "...", "name": "..."}` (`name` optional; hardware fields ignored) | `{"device_id": "..."}`. Idempotent by `client_id`: re-registering returns the existing `device_id`, updates `name`, and sets platform `1` (Windows). |
-| `GET /api/v1/device/list` | User Token | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` has `device_id`, optional `alias`, `platform`, `status` (`"CONNECTED"` or `"DISCONNECTED"`), and optional `wallpaper_url`. |
-| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions, LAN report, wallpaper and uploaded files, and kicks any connected host. |
+| `POST /api/v1/device/windows/init` | None (rate-limited) | `{"client_id": "...", "name": "...", "controllable": true}` (`name` and `controllable` optional; hardware fields ignored) | Returns a full `Entry` (including `device_id`). Idempotent by `client_id`: re-registering returns the existing `device_id`, updates `name` and `X-Param-VN`, and sets platform `1` (Windows). |
+| `POST /api/v1/device/macos/init` | None (rate-limited) | `{"client_id": "...", "name": "...", "controllable": true}` (`name` and `controllable` optional) | Same behavior as `windows/init`, registering platform `4` (macOS). |
+| `POST /api/v1/device/mac_controllable` | User Token + `X-Param-Device-Id` | `{"controllable": true\|false}` | `{}`. Updates whether the calling unbound or owned device allows incoming remote control. |
+| `GET /api/v1/device/list` | User Token (optional `X-Param-Device-Id`) | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` carries `device_id`, optional `alias`, `platform`, `status` (`"CONNECTED"` or `"DISCONNECTED"`), `participants_info`, optional `wallpaper_url`, `version_name`, `support_wol`, `controllable`, `publisher_availability_status`, `controlled_support`, and `update_started_at`. |
+| `GET /api/v1/device/groups/of/my` | User Token (optional `X-Param-Device-Id`) | Empty | Returns owned devices grouped by form factor: `{"current_device_id": string \| null, "mobile_devices": [Entry], "desktop_devices": [Entry], "tv_devices": [Entry]}`. |
+| `GET /api/v1/device/{device_id}/preferences` | User Token | Empty | Returns toolbar sequence preferences for a bound device: `{"device_preferences": {"device_id", "tools": {"sequence": [...]}}}`. |
+| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | Empty | Returns the calling device's deterministic 9-digit remote-assistance `connect_id`, `connect_code` (`""`), and display `alias`. |
+| `GET /api/v1/app/list/of/device/{device_id}` | User Token | Empty | Returns the registered application list `{"device_app_list": [...]}` for a bound device. |
+| `POST /api/v1/app/list/of/current_device` | User Token + `X-Param-Device-Id` | `{"device_app_list": [...]}` | Persists and echoes the calling bound host's reported application list in SQLite `device_apps`. |
+| `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions, LAN report, wallpaper, uploaded files, and `device_apps`, and kicks any connected host. |
 | `POST /api/v1/device/wake_on_lan/info` | User Token + `X-Param-Device-Id` | `{"mac": "aa:bb:cc:dd:ee:ff", "inner_ip": "192.168.1.20", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0"}` | `{"turn_on_wol": true}`. Stores the calling bound device's last LAN report for Wake-on-LAN. `inner_ip` is the LAN address and is required; a missing or invalid field (MAC of six hex bytes separated by `:` or `-`, IPv4 addresses, contiguous netmask) answers HTTP `422` with code `1001`. |
 
 ### Files and Wallpapers
@@ -75,10 +82,24 @@ Hosts publish an image of their desktop wallpaper for device cards. Images are s
 
 | Endpoint | Auth | Request Body | Response `data` and Behavior |
 |---|---|---|---|
-| `GET /api/v1/user/info` | User Token | Empty | `{"user_id": "...", "nickname": "..."}`. |
+| `GET /api/v1/user/info` | User Token | Empty | Returns `{"user_id": "...", "nickname": "..."}` along with desktop client compatibility fields (`member_type`, `member_display_status`, `member_expired_at`, `coin_balance`, etc.). |
 | `POST /api/v1/user/logout` | User Token | `{}` | `{}`. Deletes the token's `sid` row from SQLite `sessions`. |
-| `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | Binds the device to the calling user and links the session, returning `{"signaling_server": "wss://...", "signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 10000}`. |
-| `POST /api/v1/room/join/by_device/{device_id}` | User Token (optional `X-Param-Device-Id`) | `{"force_join": false}` | Verifies device ownership, host online state, and desktop exclusivity, returning `{"signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 10000, "report_token": "", "report_url": "", "publisher_platform": <u8>}`. |
+| `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | Binds the device to the calling user, stores `X-Param-VN`, and links the session, returning `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false}`. |
+| `POST /api/v1/room/join/by_device/{device_id}` | User Token (optional `X-Param-Device-Id`) | `{"force_join": false}` | Verifies device ownership, host online state, and desktop exclusivity, returning `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false, "report_token": "", "report_url": "", "publisher_platform": <u8>}`. |
+
+### Client Compatibility and Update Endpoints
+
+To let official desktop apps (macOS / Windows) stream at full capability without attempting upstream binary downloads, Remora serves the following compatibility endpoints:
+
+| Endpoint | Auth | Behavior |
+|---|---|---|
+| `GET /api/v1/member/entitlements` | User Token | Grants full self-hosted streaming and input capabilities (`bluray` quality, `144` FPS, up to `500 Mbps` bitrate, HDR, true color, second screen, multi-channel, unlimited file/clipboard transfer). |
+| `POST /api/v1/tool/configures_with_version` | None / Signed | Responds per requested key with `status: 1 \| 2` and `data: null` so clients retain their built-in defaults. |
+| `GET /api/v1/cloud_pc/ui_switch` | User Token | Returns `{"switch": false}`. |
+| `GET /api/v1/message/summary` | User Token | Returns `{"no_read_num": 0}`. |
+| `GET /api/v1/campaign/strategies` | User Token | Returns `{"strategy": null}`. |
+| `GET /api/v1/release/fetch/popups/info` | User Token | Returns `{"popups": []}`. |
+| `GET /api/v1/release/fetch/update`, `GET /api/v1/release/fetch/update/{device_id}` | User Token | Returns `{"update_type": "NoUpdate", "url": "", ...}` so self-hosted apps never download upstream binaries. |
 
 ## 4. Web Console API (`/api/web/*`)
 
@@ -103,7 +124,7 @@ Hosts publish an image of their desktop wallpaper for device cards. Images are s
 
 ## 5. Socket.IO / Engine.IO Signaling
 
-### Handshake, Heartbeat, and Binary Framing (`crates/remora-proto/src/socketio.rs`)
+### Handshake, Heartbeat, and Binary Framing (`crates/remora-proto/src/signal/`)
 
 Clients open a WebSocket to `GET /socket.io/?EIO=4&transport=websocket` with `X-NRD-AUTH: <Room JWT>` (invalid, expired, or unbound device tokens return HTTP `401`). Upon upgrade, the server sends the Engine.IO Open text frame `0{"sid":"...","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}`. The server then sends a text frame `"2"` (Ping) every 25 seconds and expects `"3"` (Pong) within 20 seconds.
 
@@ -123,6 +144,14 @@ After receiving the Open frame, the client sends `"40"` to connect to the defaul
 | Cloud → Host | `left` (without `ice_id`) | Sent as `{}` before closing the WebSocket when a host is replaced by a newer connection or unbound. |
 | Cloud → Viewer | `left` (with `ice_id`) | Sent when a host fails to reconnect within the 30-second grace period, is kicked, or the viewer is displaced by `force_join`: `{"ice_id": "...", "client_id": "<host_id>"}`. |
 
-## 6. TURN Credential Derivation (`crates/remora-cloud/src/ice.rs`)
+## 6. TURN Credential Derivation (`crates/remora-cloud/src/relay/ice.rs`)
 
 When `ice.servers` includes TURN URLs and `ice.turn_secret_file` is set, Remora derives short-lived credentials following `coturn`'s `use-auth-secret` (TURN REST API) scheme and includes them in the `iceServers` array of both the `control` acknowledgement and `be-controlled`. Each credential is valid for 24 hours from issuance (`CREDENTIAL_LIFETIME = 86400` seconds): `username` is `<unix_expiry_timestamp>:<user_id>` (such as `1700086400:1`), and `credential` is `base64(HMAC-SHA1(turn_secret, username))`. STUN URLs (`stun:` / `stuns:`) and TURN URLs (`turn:` / `turns:`) are emitted as separate `iceServers` objects so credentials attach only to the TURN entries.
+
+## 7. WebRTC Session Plane and Data Channels (`crates/remora-proto/src/session/`)
+
+Once signaling and ICE complete, endpoints exchange media tracks and five SCTP data channels directly over WebRTC, with schemas and codecs defined in [`crates/remora-proto/proto/gv_pb.proto`](../../crates/remora-proto/proto/gv_pb.proto) and `crates/remora-proto/src/session/`:
+
+- **Data Channels**: `CONTROL_DATA_CHANNEL` (`gv_pb.Message` control envelope and JSON input events), `TEXT_DATA_CHANNEL` (text/clipboard RPCs), `FILE_DATA_CHANNEL` (file transfer RPCs), `BINARY_DATA_CHANNEL` (terminal `TERM` frames and port-mapping tunnels), and `STREAMER_DATA_CHANNEL`.
+- **Control Handshake and Input**: After opening `CONTROL_DATA_CHANNEL`, peers exchange `EchoRequest`/`EchoResponse` (carrying `FeatureFlag` version negotiation), `SimpleAction`, `CaptureConfig`, `CodecNegotiation`, and `RpcRequest`/`RpcResponse` inside `gv_pb.Message`; viewers send keyboard, mouse, and text input as JSON messages.
+- **Clipboard and Media**: Clipboard codecs handle chunked `ClipboardChange` messages (up to 8192 bytes per chunk) and `ClipboardTextChangeRequest` RPCs (up to 1 MiB); audio and video use H.264 / H.265 and Opus with `video-capture-index`, `video-frame-is-new-frame`, `video-feedback-latency`, and `video-frame-sending-delay` RTP header extensions.
