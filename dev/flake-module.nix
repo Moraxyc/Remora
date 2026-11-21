@@ -44,6 +44,7 @@
           interop-linux = pkgs.testers.runNixOSTest (
             import ../nix/tests/interop-linux.nix {
               remoraModule = self.nixosModules.default;
+              labPackage = self'.packages.remora-lab;
               uuRemoteModule = inputs.uu-remote-linux.nixosModules.default;
               uuRemotePackage = inputs.uu-remote-linux.packages.${pkgs.stdenv.hostPlatform.system}.default;
             }

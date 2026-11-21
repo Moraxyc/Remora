@@ -2,6 +2,7 @@
 
 pub mod fakecloud;
 pub mod remora;
+pub mod turn;
 
 use remora_proto::control::SignKey;
 

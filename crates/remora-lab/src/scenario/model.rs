@@ -255,6 +255,60 @@ pub enum StepAction {
         #[serde(default = "default_frame_count")]
         expected_frames: u64,
     },
+    SessionHostStart {
+        #[serde(default)]
+        force_relay: bool,
+        #[serde(default)]
+        reject_reason: Option<String>,
+        #[serde(default = "default_true")]
+        loop_video: bool,
+    },
+    SessionViewerConnect {
+        target: String,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        force_relay: bool,
+        #[serde(default)]
+        force_join: bool,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionSendInput {
+        kind: String,
+        #[serde(default)]
+        key: Option<i32>,
+        #[serde(default)]
+        button: Option<i32>,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
+        #[serde(default)]
+        dx: Option<i32>,
+        #[serde(default)]
+        dy: Option<i32>,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    SessionSetClipboard {
+        text: String,
+    },
+    SessionWait {
+        #[serde(default)]
+        min_frames: Option<u64>,
+        #[serde(default)]
+        min_inputs: Option<u64>,
+        #[serde(default)]
+        expected_clipboard: Option<String>,
+        #[serde(default)]
+        require_relayed: Option<bool>,
+        #[serde(default)]
+        require_p2p: Option<bool>,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionClose,
 }
 
 fn default_login_status() -> u8 {
@@ -275,6 +329,10 @@ fn default_true() -> bool {
 
 fn default_frame_count() -> u64 {
     3
+}
+
+fn default_session_timeout_ms() -> u64 {
+    10_000
 }
 
 /// Assertions evaluated after a step finishes.

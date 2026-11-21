@@ -3,8 +3,18 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use std::time::Duration;
+
+use remora_endpoint::Endpoint;
+use remora_endpoint::role::{HostConfig, HostSession};
+use remora_proto::control::SignKey;
+use remora_proto::profile;
+
 use remora_lab::error::LabError;
-use remora_lab::matrix::run_matrix;
+use remora_lab::headless::{
+    AnnexBFileVideoSource, HeadlessPlatform, RecordingInputSink, synthetic_annex_b_sample,
+};
+use remora_lab::matrix::{SessionMatrixConfig, run_matrix, run_session_matrix};
 use remora_lab::scenario::{Scenario, ScenarioResult, run_scenario};
 use remora_lab::target::{RunningTarget, TargetSpec};
 use remora_lab::{probe, record, replay};
@@ -42,6 +52,12 @@ enum MatrixFormat {
     Both,
 }
 
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum MatrixMode {
+    Cloud,
+    Session,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run one or more YAML scenarios against a target.
@@ -71,11 +87,17 @@ enum Command {
         #[arg(long)]
         trace_dir: Option<PathBuf>,
     },
-    /// Run scenarios across `remora (standalone)` and `remora (split)` and diff normalized outputs.
+    /// Run scenarios across compatibility columns and emit a matrix report.
     Matrix {
         /// Scenario YAML files or directories containing `.yaml`/`.yml` files.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
+        /// Matrix mode (`cloud` for standalone vs split; `session` for P2P, relay, and uu-remote-linux).
+        #[arg(long, value_enum, default_value_t = MatrixMode::Cloud)]
+        mode: MatrixMode,
+        /// External Remora base URL (used in `session` mode).
+        #[arg(long)]
+        url: Option<String>,
         /// Path to the `remora` cloud binary.
         #[arg(long)]
         remora_bin: Option<PathBuf>,
@@ -85,6 +107,15 @@ enum Command {
         /// Disable request signing on spawned targets.
         #[arg(long)]
         no_sign_key: bool,
+        /// Remote `uuremote-server` device ID for `lab↔uu-remote-linux` in `session` mode.
+        #[arg(long)]
+        uu_device_id: Option<String>,
+        /// Optional user token for `lab↔uu-remote-linux`.
+        #[arg(long)]
+        uu_user_token: Option<String>,
+        /// Force TURN relay for the `lab↔uu-remote-linux` column.
+        #[arg(long)]
+        uu_force_relay: bool,
         /// Stdout format (`markdown`, `json`, or `both`).
         #[arg(long, value_enum, default_value_t = MatrixFormat::Markdown)]
         format: MatrixFormat,
@@ -94,6 +125,33 @@ enum Command {
         /// Optional path to write Markdown matrix report.
         #[arg(long)]
         out_md: Option<PathBuf>,
+    },
+    /// Serve a headless lab Host until expected inputs/frames are observed (for external viewer interop).
+    ServeHost {
+        /// Remora base URL (e.g. http://server:8680).
+        #[arg(long)]
+        url: String,
+        /// Request signing key.
+        #[arg(long, default_value = "remora-lab-sign-key")]
+        sign_key: String,
+        /// Disable request signing.
+        #[arg(long)]
+        no_sign_key: bool,
+        /// Path to write `{"device_id":"..."}` once online.
+        #[arg(long)]
+        ready_file: PathBuf,
+        /// Force TURN relay on the host peer.
+        #[arg(long)]
+        force_relay: bool,
+        /// Minimum input events expected from the connecting viewer.
+        #[arg(long, default_value_t = 1)]
+        expect_inputs: usize,
+        /// Minimum video frames sent to the connecting viewer.
+        #[arg(long, default_value_t = 1)]
+        expect_frames: u64,
+        /// Maximum seconds to wait before failing.
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
     },
     /// Record live wire traces (placeholder).
     Record,
@@ -220,16 +278,50 @@ async fn dispatch(cmd: Command) -> Result<bool, LabError> {
         }
         Command::Matrix {
             paths,
+            mode,
+            url,
             remora_bin,
             sign_key,
             no_sign_key,
+            uu_device_id,
+            uu_user_token,
+            uu_force_relay,
             format,
             out_json,
             out_md,
         } => {
             let scenarios = load_scenarios(&paths)?;
             let effective_key = (!no_sign_key).then_some(sign_key.as_str());
-            let report = run_matrix(&scenarios, remora_bin.as_deref(), effective_key).await?;
+            let report = match mode {
+                MatrixMode::Cloud => {
+                    run_matrix(&scenarios, remora_bin.as_deref(), effective_key).await?
+                }
+                MatrixMode::Session => {
+                    let p2p = scenarios
+                        .iter()
+                        .find(|s| s.name.contains("p2p"))
+                        .or_else(|| scenarios.first())
+                        .ok_or_else(|| LabError::Scenario("missing p2p session scenario".into()))?;
+                    let relay = scenarios
+                        .iter()
+                        .find(|s| s.name.contains("relay"))
+                        .or_else(|| scenarios.get(1))
+                        .ok_or_else(|| {
+                            LabError::Scenario("missing relay session scenario".into())
+                        })?;
+                    run_session_matrix(SessionMatrixConfig {
+                        p2p_scenario: p2p,
+                        relay_scenario: relay,
+                        url: url.as_deref(),
+                        remora_bin: remora_bin.as_deref(),
+                        sign_key: effective_key,
+                        uu_device_id: uu_device_id.as_deref(),
+                        uu_user_token: uu_user_token.as_deref(),
+                        uu_force_relay,
+                    })
+                    .await?
+                }
+            };
             let json = report.to_json_pretty()?;
             let md = report.to_markdown();
 
@@ -248,6 +340,28 @@ async fn dispatch(cmd: Command) -> Result<bool, LabError> {
                 }
             }
             Ok(report.all_passed)
+        }
+        Command::ServeHost {
+            url,
+            sign_key,
+            no_sign_key,
+            ready_file,
+            force_relay,
+            expect_inputs,
+            expect_frames,
+            timeout_secs,
+        } => {
+            let effective_key = (!no_sign_key).then_some(sign_key.as_str());
+            run_serve_host(
+                &url,
+                effective_key,
+                &ready_file,
+                force_relay,
+                expect_inputs,
+                expect_frames,
+                Duration::from_secs(timeout_secs),
+            )
+            .await
         }
         Command::Record => {
             record::run_placeholder()?;
@@ -321,4 +435,85 @@ fn collect_yaml_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), LabErro
         "scenario path does not exist: {}",
         path.display()
     )))
+}
+
+async fn run_serve_host(
+    base_url: &str,
+    sign_key: Option<&str>,
+    ready_file: &Path,
+    force_relay: bool,
+    expect_inputs: usize,
+    expect_frames: u64,
+    timeout: Duration,
+) -> Result<bool, LabError> {
+    let prof = profile::by_id("windows-4.48.2")
+        .ok_or_else(|| LabError::Scenario("missing windows-4.48.2 profile".into()))?;
+    let mut builder = Endpoint::builder(prof)
+        .base_url(base_url)
+        .device_name("remora-lab-serve-host")
+        .auto_reconnect(false);
+    if let Some(key) = sign_key {
+        builder = builder.sign_key(SignKey::new(key));
+    }
+    let endpoint = builder
+        .build()
+        .map_err(|e| LabError::Scenario(format!("build endpoint: {e}")))?;
+    endpoint
+        .register_device()
+        .await
+        .map_err(|e| LabError::Scenario(format!("serve-host register_device failed: {e}")))?;
+    let login = endpoint
+        .login()
+        .await
+        .map_err(|e| LabError::Scenario(format!("serve-host login failed: {e}")))?;
+
+    let input_sink = RecordingInputSink::new();
+    let video_src = AnnexBFileVideoSource::from_bytes(&synthetic_annex_b_sample())?.with_loop(true);
+    let mut platform = HeadlessPlatform::new().with_video_source(video_src);
+    platform.input_sink = input_sink.clone();
+
+    let cfg = HostConfig {
+        force_relay,
+        ..Default::default()
+    };
+    let session = HostSession::start(&endpoint, Box::new(platform), cfg)
+        .await
+        .map_err(|e| LabError::Scenario(format!("serve-host start failed: {e}")))?;
+    let device_id = session.device_id().to_owned();
+
+    let tmp_ready = ready_file.with_extension("tmp");
+    fs::write(
+        &tmp_ready,
+        serde_json::to_string(&serde_json::json!({ "device_id": device_id }))?,
+    )?;
+    fs::rename(&tmp_ready, ready_file)?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut ever_ready = false;
+    let ok = loop {
+        let st = session.stats();
+        ever_ready |= st.peer_ready || st.video_frames_sent > 0 || st.inputs_injected > 0;
+        if ever_ready && st.video_frames_sent >= expect_frames && input_sink.len() >= expect_inputs
+        {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!(
+                "serve-host timed out: ever_ready={ever_ready} connected={} auth={} frames={} inputs={}",
+                st.connected,
+                st.authorized_sessions,
+                st.video_frames_sent,
+                input_sink.len()
+            );
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    };
+
+    session.close().await;
+    let _ = endpoint
+        .http()
+        .device_unbind(&login.token, &device_id, Some(&device_id))
+        .await;
+    Ok(ok)
 }

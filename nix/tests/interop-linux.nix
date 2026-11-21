@@ -1,7 +1,8 @@
-# End-to-end interoperability test: upstream uu-remote-linux (host + viewer) against Remora
-# and coturn in NixOS VMs.
+# End-to-end interoperability test: upstream uu-remote-linux (host + viewer) and remora-lab
+# against Remora and coturn in NixOS VMs, producing the 3-column session compatibility matrix.
 {
   remoraModule,
+  labPackage,
   uuRemoteModule,
   uuRemotePackage,
 }:
@@ -12,6 +13,7 @@ let
   turnSecret = pkgs.writeText "turn-secret" "vm-turn-secret\n";
   signKeyValue = "vm-sign-key";
   signKey = pkgs.writeText "sign-key" "${signKeyValue}\n";
+  sessionScenarios = ../../compat/scenarios/session;
 
   swayConfig = pkgs.writeText "sway-headless.conf" ''
     xwayland disable
@@ -40,7 +42,7 @@ in
             sign_key_file = signKey;
             ice = {
               turn_secret_file = turnSecret;
-              force_relay = true;
+              force_relay = false;
             };
             login.auto_confirm = true;
           };
@@ -89,7 +91,10 @@ in
     };
 
     viewer = {
-      environment.systemPackages = [ uuRemotePackage ];
+      environment.systemPackages = [
+        uuRemotePackage
+        labPackage
+      ];
     };
   };
 
@@ -152,7 +157,7 @@ in
           devices = [json.loads(line) for line in raw_devices.splitlines() if line.strip()]
           assert any(d["device"] == host_device_id for d in devices), devices
 
-      with subtest("viewer transfers files with host over WebRTC relayed through coturn"):
+      with subtest("viewer transfers files with host over WebRTC"):
           viewer.succeed("printf 'hello-from-viewer-over-remora\n' > /tmp/viewer-hello.txt")
           viewer.succeed(
               f"{env_prefix} uuremote-viewer files {host_device_id} put /tmp/viewer-hello.txt /tmp/host-received.txt"
@@ -166,6 +171,47 @@ in
               f"{env_prefix} uuremote-viewer files {host_device_id} get /tmp/host-received.txt /tmp/viewer-got.txt"
           )
           assert viewer.succeed("cat /tmp/viewer-got.txt") == "hello-from-viewer-over-remora\n"
+
+      with subtest("3-column session matrix passes lab<->lab (P2P), lab<->lab (relay), and lab<->uu-remote-linux"):
+          viewer.succeed(
+              f"remora-lab matrix ${sessionScenarios} "
+              "--mode session "
+              "--url http://server:8680 "
+              "--sign-key ${signKeyValue} "
+              f"--uu-device-id {host_device_id} "
+              "--uu-force-relay "
+              "--format both "
+              "--out-json /tmp/interop-matrix.json "
+              "--out-md /tmp/interop-matrix.md"
+          )
+          report = json.loads(viewer.succeed("cat /tmp/interop-matrix.json"))
+          assert report["all_passed"] is True, report
+          assert [c["id"] for c in report["columns"]] == [
+              "lab-lab-p2p",
+              "lab-lab-relay",
+              "lab-uu-remote-linux",
+          ], report
+          for row in report["rows"]:
+              assert all(cell["passed"] for cell in row["cells"]), row
+
+      with subtest("uuremote-viewer connects to remora-lab Host and injects input"):
+          viewer.succeed(
+              "rm -f /tmp/lab-host.json /tmp/lab-host.rc && "
+              "systemd-run --unit=lab-host --quiet "
+              "sh -c '${labPackage}/bin/remora-lab serve-host "
+              "--url http://server:8680 "
+              "--sign-key ${signKeyValue} "
+              "--ready-file /tmp/lab-host.json "
+              "--force-relay "
+              "--expect-inputs 2 "
+              "--expect-frames 1 "
+              "--timeout-secs 30; echo $? > /tmp/lab-host.rc'"
+          )
+          viewer.wait_until_succeeds("test -f /tmp/lab-host.json")
+          lab_device_id = json.loads(viewer.succeed("cat /tmp/lab-host.json"))["device_id"]
+          viewer.succeed(f"printf 'ab' | {env_prefix} uuremote-viewer type {lab_device_id} --new-session")
+          viewer.wait_until_succeeds("test -f /tmp/lab-host.rc")
+          assert viewer.succeed("cat /tmp/lab-host.rc").strip() == "0", viewer.succeed("journalctl -u lab-host.service -o cat")
 
       with subtest("viewer unbinds the host and Remora drops it"):
           viewer.succeed(f"{env_prefix} uuremote-viewer unbind {host_device_id}")

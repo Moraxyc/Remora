@@ -23,6 +23,7 @@ use tokio_tungstenite::tungstenite::Message as TungWsMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::error::LabError;
+use crate::target::turn::TestTurnServer;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -97,6 +98,7 @@ pub struct RemoraInstance {
     children: Vec<Child>,
     tasks: Vec<JoinHandle<()>>,
     logs: Arc<Mutex<String>>,
+    _turn: Option<TestTurnServer>,
     _workspace: TempWorkspace,
 }
 
@@ -123,6 +125,13 @@ impl RemoraInstance {
         let db_path = workspace.path().join("remora.db");
         let turn_secret_path = workspace.path().join("turn.secret");
         std::fs::write(&turn_secret_path, "lab-turn-secret\n")?;
+        let (turn_url, turn_guard) = match std::env::var("REMORA_TURN_URL") {
+            Ok(u) if !u.is_empty() => (u, None),
+            _ => {
+                let srv = TestTurnServer::spawn("lab-turn-secret").await?;
+                (srv.turn_url(), Some(srv))
+            }
+        };
 
         let mut toml = format!(
             "roles = [\"api\", \"gateway\", \"room\", \"relay\"]\n\
@@ -146,7 +155,7 @@ impl RemoraInstance {
             "\n[login]\n\
              auto_confirm = true\n\n\
              [ice]\n\
-             servers = [\"turn:127.0.0.1:3478\"]\n\
+             servers = [\"{turn_url}\"]\n\
              turn_secret_file = \"{}\"\n",
             turn_secret_path.display()
         ));
@@ -166,6 +175,7 @@ impl RemoraInstance {
             children: vec![child],
             tasks,
             logs,
+            _turn: turn_guard,
             _workspace: workspace,
         })
     }
@@ -184,6 +194,13 @@ impl RemoraInstance {
         let bus_sock = workspace.path().join("bus.sock");
         let turn_secret_path = workspace.path().join("turn.secret");
         std::fs::write(&turn_secret_path, "lab-turn-secret\n")?;
+        let (turn_url, turn_guard) = match std::env::var("REMORA_TURN_URL") {
+            Ok(u) if !u.is_empty() => (u, None),
+            _ => {
+                let srv = TestTurnServer::spawn("lab-turn-secret").await?;
+                (srv.turn_url(), Some(srv))
+            }
+        };
 
         let mut api_toml = format!(
             "roles = [\"api\", \"relay\"]\n\
@@ -207,7 +224,7 @@ impl RemoraInstance {
             "\n[login]\n\
              auto_confirm = true\n\n\
              [ice]\n\
-             servers = [\"turn:127.0.0.1:3478\"]\n\
+             servers = [\"{turn_url}\"]\n\
              turn_secret_file = \"{}\"\n",
             turn_secret_path.display()
         ));
@@ -263,6 +280,7 @@ impl RemoraInstance {
             children: vec![api_child, gw_child],
             tasks,
             logs,
+            _turn: turn_guard,
             _workspace: workspace,
         })
     }

@@ -1,0 +1,111 @@
+name: 01-p2p-session
+description: Lab Host and Viewer establish a direct P2P WebRTC session through Remora and verify frames, input roundtrip, and bidirectional clipboard
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: session-p2p-host
+  viewer:
+    kind: viewer
+    device_name: session-p2p-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: session_host_start
+    force_relay: false
+    loop_video: true
+
+  - actor: viewer
+    action: session_viewer_connect
+    target: host
+    token: "${host.user_token}"
+    force_relay: false
+    expect:
+      ack_status: success
+      json_eq:
+        connected: true
+        peer_ready: true
+        is_relayed: false
+
+  - actor: viewer
+    action: session_wait
+    min_frames: 3
+    require_p2p: true
+    expect:
+      json_eq:
+        min_frames_met: true
+        is_relayed: false
+
+  - actor: viewer
+    action: session_send_input
+    kind: kbd_press
+    key: 65
+
+  - actor: viewer
+    action: session_send_input
+    kind: mouse_move_absolute
+    x: 0.5
+    y: 0.25
+
+  - actor: host
+    action: session_wait
+    min_inputs: 2
+    require_p2p: true
+    expect:
+      json_eq:
+        min_inputs_met: true
+        is_relayed: false
+
+  - actor: viewer
+    action: session_set_clipboard
+    text: "clip-viewer-to-host"
+
+  - actor: host
+    action: session_wait
+    expected_clipboard: "clip-viewer-to-host"
+    expect:
+      json_eq:
+        clipboard_matched: true
+
+  - actor: host
+    action: session_set_clipboard
+    text: "clip-host-to-viewer"
+
+  - actor: viewer
+    action: session_wait
+    expected_clipboard: "clip-host-to-viewer"
+    expect:
+      json_eq:
+        clipboard_matched: true
+
+  - actor: viewer
+    action: session_close
+
+  - actor: host
+    action: session_close
+
+  - actor: viewer
+    action: device_unbind
+    target: host
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

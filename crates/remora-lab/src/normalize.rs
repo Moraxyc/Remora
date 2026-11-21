@@ -110,6 +110,7 @@ impl SymbolTable {
             Some("reconnect_key") => self.intern("reconnect_key", raw),
             Some("username") => self.intern("turn_user", raw),
             Some("credential") => self.intern("turn_cred", raw),
+            Some("urls") => self.intern("ice_url", raw),
             Some("signaling_server" | "signaling_list") => self.normalize_url_origin(raw),
             Some("sdp") => redact_and_symbolize_sdp(raw),
             _ => raw.to_owned(),

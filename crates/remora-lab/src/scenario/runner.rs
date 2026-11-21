@@ -9,11 +9,15 @@ use std::time::{Duration, Instant};
 
 use prost::Message as _;
 use rand::SeedableRng;
+use remora_endpoint::Endpoint;
 use remora_endpoint::client::driver::drive_machine_with;
 use remora_endpoint::client::http::{ControlClient, HttpError};
 use remora_endpoint::client::socket::SignalingSocket;
 use remora_endpoint::platform::Platform;
 use remora_endpoint::record::{TraceActor, TraceRecord, TraceRecorder};
+use remora_endpoint::role::{
+    AuthorizationDecision, HostConfig, HostSession, ViewerConfig, ViewerSession,
+};
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
     ApiError, DeviceInitRequest, LoginByQrcodeRequest, QrCodeStatus, QrLoginStatusRequest,
@@ -33,7 +37,8 @@ use url::Url;
 
 use crate::error::LabError;
 use crate::headless::{
-    AnnexBFileVideoSource, HeadlessPlatform, ScriptedInputSource, synthetic_annex_b_sample,
+    AnnexBFileVideoSource, HeadlessPlatform, MemoryClipboard, RecordingInputSink,
+    ScriptedInputSource, synthetic_annex_b_sample,
 };
 use crate::redact::{find_secret_leak, redact_value};
 use crate::scenario::model::{
@@ -173,6 +178,11 @@ struct ActorState {
     last_ice_id: Option<String>,
     last_peer_client_id: Option<String>,
     ws: Option<WsHandle>,
+    host_session: Option<HostSession>,
+    viewer_session: Option<ViewerSession>,
+    input_sink: Option<RecordingInputSink>,
+    clipboard_mirror: Option<MemoryClipboard>,
+    sent_inputs: Vec<InputMessage>,
 }
 
 struct SharedEnv {
@@ -342,6 +352,11 @@ pub async fn run_scenario(
                 last_ice_id: None,
                 last_peer_client_id: None,
                 ws: None,
+                host_session: None,
+                viewer_session: None,
+                input_sink: None,
+                clipboard_mirror: None,
+                sent_inputs: Vec::new(),
             })),
         );
     }
@@ -365,9 +380,22 @@ pub async fn run_scenario(
         }
     }
 
-    // Close any open WebSockets cleanly before reading final logs/traces.
+    // Close any open sessions and WebSockets cleanly before reading final logs/traces.
     for actor_mutex in env.actors.values() {
-        let ws = actor_mutex.lock().await.ws.take();
+        let (ws, viewer_sess, host_sess) = {
+            let mut guard = actor_mutex.lock().await;
+            (
+                guard.ws.take(),
+                guard.viewer_session.take(),
+                guard.host_session.take(),
+            )
+        };
+        if let Some(sess) = viewer_sess {
+            sess.close().await;
+        }
+        if let Some(sess) = host_sess {
+            sess.close().await;
+        }
         if let Some(handle) = ws {
             handle.close().await;
         }
@@ -1349,6 +1377,354 @@ async fn execute_action_step(
                 },
             )
         }
+        StepAction::SessionHostStart {
+            force_relay,
+            reject_reason,
+            loop_video,
+        } => {
+            let (ep, prev_host) = {
+                let mut actor = actor_mutex.lock().await;
+                let ep = build_actor_endpoint(&actor, env, None)?;
+                (ep, actor.host_session.take())
+            };
+            if let Some(prev) = prev_host {
+                prev.close().await;
+            }
+            let input_sink = RecordingInputSink::new();
+            let clipboard = MemoryClipboard::new();
+            let video_src = AnnexBFileVideoSource::from_bytes(&synthetic_annex_b_sample())?
+                .with_loop(*loop_video);
+            let mut platform = HeadlessPlatform::new().with_video_source(video_src);
+            platform.input_sink = input_sink.clone();
+            platform.clipboard = clipboard.clone();
+
+            let mut cfg = HostConfig {
+                force_relay: *force_relay,
+                ..Default::default()
+            };
+            if let Some(reason) = reject_reason {
+                let reason = reason.clone();
+                cfg.authorizer = Some(Arc::new(move |_| AuthorizationDecision::Reject {
+                    reason: reason.clone(),
+                }));
+            }
+
+            let session = HostSession::start(&ep, Box::new(platform), cfg)
+                .await
+                .map_err(|e| LabError::Scenario(format!("host session start failed: {e}")))?;
+            let dev_id = session.device_id().to_owned();
+            {
+                let mut actor = actor_mutex.lock().await;
+                actor.device_id = Some(dev_id.clone());
+                actor.input_sink = Some(input_sink);
+                actor.clipboard_mirror = Some(clipboard);
+                actor.host_session = Some(session);
+            }
+            (
+                "session_host_start",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("host_started".into()),
+                    payload: json!({
+                        "device_id": dev_id,
+                        "force_relay": force_relay,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionViewerConnect {
+            target,
+            token,
+            force_relay,
+            force_join,
+            timeout_ms,
+        } => {
+            let target_id = resolve_target_device(env, target).await?;
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let (ep, has_token, prev_viewer) = {
+                let mut actor = actor_mutex.lock().await;
+                let has_tok = explicit_tok.is_some() || actor.user_token.is_some();
+                let ep = build_actor_endpoint(&actor, env, explicit_tok.as_deref())?;
+                (ep, has_tok, actor.viewer_session.take())
+            };
+            if let Some(prev) = prev_viewer {
+                prev.close().await;
+            }
+            if !has_token {
+                let login = ep
+                    .login()
+                    .await
+                    .map_err(|e| LabError::Scenario(format!("viewer auto-login failed: {e}")))?;
+                env.record_secret("user_token", &login.token);
+                actor_mutex.lock().await.user_token = Some(login.token);
+            }
+            let clipboard = MemoryClipboard::new();
+            let mut platform = HeadlessPlatform::new();
+            platform.clipboard = clipboard.clone();
+
+            let cfg = ViewerConfig {
+                force_relay: *force_relay,
+                force_join: *force_join,
+                connect_timeout: Duration::from_millis(*timeout_ms),
+                ..Default::default()
+            };
+
+            let session = ViewerSession::connect(&ep, &target_id, Box::new(platform), cfg)
+                .await
+                .map_err(|e| LabError::Scenario(format!("viewer connect failed: {e}")))?;
+            let stats = session
+                .wait_ready(Duration::from_millis(*timeout_ms))
+                .await
+                .map_err(|e| LabError::Scenario(format!("viewer wait_ready failed: {e}")))?;
+            let ice_id = session.ice_id().to_owned();
+            {
+                let mut actor = actor_mutex.lock().await;
+                actor.last_ice_id = Some(ice_id.clone());
+                actor.clipboard_mirror = Some(clipboard);
+                actor.viewer_session = Some(session);
+            }
+            (
+                "session_viewer_connect",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: Some("success".into()),
+                    event_name: Some("peer_ready".into()),
+                    payload: json!({
+                        "ice_id": ice_id,
+                        "connected": stats.connected,
+                        "peer_ready": stats.peer_ready,
+                        "is_relayed": stats.is_relayed,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionSendInput {
+            kind,
+            key,
+            button,
+            x,
+            y,
+            dx,
+            dy,
+            text,
+        } => {
+            let msg = build_input_message(kind, *key, *button, *x, *y, *dx, *dy, text.as_deref())?;
+            {
+                let mut actor = actor_mutex.lock().await;
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_input(msg.clone())
+                    .await
+                    .map_err(|e| LabError::Scenario(format!("send_input failed: {e}")))?;
+                actor.sent_inputs.push(msg);
+            }
+            (
+                "session_send_input",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("input_sent".into()),
+                    payload: json!({ "kind": kind }),
+                },
+            )
+        }
+        StepAction::SessionSetClipboard { text } => {
+            let resolved = env.resolve_template(text).await;
+            let actor = actor_mutex.lock().await;
+            if let Some(sess) = &actor.host_session {
+                sess.set_clipboard(resolved.clone())
+                    .await
+                    .map_err(|e| LabError::Scenario(format!("host set_clipboard failed: {e}")))?;
+            } else if let Some(sess) = &actor.viewer_session {
+                sess.send_clipboard(resolved.clone()).await.map_err(|e| {
+                    LabError::Scenario(format!("viewer send_clipboard failed: {e}"))
+                })?;
+            } else {
+                return Err(LabError::Scenario(
+                    "actor has no active host_session or viewer_session".into(),
+                ));
+            }
+            (
+                "session_set_clipboard",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("clipboard_sent".into()),
+                    payload: json!({ "len": resolved.len() }),
+                },
+            )
+        }
+        StepAction::SessionWait {
+            min_frames,
+            min_inputs,
+            expected_clipboard,
+            require_relayed,
+            require_p2p,
+            timeout_ms,
+        } => {
+            let expected_clip = match expected_clipboard {
+                Some(s) => Some(env.resolve_template(s).await),
+                None => None,
+            };
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(*timeout_ms);
+            let outcome_payload = loop {
+                let mut ok = true;
+                let is_relayed;
+                let connected;
+                let peer_ready;
+                let mut frames_ok = min_frames.is_none();
+                let mut inputs_ok = min_inputs.is_none();
+                let mut clip_ok = expected_clip.is_none();
+                let mut diag = String::new();
+
+                {
+                    let actor = actor_mutex.lock().await;
+                    if let Some(vsess) = &actor.viewer_session {
+                        let st = vsess.stats();
+                        connected = st.connected;
+                        peer_ready = st.peer_ready;
+                        is_relayed = st.is_relayed;
+                        if let Some(min_f) = min_frames {
+                            frames_ok = st.video_frames_received >= *min_f;
+                            if !frames_ok {
+                                ok = false;
+                                diag = format!("frames={} < {min_f}", st.video_frames_received);
+                            }
+                        }
+                        if let Some(exp) = &expected_clip {
+                            let cur = actor
+                                .clipboard_mirror
+                                .as_ref()
+                                .and_then(|c| c.text())
+                                .or(st.last_clipboard);
+                            clip_ok = cur.as_deref() == Some(exp.as_str());
+                            if !clip_ok {
+                                ok = false;
+                                diag = format!("viewer clipboard={cur:?} != {exp:?}");
+                            }
+                        }
+                    } else if let Some(hsess) = &actor.host_session {
+                        let st = hsess.stats();
+                        connected = st.connected;
+                        peer_ready = st.peer_ready;
+                        is_relayed = st.is_relayed;
+                        if let Some(min_i) = min_inputs {
+                            let count = actor
+                                .input_sink
+                                .as_ref()
+                                .map_or(st.inputs_injected as usize, RecordingInputSink::len);
+                            inputs_ok = count as u64 >= *min_i;
+                            if !inputs_ok {
+                                ok = false;
+                                diag = format!("inputs={count} < {min_i}");
+                            }
+                        }
+                        if let Some(exp) = &expected_clip {
+                            let cur = actor.clipboard_mirror.as_ref().and_then(|c| c.text());
+                            clip_ok = cur.as_deref() == Some(exp.as_str());
+                            if !clip_ok {
+                                ok = false;
+                                diag = format!("host clipboard={cur:?} != {exp:?}");
+                            }
+                        }
+                    } else {
+                        return Err(LabError::Scenario(
+                            "session_wait requires an active host_session or viewer_session".into(),
+                        ));
+                    }
+
+                    if *require_relayed == Some(true) && !is_relayed {
+                        ok = false;
+                        diag = "expected relayed ICE transport".into();
+                    }
+                    if *require_p2p == Some(true) && is_relayed {
+                        ok = false;
+                        diag = "expected direct P2P ICE transport, got relayed".into();
+                    }
+                }
+
+                if ok {
+                    break json!({
+                        "connected": connected,
+                        "peer_ready": peer_ready,
+                        "is_relayed": is_relayed,
+                        "min_frames_met": frames_ok,
+                        "min_inputs_met": inputs_ok,
+                        "clipboard_matched": clip_ok,
+                    });
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(LabError::Scenario(format!(
+                        "session_wait timed out after {timeout_ms}ms ({diag})"
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            };
+
+            // Also verify exact input roundtrip if viewer sent inputs and this actor is host.
+            if min_inputs.is_some() {
+                let mut all_sent: Vec<InputMessage> = Vec::new();
+                for (name, other_mutex) in &env.actors {
+                    if name != &step.actor {
+                        all_sent.extend(other_mutex.lock().await.sent_inputs.clone());
+                    }
+                }
+                if !all_sent.is_empty()
+                    && let Some(sink) = actor_mutex.lock().await.input_sink.as_ref()
+                {
+                    let recorded = sink.recorded();
+                    for msg in &all_sent {
+                        if !recorded.contains(msg) {
+                            return Err(LabError::Scenario(format!(
+                                "host input sink missed expected event: {msg:?}"
+                            )));
+                        }
+                    }
+                }
+            }
+
+            (
+                "session_wait",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("session_ok".into()),
+                    payload: outcome_payload,
+                },
+            )
+        }
+        StepAction::SessionClose => {
+            let (viewer_sess, host_sess) = {
+                let mut actor = actor_mutex.lock().await;
+                (actor.viewer_session.take(), actor.host_session.take())
+            };
+            if let Some(sess) = viewer_sess {
+                sess.close().await;
+            }
+            if let Some(sess) = host_sess {
+                sess.close().await;
+            }
+            (
+                "session_close",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("session_closed".into()),
+                    payload: json!({ "closed": true }),
+                },
+            )
+        }
     };
 
     if !step.save.is_empty() {
@@ -1389,6 +1765,90 @@ async fn execute_action_step(
     ));
 
     Ok(())
+}
+
+fn build_actor_endpoint(
+    actor: &ActorState,
+    env: &SharedEnv,
+    explicit_token: Option<&str>,
+) -> Result<Endpoint, LabError> {
+    let mut builder = Endpoint::builder(actor.profile)
+        .base_url(&env.base_url)
+        .client_id(&actor.client_id)
+        .device_name(&actor.device_name)
+        .http_client(actor.raw_client.clone())
+        .recorder(Arc::clone(&actor.recorder))
+        .auto_reconnect(false);
+    if let Some(key) = &env.sign_key {
+        builder = builder.sign_key(key.clone());
+    }
+    if let Some(dev_id) = &actor.device_id {
+        builder = builder.device_id(dev_id.clone());
+    }
+    if let Some(tok) = explicit_token.or(actor.user_token.as_deref()) {
+        builder = builder.user_token(tok.to_owned());
+    }
+    builder
+        .build()
+        .map_err(|e| LabError::Scenario(format!("failed to build endpoint: {e}")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_input_message(
+    kind: &str,
+    key: Option<i32>,
+    button: Option<i32>,
+    x: Option<f64>,
+    y: Option<f64>,
+    dx: Option<i32>,
+    dy: Option<i32>,
+    text: Option<&str>,
+) -> Result<InputMessage, LabError> {
+    match kind {
+        "kbd_press" => Ok(InputMessage::Keyboard {
+            key: key.ok_or_else(|| LabError::Scenario("kbd_press requires key".into()))?,
+            pressed: true,
+        }),
+        "kbd_release" => Ok(InputMessage::Keyboard {
+            key: key.ok_or_else(|| LabError::Scenario("kbd_release requires key".into()))?,
+            pressed: false,
+        }),
+        "kbd_click" => Ok(InputMessage::KeyboardClick {
+            key: key.ok_or_else(|| LabError::Scenario("kbd_click requires key".into()))?,
+        }),
+        "mouse_press" => Ok(InputMessage::MouseButton {
+            button: button
+                .ok_or_else(|| LabError::Scenario("mouse_press requires button".into()))?,
+            pressed: true,
+        }),
+        "mouse_release" => Ok(InputMessage::MouseButton {
+            button: button
+                .ok_or_else(|| LabError::Scenario("mouse_release requires button".into()))?,
+            pressed: false,
+        }),
+        "mouse_click" => Ok(InputMessage::MouseClick {
+            button: button
+                .ok_or_else(|| LabError::Scenario("mouse_click requires button".into()))?,
+        }),
+        "mouse_move_absolute" => Ok(InputMessage::MouseAbsolute {
+            x: x.ok_or_else(|| LabError::Scenario("mouse_move_absolute requires x".into()))?,
+            y: y.ok_or_else(|| LabError::Scenario("mouse_move_absolute requires y".into()))?,
+        }),
+        "mouse_move_relative" => Ok(InputMessage::MouseRelative {
+            dx: dx.ok_or_else(|| LabError::Scenario("mouse_move_relative requires dx".into()))?,
+            dy: dy.ok_or_else(|| LabError::Scenario("mouse_move_relative requires dy".into()))?,
+        }),
+        "mouse_scroll" => Ok(InputMessage::MouseScroll {
+            dx: dx.unwrap_or(0),
+            dy: dy.unwrap_or(0),
+        }),
+        "text_input" => Ok(InputMessage::TextInput {
+            text: text
+                .ok_or_else(|| LabError::Scenario("text_input requires text".into()))?
+                .to_owned(),
+        }),
+        other => Err(LabError::Scenario(format!("unknown input kind `{other}`"))),
+    }
 }
 
 async fn resolve_target_device(env: &SharedEnv, target: &str) -> Result<String, LabError> {

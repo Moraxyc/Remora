@@ -13,18 +13,23 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "ws"] }
+base64 = "0.23.1"
 clap = { version = "4.6.8", features = ["derive"] }
+crc32fast = "1.5.5"
 futures-util = "0.3.34"
 hex = "0.4.3"
+hmac = "0.13.0"
 http = "1.5.0"
+md-5 = "0.11.0"
 prost = "0.14.6"
 rand = "0.9.5"
-remora-endpoint = { path = "../remora-endpoint", features = ["client", "record"] }
+remora-endpoint = { path = "../remora-endpoint", features = ["client", "peer", "record"] }
 remora-proto = { path = "../remora-proto" }
 reqwest = "0.13.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
+sha1 = "0.11.0"
 tokio = { version = "1.54.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = "0.30.0"
 tracing = "0.1.44"
