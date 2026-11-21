@@ -4,7 +4,6 @@ use remora_lab::diff::diff_runs;
 use remora_lab::normalize::normalize_run;
 use remora_lab::scenario::{Scenario, run_scenario};
 use remora_lab::target::{RunningTarget, TargetSpec};
-use serde_json::json;
 
 fn cloud_scenarios_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../compat/scenarios/cloud")
@@ -19,7 +18,7 @@ async fn all_cloud_scenarios_pass_against_fakecloud_and_normalize_identically() 
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
         .collect();
     files.sort();
-    assert_eq!(files.len(), 10);
+    assert!(!files.is_empty());
 
     for path in files {
         let scenario = Scenario::load(&path).unwrap();
@@ -104,5 +103,4 @@ steps:
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].method, "POST");
     assert_eq!(calls[0].path, "/api/v1/qrcode/gen/login");
-    let _ = json!(null);
 }

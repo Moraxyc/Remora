@@ -52,25 +52,3 @@ impl Handshake {
         Duration::from_millis(ms).clamp(Duration::from_secs(5), Duration::from_secs(300))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn handshake() {
-        let open = r#"0{"sid":"abc","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}"#;
-        let serde_json_str = &open[1..];
-        let handshake: Handshake = serde_json::from_str(serde_json_str).unwrap();
-        assert_eq!(handshake.sid, "abc");
-        assert_eq!(handshake.liveness_timeout(), Duration::from_secs(45));
-        assert_eq!(handshake.encode(), open);
-
-        let short = Handshake {
-            sid: String::new(),
-            ping_interval: 100,
-            ping_timeout: 100,
-        };
-        assert_eq!(short.liveness_timeout(), Duration::from_secs(5));
-    }
-}

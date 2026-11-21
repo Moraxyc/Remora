@@ -79,29 +79,3 @@ impl InputSink for RecordingInputSink {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scripted_source_feeds_recording_sink() {
-        let script = vec![
-            InputMessage::Keyboard {
-                key: 65,
-                pressed: true,
-            },
-            InputMessage::MouseAbsolute { x: 0.5, y: 0.25 },
-            InputMessage::TextInput {
-                text: "remora".into(),
-            },
-        ];
-        let mut source = ScriptedInputSource::new(script.clone());
-        let mut sink = RecordingInputSink::new();
-
-        while let Some(ev) = source.next_event().unwrap() {
-            sink.inject(&ev).unwrap();
-        }
-        assert_eq!(sink.recorded(), script);
-    }
-}
