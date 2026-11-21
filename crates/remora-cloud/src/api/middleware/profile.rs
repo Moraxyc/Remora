@@ -78,6 +78,19 @@ mod tests {
             .to_bytes();
         assert_eq!(&body[..], b"macos-4.48.2");
 
+        let win_matched = Request::get("/test")
+            .header("X-Param-PLAT", "1")
+            .header("X-Param-VN", "4.48.2.5754")
+            .header("X-Param-VC", "5754")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(win_matched).await.unwrap();
+        let body = http_body_util::BodyExt::collect(res.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(&body[..], b"windows-4.48.2");
+
         let unknown = Request::get("/test")
             .header("X-Param-PLAT", "1")
             .header("X-Param-VN", "4.45.0.4318")

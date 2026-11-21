@@ -78,4 +78,29 @@ mod tests {
         );
         assert_eq!(detect_from_headers([("x-param-plat", "4")]), None);
     }
+
+    #[test]
+    fn detects_windows_4_48_2_profile() {
+        let matched = detect_from_headers([
+            ("X-Param-PLAT", "1"),
+            ("X-Param-VN", "4.48.2.5754"),
+            ("X-Param-VC", "5754"),
+        ])
+        .expect("windows-4.48.2 should match");
+        assert_eq!(matched.id, "windows-4.48.2");
+
+        let without_vc =
+            detect_from_headers([("x-param-plat", "1"), ("x-param-vn", "4.48.2.5754")])
+                .expect("windows-4.48.2 should match without vc");
+        assert_eq!(without_vc.id, "windows-4.48.2");
+
+        assert_eq!(
+            detect_from_headers([
+                ("x-param-plat", "1"),
+                ("x-param-vn", "4.48.2.5754"),
+                ("x-param-vc", "5753"),
+            ]),
+            None
+        );
+    }
 }

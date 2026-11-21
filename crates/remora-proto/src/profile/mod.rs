@@ -176,6 +176,27 @@ mod tests {
     }
 
     #[test]
+    fn embeds_windows_4_48_2_profile() {
+        let win = by_id("windows-4.48.2").expect("windows-4.48.2 embedded");
+        assert_eq!(win.inherits, None);
+        assert_eq!(win.source, ProfileSource::ReverseEngineered);
+        assert!(!win.evidence.is_empty());
+        assert_eq!(win.platform, Platform::Windows);
+        assert_eq!(win.plat, "1");
+        assert_eq!(win.version, "4.48.2.5754");
+        assert_eq!(win.build, 5754);
+        assert_eq!(win.bundle_id, "com.netease.uuremote");
+        assert_eq!(win.channel, "nochannel");
+        assert_eq!(win.min_os, "6.0");
+        assert_eq!(win.init_endpoint, "/api/v1/device/windows/init");
+        assert_eq!(win.caps.codecs, &["h264", "h265"]);
+        assert_eq!(win.caps.audio_codecs, &["opus"]);
+        assert_eq!(win.caps.transports, &["webrtc", "mix-kcp", "quic"]);
+        assert_eq!(win.caps.features.capture_setting, 6);
+        assert_eq!(win.caps.features.virtual_mouse_device, 1);
+    }
+
+    #[test]
     fn rejects_unknown_capability_names() {
         let mut p = base_toml("bad-cap", "4.48.1", 633);
         p.caps.as_mut().unwrap().codecs = Some(vec!["vp9".into()]);
