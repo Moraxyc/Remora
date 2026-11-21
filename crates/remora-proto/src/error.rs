@@ -18,6 +18,16 @@ pub enum ErrorCode {
     TokenExpired,
     /// Login QR ticket is unknown, expired, or already used (`1190`).
     QrCodeExpired,
+    /// Remote assistance cannot be initiated (e.g. disabled or same-account target) (`1130`).
+    CannotInitiateRemoteConnection,
+    /// Incorrect share device ID or verification code (`1131`).
+    IncorrectShareCode,
+    /// Remote assistance confirmation was denied by the host (`1134`).
+    ShareConfirmationDenied,
+    /// Remote assistance is waiting for confirmation from the host (`1136`).
+    ShareConfirmationRequired,
+    /// Cannot favorite a device owned by the same account (`1137`).
+    SameAccountShareFavorite,
     /// Rate limit exceeded (`1429`).
     TooManyRequests,
     /// Target host is not connected to signaling (`2001`).
@@ -26,6 +36,8 @@ pub enum ErrorCode {
     BeingControlled,
     /// Device does not exist or is not bound to the caller (`2003`).
     UnknownDevice,
+    /// Guest share info requested before creating a guest room (`2004`).
+    GuestRoomRequired,
     /// Any unrecognized numeric code from the wire.
     Unknown(i64),
 }
@@ -39,11 +51,17 @@ impl ErrorCode {
             1001 => Self::InvalidRequest,
             1002 => Self::InvalidSignature,
             1120 => Self::TokenExpired,
+            1130 => Self::CannotInitiateRemoteConnection,
+            1131 => Self::IncorrectShareCode,
+            1134 => Self::ShareConfirmationDenied,
+            1136 => Self::ShareConfirmationRequired,
+            1137 => Self::SameAccountShareFavorite,
             1190 => Self::QrCodeExpired,
             1429 => Self::TooManyRequests,
             2001 => Self::DeviceOffline,
             2002 => Self::BeingControlled,
             2003 => Self::UnknownDevice,
+            2004 => Self::GuestRoomRequired,
             other => Self::Unknown(other),
         }
     }
@@ -56,11 +74,17 @@ impl ErrorCode {
             Self::InvalidRequest => 1001,
             Self::InvalidSignature => 1002,
             Self::TokenExpired => 1120,
+            Self::CannotInitiateRemoteConnection => 1130,
+            Self::IncorrectShareCode => 1131,
+            Self::ShareConfirmationDenied => 1134,
+            Self::ShareConfirmationRequired => 1136,
+            Self::SameAccountShareFavorite => 1137,
             Self::QrCodeExpired => 1190,
             Self::TooManyRequests => 1429,
             Self::DeviceOffline => 2001,
             Self::BeingControlled => 2002,
             Self::UnknownDevice => 2003,
+            Self::GuestRoomRequired => 2004,
             Self::Unknown(code) => code,
         }
     }
@@ -90,11 +114,21 @@ impl fmt::Display for ErrorCode {
             Self::InvalidRequest => f.write_str("invalid request (1001)"),
             Self::InvalidSignature => f.write_str("invalid signature (1002)"),
             Self::TokenExpired => f.write_str("token expired (1120)"),
+            Self::CannotInitiateRemoteConnection => {
+                f.write_str("cannot initiate remote connection (1130)")
+            }
+            Self::IncorrectShareCode => f.write_str("incorrect device id or code (1131)"),
+            Self::ShareConfirmationDenied => f.write_str("share confirmation denied (1134)"),
+            Self::ShareConfirmationRequired => f.write_str("share confirmation required (1136)"),
+            Self::SameAccountShareFavorite => {
+                f.write_str("cannot favorite same-account device (1137)")
+            }
             Self::QrCodeExpired => f.write_str("qr code expired (1190)"),
             Self::TooManyRequests => f.write_str("too many requests (1429)"),
             Self::DeviceOffline => f.write_str("device offline (2001)"),
             Self::BeingControlled => f.write_str("being controlled (2002)"),
             Self::UnknownDevice => f.write_str("unknown device (2003)"),
+            Self::GuestRoomRequired => f.write_str("guest room required (2004)"),
             Self::Unknown(code) => write!(f, "unknown code ({code})"),
         }
     }
@@ -106,7 +140,10 @@ mod tests {
 
     #[test]
     fn roundtrips_known_and_unknown_codes() {
-        for code in [0, 1000, 1001, 1002, 1120, 1190, 1429, 2001, 2002, 2003] {
+        for code in [
+            0, 1000, 1001, 1002, 1120, 1130, 1131, 1134, 1136, 1137, 1190, 1429, 2001, 2002, 2003,
+            2004,
+        ] {
             let parsed = ErrorCode::from_code(code);
             assert!(!matches!(parsed, ErrorCode::Unknown(_)));
             assert_eq!(parsed.code(), code);

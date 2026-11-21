@@ -3,7 +3,7 @@
 use std::fmt;
 
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 /// Headers with this prefix are covered by the signature.
 pub const PARAM_PREFIX: &str = "x-param-";
@@ -92,6 +92,34 @@ fn mac<'a>(
     mac
 }
 
+/// Computes the lowercase-hex `SHA-256(salt || code)` digest used by remote-assist
+/// `upload/sign` and `upload_sign` challenges.
+pub fn share_code_digest(salt: &str, code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(code.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Checks in constant time whether `signature_hex` equals `SHA-256(salt || code)`.
+pub fn verify_share_code_digest(salt: &str, code: &str, signature_hex: &str) -> bool {
+    let Ok(provided) = hex::decode(signature_hex) else {
+        return false;
+    };
+    if provided.len() != 32 {
+        return false;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(code.as_bytes());
+    let expected = hasher.finalize();
+    let mut diff = 0u8;
+    for (a, b) in expected.iter().zip(provided.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +185,25 @@ mod tests {
     #[test]
     fn debug_hides_key() {
         assert!(!format!("{:?}", key()).contains("test"));
+    }
+
+    #[test]
+    fn share_code_digest_computes_and_verifies_sha256() {
+        let digest = share_code_digest("salt-1", "CODE1234");
+        assert_eq!(digest.len(), 64);
+        assert!(verify_share_code_digest("salt-1", "CODE1234", &digest));
+        assert!(verify_share_code_digest(
+            "salt-1",
+            "CODE1234",
+            &digest.to_ascii_uppercase()
+        ));
+        assert!(!verify_share_code_digest("salt-1", "WRONG", &digest));
+        assert!(!verify_share_code_digest("salt-2", "CODE1234", &digest));
+        assert!(!verify_share_code_digest("salt-1", "CODE1234", "bad"));
+        assert!(!verify_share_code_digest(
+            "salt-1",
+            "CODE1234",
+            &digest[..62]
+        ));
     }
 }

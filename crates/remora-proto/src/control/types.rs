@@ -432,6 +432,252 @@ impl fmt::Debug for RoomJoinResponse {
     }
 }
 
+/// Response `data` from `POST /api/v1/guest/create`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuestCreateResponse {
+    pub guest_id: String,
+    pub token: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for GuestCreateResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GuestCreateResponse")
+            .field("guest_id", &self.guest_id)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Verification mode for remote assistance (`by_password`, `by_confirmation`, `password_confirmation`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ShareControlMode {
+    ByPassword,
+    ByConfirmation,
+    PasswordConfirmation,
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl ShareControlMode {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ByPassword => "by_password",
+            Self::ByConfirmation => "by_confirmation",
+            Self::PasswordConfirmation => "password_confirmation",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+
+    pub fn needs_password(&self) -> bool {
+        matches!(self, Self::ByPassword | Self::PasswordConfirmation)
+    }
+
+    pub fn allows_confirmation(&self) -> bool {
+        matches!(self, Self::ByConfirmation | Self::PasswordConfirmation)
+    }
+}
+
+/// Request body for `POST /api/v2/room/share/control_mode`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareControlModeRequest {
+    pub connect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_id: Option<String>,
+}
+
+/// Response `data` from `POST /api/v2/room/share/control_mode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShareControlModeResponse {
+    pub allow_control: bool,
+    pub control_mode: ShareControlMode,
+    pub need_password: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Request body for `POST /api/v1/guest/room/share/upload_control_mode` and
+/// `POST /api/v2/room/share/upload_control_mode`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadControlModeRequest {
+    pub control_id: String,
+    pub allow_control: bool,
+    pub control_mode: ShareControlMode,
+}
+
+/// Request body for `POST /api/v1/guest/room/share/upload/sign` and
+/// `POST /api/v2/room/share/upload_sign`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadShareSignRequest {
+    pub control_id: String,
+    pub can_remote_control: bool,
+    #[serde(default)]
+    pub sign: String,
+    #[serde(default)]
+    pub backup_sign: String,
+}
+
+impl fmt::Debug for UploadShareSignRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadShareSignRequest")
+            .field("control_id", &self.control_id)
+            .field("can_remote_control", &self.can_remote_control)
+            .field("sign", &"<redacted>")
+            .field("has_backup_sign", &(!self.backup_sign.is_empty()))
+            .finish()
+    }
+}
+
+/// Request body for `POST /api/v1/guest/room/share/confirmation` and
+/// `POST /api/v2/room/share/confirmation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareConfirmationRequest {
+    pub control_id: String,
+    #[serde(default, alias = "can_remote_control", alias = "confirm")]
+    pub allow: bool,
+}
+
+/// Request body for `POST /api/v1/room/join/share/by_code` and
+/// `POST /api/v2/room/join/share/by_code`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinShareByCodeRequest {
+    pub connect_id: String,
+    pub connect_code: String,
+    #[serde(default)]
+    pub force_join: bool,
+}
+
+impl fmt::Debug for JoinShareByCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinShareByCodeRequest")
+            .field("connect_id", &self.connect_id)
+            .field("connect_code", &"<redacted>")
+            .field("force_join", &self.force_join)
+            .finish()
+    }
+}
+
+/// Request body for `POST /api/v2/room/join/share/by_confirmation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinShareByConfirmationRequest {
+    pub connect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_id: Option<String>,
+    #[serde(default)]
+    pub force_join: bool,
+}
+
+/// Request body for `POST /api/v2/room/share/cancel_remote_assist`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRemoteAssistRequest {
+    pub connect_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_id: Option<String>,
+}
+
+/// Response `data` from `POST /api/v{1,2}/room/join/share/by_code` and
+/// `POST /api/v2/room/join/share/by_confirmation`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistRoomConfig {
+    pub signaling_server: String,
+    #[serde(default)]
+    pub signaling_list: Vec<String>,
+    #[serde(default)]
+    pub sni_required_signaling_list: Vec<String>,
+    pub token: String,
+    pub ws_connect_timeout_ms: u32,
+    pub streamer_retry_delta_ms: u32,
+    pub max_reconnect_delta: u32,
+    #[serde(default)]
+    pub report_token: String,
+    #[serde(default)]
+    pub report_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_server_address: Option<String>,
+    #[serde(default)]
+    pub share_id: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default)]
+    pub publisher_version_name: String,
+    pub publisher_platform: u8,
+    #[serde(default)]
+    pub publisher_device_id: String,
+    #[serde(default)]
+    pub international_connect: bool,
+    #[serde(default)]
+    pub device_binding: String,
+    #[serde(default)]
+    pub streamer_config: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl fmt::Debug for AssistRoomConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssistRoomConfig")
+            .field("signaling_server", &self.signaling_server)
+            .field("signaling_list", &self.signaling_list)
+            .field("token", &"<redacted>")
+            .field("share_id", &self.share_id)
+            .field("publisher_platform", &self.publisher_platform)
+            .field("publisher_device_id", &self.publisher_device_id)
+            .finish()
+    }
+}
+
+/// One saved/recent/favorite assisted device entry returned by `/api/v1/device/share/saved*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistDeviceRecord {
+    pub publisher_device_id: String,
+    pub connect_id: String,
+    #[serde(default)]
+    pub platform: u8,
+    #[serde(default)]
+    pub remark: String,
+    #[serde(default)]
+    pub is_favorite: bool,
+    #[serde(default)]
+    pub last_connected_at: u64,
+    #[serde(default)]
+    pub favorited_at: u64,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Paginated response `data` from `GET /api/v1/device/share/saved{,/favorites,/recent}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistDeviceRecordPage {
+    #[serde(default)]
+    pub saved: Vec<AssistDeviceRecord>,
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// One favorite item in `POST /api/v1/device/share/saved/favorites`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistFavoriteInput {
+    pub connect_id: String,
+    #[serde(default)]
+    pub remark: String,
+    #[serde(default)]
+    pub favorited_at: u64,
+}
+
+/// Request body for `POST /api/v1/device/share/saved/favorites`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistFavoritesRequest {
+    #[serde(default)]
+    pub favorites: Vec<AssistFavoriteInput>,
+    #[serde(default)]
+    pub skip_invalid: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +730,55 @@ mod tests {
             parse_response::<Room>(200, br#"{"code":0,"data":{}}"#),
             Err(ApiError::Malformed { http_status: 200 })
         );
+    }
+
+    #[test]
+    fn debug_redacts_assist_secrets() {
+        let guest = GuestCreateResponse {
+            guest_id: "g-1".into(),
+            token: "secret-guest-jwt".into(),
+            extra: Map::new(),
+        };
+        assert!(!format!("{guest:?}").contains("secret-guest-jwt"));
+
+        let join = JoinShareByCodeRequest {
+            connect_id: "123456789".into(),
+            connect_code: "SECRET88".into(),
+            force_join: false,
+        };
+        assert!(!format!("{join:?}").contains("SECRET88"));
+
+        let sign = UploadShareSignRequest {
+            control_id: "c-1".into(),
+            can_remote_control: true,
+            sign: "deadbeef".into(),
+            backup_sign: String::new(),
+        };
+        assert!(!format!("{sign:?}").contains("deadbeef"));
+
+        let room = AssistRoomConfig {
+            signaling_server: "wss://example.test/socket.io/".into(),
+            signaling_list: vec!["wss://example.test/socket.io/".into()],
+            sni_required_signaling_list: vec![],
+            token: "secret-room-jwt".into(),
+            ws_connect_timeout_ms: 16_000,
+            streamer_retry_delta_ms: 1_000,
+            max_reconnect_delta: 300,
+            report_token: "secret-report".into(),
+            report_url: String::new(),
+            report_server_address: None,
+            share_id: "123456789".into(),
+            device_name: "host".into(),
+            publisher_version_name: "4.48.2".into(),
+            publisher_platform: 1,
+            publisher_device_id: "dev-1".into(),
+            international_connect: false,
+            device_binding: String::new(),
+            streamer_config: String::new(),
+            extra: Map::new(),
+        };
+        let dbg = format!("{room:?}");
+        assert!(!dbg.contains("secret-room-jwt"));
+        assert!(!dbg.contains("secret-report"));
     }
 }
