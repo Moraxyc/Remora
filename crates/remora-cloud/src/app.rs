@@ -160,6 +160,7 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 "/api/v1/device/{device_id}/preferences",
                 get(api::device::preferences),
             )
+            .route("/api/v1/device/share/info", get(api::device::share_info))
             .route(
                 "/api/v1/app/list/of/device/{device_id}",
                 get(api::device::app_list_of_device),
@@ -203,6 +204,14 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
             .route(
                 "/api/v1/release/fetch/popups/info",
                 get(api::compat::release_popups),
+            )
+            .route(
+                "/api/v1/release/fetch/update",
+                get(api::compat::release_fetch_update),
+            )
+            .route(
+                "/api/v1/release/fetch/update/{device_id}",
+                get(api::compat::release_fetch_update_device),
             )
             .route("/api/v1/room/create", post(room::create))
             .route(

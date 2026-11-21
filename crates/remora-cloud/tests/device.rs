@@ -315,4 +315,35 @@ async fn client_compat_endpoints_answer_with_expected_envelopes() {
     .await
     .unwrap();
     assert_eq!(popups, json!({ "popups": [] }));
+
+    let share: Value = common::get_as(&app, "/api/v1/device/share/info", &token, &mac)
+        .await
+        .unwrap();
+    assert_eq!(share["connect_code"], "");
+    assert_eq!(share["alias"], "Mac");
+    let connect_id = share["connect_id"].as_str().unwrap();
+    assert_eq!(connect_id.len(), 9);
+    assert!(connect_id.bytes().all(|b| b.is_ascii_digit()));
+
+    let upd: Value = common::get_as(&app, "/api/v1/release/fetch/update", &token, &mac)
+        .await
+        .unwrap();
+    assert_eq!(upd["url"], "");
+    assert_eq!(upd["update_type"], "NoUpdate");
+
+    let _: Value = common::post_as(&app, "/api/v1/room/create", &token, Some(&mac), "{}")
+        .await
+        .unwrap();
+
+    let dev_upd: Value = common::get_as(
+        &app,
+        &format!("/api/v1/release/fetch/update/{mac}?platform=1&version_name=4.45.0.4318"),
+        &token,
+        &mac,
+    )
+    .await
+    .unwrap();
+    assert_eq!(dev_upd["url"], "");
+    assert_eq!(dev_upd["version_name"], "4.45.0.4318");
+    assert_eq!(dev_upd["update_type"], "NoUpdate");
 }

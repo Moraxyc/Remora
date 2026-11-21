@@ -246,6 +246,22 @@ impl Devices {
             .optional()
     }
 
+    /// Returns the device if it exists and is either unbound or owned by `user_id`.
+    pub fn get_for_caller(
+        &self,
+        device_id: &str,
+        user_id: &str,
+    ) -> rusqlite::Result<Option<Device>> {
+        let query = format!(
+            "SELECT {} FROM devices WHERE id = ?1 AND (owner IS NULL OR owner = ?2)",
+            Device::COLUMNS
+        );
+        self.0
+            .connection()
+            .query_row(&query, [device_id, user_id], Device::from_row)
+            .optional()
+    }
+
     /// `user_id`'s devices, ordered by id.
     pub fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<Device>> {
         let query = format!(
@@ -685,6 +701,45 @@ pub async fn preferences(
                 ],
             },
         },
+    }))
+}
+
+#[derive(Serialize)]
+pub struct ShareInfoResponse {
+    connect_id: String,
+    connect_code: String,
+    alias: String,
+}
+
+/// Deterministic 9-digit remote-assistance identifier for `device_id`.
+pub fn connect_id_for(device_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in device_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:09}", 100_000_000 + (hash % 900_000_000))
+}
+
+/// `GET /api/v1/device/share/info`: returns the calling device's share ID and display alias.
+pub async fn share_info(
+    user: User,
+    CallerDevice(caller): CallerDevice,
+    State(devices): State<Devices>,
+) -> Result<api::Ok<ShareInfoResponse>, ApiError> {
+    let device_id = caller.ok_or(ApiError::UNKNOWN_DEVICE)?;
+    let device = devices
+        .get_for_caller(&device_id, &user.id)?
+        .ok_or(ApiError::UNKNOWN_DEVICE)?;
+    let alias = if device.name.is_empty() {
+        device.id.clone()
+    } else {
+        device.name
+    };
+    Ok(api::Ok(ShareInfoResponse {
+        connect_id: connect_id_for(&device.id),
+        connect_code: String::new(),
+        alias,
     }))
 }
 

@@ -1,14 +1,35 @@
 //! Client compatibility endpoints queried by official desktop apps on startup and session entry.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::HeaderMap;
+use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::api::auth::token::now;
+use crate::api::device::{CallerVersion, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
+
+const VERSION_CODE_HEADER: &str = "x-param-vc";
+
+pub struct CallerVersionCode(pub Option<u64>);
+
+impl<S: Send + Sync> FromRequestParts<S> for CallerVersionCode {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Infallible> {
+        let vc = parts
+            .headers
+            .get(VERSION_CODE_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok());
+        Ok(Self(vc))
+    }
+}
 
 fn caller_platform(headers: &HeaderMap) -> u8 {
     headers
@@ -157,4 +178,72 @@ pub struct ReleasePopupsResponse {
 /// `GET /api/v1/release/fetch/popups/info`.
 pub async fn release_popups(_user: User) -> Result<api::Ok<ReleasePopupsResponse>, ApiError> {
     Ok(api::Ok(ReleasePopupsResponse { popups: [] }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct ReleaseUpdateQuery {
+    #[serde(default)]
+    version_name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReleaseUpdateResponse {
+    url: &'static str,
+    md5: &'static str,
+    version_name: String,
+    version_code: u64,
+    change_logs: [&'static str; 0],
+    subtitle: &'static str,
+    user_external_force_upgrade: bool,
+    upgrade_uri: Map<String, Value>,
+    update_type: &'static str,
+    update_prompt_type: &'static str,
+}
+
+fn no_update_response(version_name: String, version_code: u64) -> ReleaseUpdateResponse {
+    ReleaseUpdateResponse {
+        url: "",
+        md5: "",
+        version_name,
+        version_code,
+        change_logs: [],
+        subtitle: "",
+        user_external_force_upgrade: false,
+        upgrade_uri: Map::new(),
+        update_type: "NoUpdate",
+        update_prompt_type: "",
+    }
+}
+
+/// `GET /api/v1/release/fetch/update`: reports the calling client is already up to date so
+/// self-hosted apps do not download upstream binaries.
+pub async fn release_fetch_update(
+    _user: User,
+    CallerVersion(version_name): CallerVersion,
+    CallerVersionCode(version_code): CallerVersionCode,
+) -> Result<api::Ok<ReleaseUpdateResponse>, ApiError> {
+    Ok(api::Ok(no_update_response(
+        version_name.unwrap_or_default(),
+        version_code.unwrap_or(0),
+    )))
+}
+
+/// `GET /api/v1/release/fetch/update/{device_id}`: reports a bound device is already up to date.
+pub async fn release_fetch_update_device(
+    user: User,
+    Path(device_id): Path<String>,
+    Query(query): Query<ReleaseUpdateQuery>,
+    State(devices): State<Devices>,
+) -> Result<api::Ok<ReleaseUpdateResponse>, ApiError> {
+    if devices.platform_of_owned(&device_id, &user.id)?.is_none() {
+        return Err(ApiError::UNKNOWN_DEVICE);
+    }
+    let version_name = match query.version_name.filter(|v| !v.is_empty()) {
+        Some(v) => v,
+        None => devices
+            .get(&device_id)?
+            .map(|d| d.version_name)
+            .unwrap_or_default(),
+    };
+    Ok(api::Ok(no_update_response(version_name, 0)))
 }
