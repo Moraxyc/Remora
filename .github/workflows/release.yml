@@ -30,9 +30,9 @@ jobs:
 
       - uses: wimpysworld/nothing-but-nix@v12
 
-      - uses: cachix/install-nix-action@v31
+      - uses: NixOS/nix-installer-action@v1
         with:
-          extra_nix_config: |
+          extra-conf: |
             build-dir = /nix/build
             accept-flake-config = true
 
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: cachix/install-nix-action@v31
+      - uses: NixOS/nix-installer-action@v1
 
       - run: nix profile add --inputs-from . nixpkgs#gh
 

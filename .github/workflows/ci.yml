@@ -32,9 +32,9 @@ jobs:
         with:
           witness-carnage: true
 
-      - uses: cachix/install-nix-action@v31
+      - uses: NixOS/nix-installer-action@v1
         with:
-          extra_nix_config: |
+          extra-conf: |
             build-dir = /nix/build
             accept-flake-config = true
 
