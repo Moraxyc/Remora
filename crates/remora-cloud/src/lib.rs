@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+pub mod bus;
 mod gateway;
 mod relay;
 mod room;
@@ -13,21 +14,22 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, FromRef};
-use axum::middleware::{from_fn_with_state, map_response};
-use axum::routing::{delete, get, post};
 use remora_proto::control::SignKey;
 use serde::Deserialize;
 
 pub use api::address::{PeerAddress, TrustedProxies, TrustedProxy};
 pub use api::auth::oidc::{InvalidOidc, OidcProvider, OidcRegistration};
 pub use api::auth::password::{InvalidPasswordHash, OwnerPassword};
-pub use gateway::{Ping, ReconnectGrace};
+pub use bus::{Bus, BusMessage, LocalBus};
+pub use gateway::Ping;
 pub use relay::ice::{Ice, IceError, IceUrl, TurnSecret};
-pub use settings::{IceSettings, Listen, LoginSettings, Settings, SettingsError};
+pub use room::ReconnectGrace;
+pub use settings::{CloudRole, IceSettings, Listen, LoginSettings, Roles, Settings, SettingsError};
 pub use store::database::{Database, DatabaseError};
 
 pub struct Config {
+    /// Which service roles run in this instance.
+    pub roles: Roles,
     /// Where clients reach this server.
     pub public_url: PublicUrl,
     /// With a key, every request must carry a valid `x-param-sign`; without one, signatures
@@ -122,190 +124,17 @@ impl fmt::Display for InvalidPublicUrl {
 
 impl std::error::Error for InvalidPublicUrl {}
 
-/// Everything the endpoints share.
-#[derive(Clone, FromRef)]
-struct Cloud {
-    devices: api::device::Devices,
-    lan_reports: api::wake::LanReports,
-    files: api::files::Files,
-    sessions: api::user::Sessions,
-    users: api::user::Users,
-    browsers: api::auth::browser::Browsers,
-    logins: api::auth::login::Logins,
-    tokens: Arc<api::auth::token::TokenKey>,
-    public_url: PublicUrl,
-    rooms: room::registry::Rooms,
-    ping: Ping,
-    reconnect_grace: ReconnectGrace,
-    ice: Arc<Ice>,
-    owner_password: Option<Arc<OwnerPassword>>,
-    oidc: Option<Arc<OidcProvider>>,
-    trusted_proxies: TrustedProxies,
-    limits: Arc<api::middleware::limit::Limits>,
-}
-
-impl FromRef<Cloud> for room::Tickets {
-    fn from_ref(cloud: &Cloud) -> Self {
-        Self {
-            tokens: cloud.tokens.clone(),
-            public_url: cloud.public_url.clone(),
-        }
-    }
-}
-
-impl FromRef<Cloud> for api::files::FileService {
-    fn from_ref(cloud: &Cloud) -> Self {
-        Self {
-            files: cloud.files.clone(),
-            devices: cloud.devices.clone(),
-            sessions: cloud.sessions.clone(),
-            tokens: cloud.tokens.clone(),
-            public_url: cloud.public_url.clone(),
-        }
-    }
-}
-
-impl FromRef<Cloud> for api::web::Web {
-    fn from_ref(cloud: &Cloud) -> Self {
-        Self {
-            logins: cloud.logins.clone(),
-            browsers: cloud.browsers.clone(),
-            users: cloud.users.clone(),
-            devices: cloud.devices.clone(),
-            lan_reports: cloud.lan_reports.clone(),
-            files: cloud.files.clone(),
-            sessions: cloud.sessions.clone(),
-            rooms: cloud.rooms.clone(),
-            password: cloud.owner_password.clone(),
-            oidc: cloud.oidc.clone(),
-            public_url: cloud.public_url.clone(),
-            limits: cloud.limits.clone(),
-        }
-    }
-}
-
-impl FromRef<Cloud> for gateway::Switchboard {
-    fn from_ref(cloud: &Cloud) -> Self {
-        Self {
-            rooms: cloud.rooms.clone(),
-            ping: cloud.ping,
-            reconnect_grace: cloud.reconnect_grace,
-            ice: cloud.ice.clone(),
-        }
-    }
-}
-
-impl FromRef<Cloud> for gateway::Admission {
-    fn from_ref(cloud: &Cloud) -> Self {
-        Self {
-            tokens: cloud.tokens.clone(),
-            devices: cloud.devices.clone(),
-        }
-    }
-}
-
-/// The REST API, signaling, and the web app with its API. Serve it with connection info
+/// Assembles the cloud with an isolated in-process [`LocalBus`]. Serve it with connection info
 /// (`into_make_service_with_connect_info::<PeerAddress>`), so that limits tell clients apart
 /// and login pages can show where a login came from.
 pub fn router(config: Config) -> Router {
-    let cloud = Cloud {
-        devices: config.database.clone().into(),
-        lan_reports: config.database.clone().into(),
-        files: config.database.clone().into(),
-        sessions: config.database.clone().into(),
-        users: config.database.clone().into(),
-        browsers: config.database.clone().into(),
-        logins: api::auth::login::Logins::new(config.public_url.clone(), config.auto_confirm),
-        tokens: config.database.tokens(),
-        public_url: config.public_url,
-        rooms: Default::default(),
-        ping: config.ping,
-        reconnect_grace: config.reconnect_grace,
-        ice: Arc::new(config.ice),
-        owner_password: config.owner_password.map(Arc::new),
-        oidc: config.oidc.map(Arc::new),
-        trusted_proxies: config.trusted_proxies,
-        limits: Default::default(),
-    };
-    let api_routes = Router::new()
-        .route(
-            "/api/v1/device/windows/init",
-            post(api::device::windows_init),
-        )
-        .route("/api/v1/device/list", get(api::device::list))
-        .route("/api/v1/device/wake_on_lan/info", post(api::wake::report))
-        .route("/api/v1/device/wallpaper", post(api::files::set_wallpaper))
-        .route("/api/v1/tool/fp/token", get(api::files::token))
-        .route(
-            "/api/v1/device/{device_id}/unbind",
-            post(api::device::unbind),
-        )
-        .route("/api/v1/qrcode/gen/login", post(api::auth::login::generate))
-        .route(
-            "/api/v1/qrcode/login/status",
-            post(api::auth::login::status),
-        )
-        .route("/api/v1/login/by_qrcode", post(api::auth::login::by_qrcode))
-        .route("/api/v1/user/info", get(api::user::info))
-        .route("/api/v1/user/logout", post(api::user::logout))
-        .route("/api/v1/room/create", post(room::create))
-        .route(
-            "/api/v1/room/join/by_device/{device_id}",
-            post(room::join_by_device),
-        )
-        .with_state(cloud.clone());
-    let api_routes = match config.sign_key {
-        Some(key) => api_routes.layer(from_fn_with_state(
-            Arc::new(key),
-            api::middleware::signing::require_signature,
-        )),
-        None => api_routes,
-    };
-    let web_api = Router::new()
-        .route(
-            "/api/web/session",
-            get(api::web::session)
-                .post(api::web::sign_in_with_password)
-                .delete(api::web::sign_out),
-        )
-        .route("/api/web/oidc/start", get(api::web::start_oidc))
-        .route(api::auth::oidc::CALLBACK_PATH, get(api::web::finish_oidc))
-        .route(
-            "/api/web/logins/{id}",
-            get(api::web::login).post(api::web::decide_login),
-        )
-        .route("/api/web/devices", get(api::web::devices))
-        .route("/api/web/devices/{id}", delete(api::web::unbind_device))
-        .route("/api/web/devices/{id}/wake", post(api::web::wake_device))
-        .route("/api/web/client-sessions", get(api::web::client_sessions))
-        .route(
-            "/api/web/client-sessions/{id}",
-            delete(api::web::revoke_client_session),
-        )
-        .route("/api/web/browsers", get(api::web::browsers))
-        .route("/api/web/browsers/{id}", delete(api::web::revoke_browser))
-        .layer(map_response(api::web::no_store))
-        .with_state(cloud.clone());
-    // Uploads carry an upload token instead of a signature, and files are fetched without
-    // credentials. A form around the file may add a little to its size.
-    let files = Router::new()
-        .route(
-            api::files::UPLOAD_PATH,
-            post(api::files::upload)
-                .layer(DefaultBodyLimit::max(api::files::MAX_FILE_SIZE + 64 * 1024)),
-        )
-        .route("/api/files/{id}", get(api::files::serve))
-        .with_state(cloud.clone());
-    // Signaling requests carry the room token instead of a signature, and browsers sign
-    // nothing.
-    let signaling = Router::new()
-        .route("/socket.io/", get(gateway::connect))
-        .with_state(cloud);
-    let api = api_routes;
-    api.merge(web_api)
-        .merge(files)
-        .merge(signaling)
-        .fallback(app::serve)
+    router_with_bus(config, Arc::new(LocalBus::new()))
+}
+
+/// Assembles the cloud over an explicit [`Bus`], allowing multiple role-split instances to
+/// communicate over a shared bus.
+pub fn router_with_bus(config: Config, bus: Arc<dyn Bus>) -> Router {
+    app::build(config, bus)
 }
 
 #[cfg(test)]

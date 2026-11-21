@@ -14,7 +14,7 @@ use crate::Database;
 use crate::api::device::{CallerDevice, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
-use crate::room::registry::Rooms;
+use crate::room::RoomClient;
 
 /// A device's LAN identity. Its `Debug` hides the addresses.
 #[derive(Clone, PartialEq, Eq)]
@@ -199,9 +199,9 @@ pub enum WakeRefused {
 
 /// Asks an online device of `user_id` on the same IPv4 network as their offline device
 /// `device_id` to wake it. Returns the helper's device id once the push is queued.
-pub fn wake(
+pub async fn wake(
     reports: &LanReports,
-    rooms: &Rooms,
+    rooms: &RoomClient,
     user_id: &str,
     device_id: &str,
 ) -> rusqlite::Result<Result<String, WakeRefused>> {
@@ -219,7 +219,10 @@ pub fn wake(
             continue;
         }
         same_network += 1;
-        if rooms.push_to_host(helper_id, "bmsg_push", push.clone()) {
+        if rooms
+            .push_to_host(helper_id, "bmsg_push", push.clone())
+            .await
+        {
             return Ok(Ok(helper_id.clone()));
         }
     }

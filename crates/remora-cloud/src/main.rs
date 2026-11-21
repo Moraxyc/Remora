@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use listenfd::ListenFd;
-use remora_cloud::{Listen, OwnerPassword, PeerAddress, Settings};
+use remora_cloud::{CloudRole, Listen, OwnerPassword, PeerAddress, Settings};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
 
@@ -16,6 +16,10 @@ struct Args {
     /// Settings file (TOML) to serve with.
     #[arg(long, short, value_name = "PATH", required = true)]
     config: Option<PathBuf>,
+    /// Comma-separated service roles to enable (api,gateway,room,relay). Defaults to all
+    /// roles or `roles` in the settings file.
+    #[arg(long, value_delimiter = ',', value_enum)]
+    roles: Option<Vec<CloudRole>>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -31,7 +35,9 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let result = match (args.command, args.config) {
         (Some(Command::HashPassword), _) => hash_password(),
-        (None, Some(config)) => passed_socket().and_then(|socket| serve(config, socket)),
+        (None, Some(config)) => {
+            passed_socket().and_then(|socket| serve(config, args.roles, socket))
+        }
         (None, None) => unreachable!("clap requires --config without a subcommand"),
     };
     match result {
@@ -118,8 +124,15 @@ fn bind_unix(path: &Path) -> Result<tokio::net::UnixListener, Box<dyn Error>> {
 }
 
 #[tokio::main]
-async fn serve(config: PathBuf, socket: Option<PassedSocket>) -> Result<(), Box<dyn Error>> {
-    let settings = Settings::load(&config)?;
+async fn serve(
+    config: PathBuf,
+    roles: Option<Vec<CloudRole>>,
+    socket: Option<PassedSocket>,
+) -> Result<(), Box<dyn Error>> {
+    let mut settings = Settings::load(&config)?;
+    if let Some(roles) = roles {
+        settings.roles = roles;
+    }
     let filter =
         EnvFilter::try_new(&settings.log).map_err(|error| format!("invalid log: {error}"))?;
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -127,24 +140,36 @@ async fn serve(config: PathBuf, socket: Option<PassedSocket>) -> Result<(), Box<
     let listen = settings.listen.clone();
     let in_memory = settings.database.is_none();
     let config = settings.into_config()?;
+    let has_http =
+        config.roles.contains(CloudRole::Api) || config.roles.contains(CloudRole::Gateway);
     if in_memory {
         tracing::warn!(
             "no database configured; a restart logs everyone out and forgets every device"
         );
     }
-    if config.auto_confirm {
-        tracing::warn!(
-            "every QR login is confirmed automatically; anyone who can reach this server can log in"
-        );
-    }
-    if config.owner_password.is_some() && !config.public_url.is_secure() {
-        tracing::warn!("public_url is not https; the owner's password travels unencrypted");
-    }
-    if config.sign_key.is_none() {
-        tracing::warn!("no signing key configured; request signatures are not checked");
+    if config.roles.contains(CloudRole::Api) {
+        if config.auto_confirm {
+            tracing::warn!(
+                "every QR login is confirmed automatically; anyone who can reach this server can log in"
+            );
+        }
+        if config.owner_password.is_some() && !config.public_url.is_secure() {
+            tracing::warn!("public_url is not https; the owner's password travels unencrypted");
+        }
+        if config.sign_key.is_none() {
+            tracing::warn!("no signing key configured; request signatures are not checked");
+        }
     }
 
-    let app = remora_cloud::router(config).into_make_service_with_connect_info::<PeerAddress>();
+    let router = remora_cloud::router(config);
+    let shutdown = shutdown_signal();
+    if !has_http {
+        tracing::info!("running background roles without HTTP listener");
+        let _keep = router;
+        let _ = shutdown.await;
+        return Ok(());
+    }
+    let app = router.into_make_service_with_connect_info::<PeerAddress>();
     let shutdown = shutdown_signal();
     match (socket, listen) {
         (Some(PassedSocket::Tcp(socket)), listen) => {

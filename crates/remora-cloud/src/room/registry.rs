@@ -1,42 +1,336 @@
-//! Who is in each device's room, and how signaling messages are routed between them.
+//! Authoritative room state: one Tokio actor task per room (`device_id`), coordinated by a
+//! registry that maps `room_id` (`device_id`) to its actor handle.
 //!
-//! A room holds the device's host and any viewers that joined it. A viewer's `control` opens a
-//! session with the host, named by an `ice_id` the cloud assigns. After that, `soac` and
-//! `forward_setting` pass between the two, each addressed by the receiver's `client_id`. On
-//! the way, `client_id` is rewritten to the sender's, which is what the receiver answers to.
-//!
-//! Only one viewer device at a time controls the desktop. Tool sessions (files, terminal, port
-//! mapping) and further sessions from the controlling device are not limited.
-//!
-//! Sessions outlive the host's signaling connection: their media flows between host and viewer
-//! directly, and hosts keep it up while they reconnect, which they also do to renew the room.
-//! A host connection that replaces the previous one takes over its sessions. If the host left
-//! without a replacement, its sessions wait for one until [`Rooms::expire`].
+//! All room state mutations happen strictly inside each room's actor task.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use prost::Message as _;
 use remora_proto::pb::ConnectOptions;
-use remora_proto::signal::{encode_binary_event, encode_event, placeholder};
+use remora_proto::profile::Profile;
+use remora_proto::signal::events::names;
+use remora_proto::signal::{SignalEvent, encode_binary_event, placeholder};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Instant, sleep_until};
 
 use crate::api::auth::token::{Role, Room, random};
+use crate::bus::{
+    Bus, BusMessage, EndpointEvent, EndpointFrame, RelayCommand, Reply, RoomCommand, TOPIC_RELAY,
+    TOPIC_ROOM_COMMAND, TOPIC_TO_ENDPOINT, ToEndpoint,
+};
 use crate::relay::ice::Grant;
+use crate::room::ReconnectGrace;
 
-/// Signaling connections in rooms, by device id.
-#[derive(Debug, Default, Clone)]
-pub struct Rooms(Arc<Mutex<HashMap<String, Members>>>);
+/// Capacity of each room actor's command inbox.
+const ACTOR_INBOX_CAPACITY: usize = 128;
 
-#[derive(Debug, Default)]
-struct Members {
-    host: Option<Peer>,
-    /// The host connection that left its sessions behind, while they wait for a new one.
-    departed: Option<String>,
-    viewers: HashMap<String, Peer>,
-    /// Open sessions, by `ice_id`.
-    sessions: HashMap<String, Session>,
+/// Spawns the room registry loop, subscribing to [`TOPIC_ROOM_COMMAND`] synchronously before
+/// returning so callers never race with task startup.
+pub fn spawn(bus: Arc<dyn Bus>, reconnect_grace: ReconnectGrace) -> tokio::task::JoinHandle<()> {
+    let mut sub = bus.subscribe(TOPIC_ROOM_COMMAND);
+    tokio::spawn(async move {
+        let mut registry = RoomRegistry::new(bus, reconnect_grace);
+        loop {
+            tokio::select! {
+                msg = sub.recv() => {
+                    let Some(msg) = msg else { break; };
+                    if let BusMessage::RoomCommand(cmd) = msg {
+                        registry.dispatch(cmd).await;
+                    }
+                }
+                Some((device_id, actor_id)) = registry.exited_rx.recv() => {
+                    if registry
+                        .handles
+                        .get(&device_id)
+                        .is_some_and(|handle| handle.id == actor_id)
+                    {
+                        registry.handles.remove(&device_id);
+                    }
+                }
+            }
+        }
+    })
+}
+
+struct RoomHandle {
+    id: u64,
+    tx: mpsc::Sender<ActorMessage>,
+}
+
+struct RoomRegistry {
+    bus: Arc<dyn Bus>,
+    reconnect_grace: ReconnectGrace,
+    handles: HashMap<String, RoomHandle>,
+    next_actor_id: u64,
+    exited_tx: mpsc::Sender<(String, u64)>,
+    exited_rx: mpsc::Receiver<(String, u64)>,
+}
+
+impl RoomRegistry {
+    fn new(bus: Arc<dyn Bus>, reconnect_grace: ReconnectGrace) -> Self {
+        let (exited_tx, exited_rx) = mpsc::channel(256);
+        Self {
+            bus,
+            reconnect_grace,
+            handles: HashMap::new(),
+            next_actor_id: 1,
+            exited_tx,
+            exited_rx,
+        }
+    }
+
+    fn spawn_actor(&mut self, device_id: &str) -> &RoomHandle {
+        let actor_id = self.next_actor_id;
+        self.next_actor_id += 1;
+        let (tx, rx) = mpsc::channel(ACTOR_INBOX_CAPACITY);
+        let actor = RoomActor {
+            actor_id,
+            device_id: device_id.to_owned(),
+            bus: Arc::clone(&self.bus),
+            reconnect_grace: self.reconnect_grace,
+            exited_tx: self.exited_tx.clone(),
+            rx,
+            host: None,
+            departed: None,
+            grace_deadline: None,
+            viewers: HashMap::new(),
+            sessions: HashMap::new(),
+        };
+        tokio::spawn(actor.run());
+        self.handles
+            .insert(device_id.to_owned(), RoomHandle { id: actor_id, tx });
+        self.handles.get(device_id).expect("just inserted")
+    }
+
+    async fn send_or_spawn(&mut self, device_id: &str, msg: ActorMessage) {
+        if let Some(handle) = self.handles.get(device_id) {
+            match handle.tx.send(msg).await {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(unsent)) => {
+                    self.handles.remove(device_id);
+                    let fresh = self.spawn_actor(device_id);
+                    let _ = fresh.tx.send(unsent).await;
+                    return;
+                }
+            }
+        }
+        let fresh = self.spawn_actor(device_id);
+        let _ = fresh.tx.send(msg).await;
+    }
+
+    /// Sends `msg` to an existing room actor; returns `Some(msg)` if no live actor exists.
+    async fn send_if_exists(&mut self, device_id: &str, msg: ActorMessage) -> Option<ActorMessage> {
+        let Some(handle) = self.handles.get(device_id) else {
+            return Some(msg);
+        };
+        match handle.tx.send(msg).await {
+            Ok(()) => None,
+            Err(mpsc::error::SendError(unsent)) => {
+                self.handles.remove(device_id);
+                Some(unsent)
+            }
+        }
+    }
+
+    async fn dispatch(&mut self, cmd: RoomCommand) {
+        match cmd {
+            RoomCommand::Join {
+                room,
+                client_id,
+                profile,
+                reply,
+            } => {
+                let device_id = room.device_id.clone();
+                self.send_or_spawn(
+                    &device_id,
+                    ActorMessage::Join {
+                        room,
+                        client_id,
+                        profile,
+                        reply,
+                    },
+                )
+                .await;
+            }
+            RoomCommand::Leave { room, client_id } => {
+                let device_id = room.device_id.clone();
+                let _ = self
+                    .send_if_exists(&device_id, ActorMessage::Leave { room, client_id })
+                    .await;
+            }
+            RoomCommand::EndpointEvent {
+                room,
+                client_id,
+                ack_id,
+                event,
+            } => {
+                let device_id = room.device_id.clone();
+                if let Some(ActorMessage::EndpointEvent {
+                    client_id,
+                    ack_id,
+                    event,
+                    ..
+                }) = self
+                    .send_if_exists(
+                        &device_id,
+                        ActorMessage::EndpointEvent {
+                            room,
+                            client_id,
+                            ack_id,
+                            event,
+                        },
+                    )
+                    .await
+                    && matches!(*event, SignalEvent::Control(_))
+                    && let Some(ack_id) = ack_id
+                {
+                    let _ = self
+                        .bus
+                        .publish(
+                            TOPIC_TO_ENDPOINT,
+                            BusMessage::ToEndpoint(ToEndpoint {
+                                device_id,
+                                event: EndpointEvent::Ack {
+                                    client_id,
+                                    ack_id,
+                                    args: vec![
+                                        json!("failure"),
+                                        json!({ "reason": Refused::HostOffline.reason() }),
+                                    ],
+                                },
+                            }),
+                        )
+                        .await;
+                }
+            }
+            RoomCommand::KickHost { device_id, reply } => {
+                if let Some(ActorMessage::KickHost { reply }) = self
+                    .send_if_exists(&device_id, ActorMessage::KickHost { reply })
+                    .await
+                {
+                    reply.send(());
+                }
+            }
+            RoomCommand::PushToHost {
+                device_id,
+                name,
+                body,
+                reply,
+            } => {
+                if let Some(ActorMessage::PushToHost { reply, .. }) = self
+                    .send_if_exists(&device_id, ActorMessage::PushToHost { name, body, reply })
+                    .await
+                {
+                    reply.send(false);
+                }
+            }
+            RoomCommand::IsOnline { device_id, reply } => {
+                if let Some(ActorMessage::IsOnline { reply }) = self
+                    .send_if_exists(&device_id, ActorMessage::IsOnline { reply })
+                    .await
+                {
+                    reply.send(false);
+                }
+            }
+            RoomCommand::OnlineDevices { device_ids, reply } => {
+                let mut receivers = Vec::new();
+                for device_id in device_ids {
+                    if self.handles.contains_key(&device_id) {
+                        let (item_reply, rx) = oneshot::channel();
+                        if self
+                            .send_if_exists(
+                                &device_id,
+                                ActorMessage::CheckOnline { reply: item_reply },
+                            )
+                            .await
+                            .is_none()
+                        {
+                            receivers.push((device_id, rx));
+                        }
+                    }
+                }
+                if receivers.is_empty() {
+                    reply.send(HashSet::new());
+                    return;
+                }
+                tokio::spawn(async move {
+                    let mut online = HashSet::new();
+                    for (device_id, rx) in receivers {
+                        if rx.await == Ok(true) {
+                            online.insert(device_id);
+                        }
+                    }
+                    reply.send(online);
+                });
+            }
+            RoomCommand::ControlledElsewhere {
+                device_id,
+                from_device,
+                reply,
+            } => {
+                if let Some(ActorMessage::ControlledElsewhere { reply, .. }) = self
+                    .send_if_exists(
+                        &device_id,
+                        ActorMessage::ControlledElsewhere { from_device, reply },
+                    )
+                    .await
+                {
+                    reply.send(false);
+                }
+            }
+        }
+    }
+}
+
+enum ActorMessage {
+    Join {
+        room: Room,
+        client_id: String,
+        profile: Option<&'static Profile>,
+        reply: Reply<()>,
+    },
+    Leave {
+        room: Room,
+        client_id: String,
+    },
+    EndpointEvent {
+        room: Room,
+        client_id: String,
+        ack_id: Option<u64>,
+        event: Box<SignalEvent>,
+    },
+    KickHost {
+        reply: Reply<()>,
+    },
+    PushToHost {
+        name: String,
+        body: Value,
+        reply: Reply<bool>,
+    },
+    IsOnline {
+        reply: Reply<bool>,
+    },
+    CheckOnline {
+        reply: oneshot::Sender<bool>,
+    },
+    ControlledElsewhere {
+        from_device: Option<String>,
+        reply: Reply<bool>,
+    },
+}
+
+#[derive(Debug)]
+struct PeerInfo {
+    id: String,
+    #[allow(
+        dead_code,
+        reason = "retained for capability-aware session negotiation"
+    )]
+    profile: Option<&'static Profile>,
 }
 
 #[derive(Debug)]
@@ -56,47 +350,6 @@ impl Session {
     }
 }
 
-/// One signaling connection.
-#[derive(Debug, Clone)]
-pub struct Peer {
-    /// Its `client_id`, unique per connection.
-    pub id: String,
-    pub outbox: mpsc::Sender<Outbound>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Outbound {
-    Frames(Vec<Frame>),
-    /// The connection lost the room: another took over the device, or the device was unbound.
-    Kicked,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Frame {
-    Text(String),
-    Binary(Vec<u8>),
-}
-
-impl Peer {
-    /// Queues frames for the connection. A connection that stopped draining its queue is
-    /// timing out anyway, so frames for it are dropped rather than waited for.
-    fn send(&self, frames: Vec<Frame>) -> bool {
-        self.outbox.try_send(Outbound::Frames(frames)).is_ok()
-    }
-
-    fn event(&self, name: &str, body: Value) -> bool {
-        self.send(vec![Frame::Text(encode_event(name, &[body], None))])
-    }
-}
-
-/// A host connection that left sessions behind; see [`Rooms::expire`].
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "the sessions left behind wait until expired"]
-pub struct Departure {
-    device_id: String,
-    host_id: String,
-}
-
 /// Why a `control` was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
@@ -105,163 +358,342 @@ pub enum Refused {
     ControlledElsewhere,
 }
 
-impl Rooms {
-    pub fn join(&self, room: &Room, peer: Peer) {
-        let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let members = rooms.entry(room.device_id.clone()).or_default();
+impl Refused {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::HostOffline => "host offline",
+            Self::ControlledElsewhere => "controlled from another device",
+        }
+    }
+}
+
+struct RoomActor {
+    actor_id: u64,
+    device_id: String,
+    bus: Arc<dyn Bus>,
+    reconnect_grace: ReconnectGrace,
+    exited_tx: mpsc::Sender<(String, u64)>,
+    rx: mpsc::Receiver<ActorMessage>,
+    host: Option<PeerInfo>,
+    /// The host connection that left its sessions behind, while they wait for a new one.
+    departed: Option<String>,
+    grace_deadline: Option<Instant>,
+    viewers: HashMap<String, PeerInfo>,
+    /// Open sessions, by `ice_id`.
+    sessions: HashMap<String, Session>,
+}
+
+impl RoomActor {
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                msg = self.rx.recv() => {
+                    let Some(msg) = msg else { break; };
+                    self.handle(msg).await;
+                    if self.is_empty() {
+                        break;
+                    }
+                }
+                () = sleep_until_opt(self.grace_deadline) => {
+                    self.expire_departure().await;
+                    if self.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = self.exited_tx.send((self.device_id, self.actor_id)).await;
+    }
+
+    fn is_empty(&self) -> bool {
+        // Sessions belong to viewers, so a room without viewers has none to keep.
+        self.host.is_none() && self.viewers.is_empty()
+    }
+
+    async fn handle(&mut self, msg: ActorMessage) {
+        match msg {
+            ActorMessage::Join {
+                room,
+                client_id,
+                profile,
+                reply,
+            } => {
+                self.join(&room, client_id, profile).await;
+                reply.send(());
+            }
+            ActorMessage::Leave { room, client_id } => {
+                self.leave(&room, &client_id).await;
+            }
+            ActorMessage::EndpointEvent {
+                room,
+                client_id,
+                ack_id,
+                event,
+            } => {
+                self.handle_endpoint_event(&room, client_id, ack_id, *event)
+                    .await;
+            }
+            ActorMessage::KickHost { reply } => {
+                self.kick_host().await;
+                reply.send(());
+            }
+            ActorMessage::PushToHost { name, body, reply } => {
+                let sent = if let Some(host) = &self.host {
+                    let host_id = host.id.clone();
+                    self.send_event(&host_id, &name, body).await;
+                    true
+                } else {
+                    false
+                };
+                reply.send(sent);
+            }
+            ActorMessage::IsOnline { reply } => {
+                reply.send(self.host.is_some());
+            }
+            ActorMessage::CheckOnline { reply } => {
+                let _ = reply.send(self.host.is_some());
+            }
+            ActorMessage::ControlledElsewhere { from_device, reply } => {
+                let held = self
+                    .sessions
+                    .values()
+                    .any(|session| session.holds_desktop_against(from_device.as_deref()));
+                reply.send(held);
+            }
+        }
+    }
+
+    async fn join(&mut self, room: &Room, client_id: String, profile: Option<&'static Profile>) {
+        let peer = PeerInfo {
+            id: client_id.clone(),
+            profile,
+        };
         match &room.role {
             Role::Host => {
-                if let Some(previous) = members.host.replace(peer) {
-                    // A full outbox means that connection is stuck; it times out by itself.
-                    let _ = previous.outbox.try_send(Outbound::Kicked);
+                if let Some(previous) = self.host.replace(peer) {
+                    self.send_kick(&previous.id).await;
                 }
-                members.departed = None;
-                if !members.sessions.is_empty() {
+                self.departed = None;
+                self.grace_deadline = None;
+                if !self.sessions.is_empty() {
                     tracing::info!(
-                        device_id = %room.device_id,
-                        sessions = members.sessions.len(),
+                        device_id = %self.device_id,
+                        sessions = self.sessions.len(),
                         "host reconnected to its sessions"
                     );
                 }
             }
             Role::Viewer { .. } => {
-                members.viewers.insert(peer.id.clone(), peer);
+                self.viewers.insert(client_id, peer);
             }
         }
     }
 
-    /// Removes a connection. A viewer's sessions end, and the host is told. A host's sessions
-    /// are left behind for the next host connection, unless they expire first.
-    pub fn leave(&self, room: &Room, id: &str) -> Option<Departure> {
-        let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let members = rooms.get_mut(&room.device_id)?;
-        let mut departure = None;
+    async fn leave(&mut self, room: &Room, id: &str) {
         match room.role {
-            Role::Host if members.host.as_ref().is_some_and(|host| host.id == id) => {
-                members.host = None;
-                if !members.sessions.is_empty() {
-                    members.departed = Some(id.to_owned());
-                    departure = Some(Departure {
-                        device_id: room.device_id.clone(),
-                        host_id: id.to_owned(),
-                    });
+            Role::Host if self.host.as_ref().is_some_and(|host| host.id == id) => {
+                self.host = None;
+                if !self.sessions.is_empty() {
+                    self.departed = Some(id.to_owned());
+                    self.grace_deadline = Some(Instant::now() + self.reconnect_grace.0);
                 }
             }
             Role::Host => {}
             Role::Viewer { .. } => {
-                members.viewers.remove(id);
-                let host = members.host.as_ref();
-                members.sessions.retain(|ice_id, session| {
+                self.viewers.remove(id);
+                let host_id = self.host.as_ref().map(|h| h.id.clone());
+                let mut released = Vec::new();
+                self.sessions.retain(|ice_id, session| {
                     if session.viewer != id {
                         return true;
                     }
-                    if let Some(host) = host {
-                        host.event("released", json!({ "ice_id": ice_id, "client_id": id }));
-                    }
+                    released.push(ice_id.clone());
                     false
                 });
+                if let Some(host_id) = host_id {
+                    for ice_id in released {
+                        self.send_event(
+                            &host_id,
+                            names::RELEASED,
+                            json!({ "ice_id": ice_id, "client_id": id }),
+                        )
+                        .await;
+                    }
+                }
             }
         }
-        // Sessions belong to viewers, so a room without viewers has none to keep.
-        if members.host.is_none() && members.viewers.is_empty() {
-            rooms.remove(&room.device_id);
-        }
-        departure
     }
 
-    /// Ends the sessions a host connection left behind, unless another took them over since.
-    /// Each viewer is told the host left.
-    pub fn expire(&self, departure: &Departure) {
-        let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let Some(members) = rooms.get_mut(&departure.device_id) else {
+    async fn expire_departure(&mut self) {
+        self.grace_deadline = None;
+        let Some(host_id) = self.departed.take() else {
             return;
         };
-        if members.departed.as_ref() != Some(&departure.host_id) {
-            return;
-        }
-        members.departed = None;
         tracing::info!(
-            device_id = %departure.device_id,
-            sessions = members.sessions.len(),
+            device_id = %self.device_id,
+            sessions = self.sessions.len(),
             "host did not reconnect to its sessions"
         );
-        members.end_sessions_with_host(&departure.host_id);
+        self.end_sessions_with_host(&host_id).await;
     }
 
-    /// Whether a device other than `from_device` controls the desktop of `device_id`.
-    pub fn controlled_elsewhere(&self, device_id: &str, from_device: Option<&str>) -> bool {
-        let rooms = self.0.lock().expect("rooms lock poisoned");
-        rooms.get(device_id).is_some_and(|members| {
-            members
-                .sessions
-                .values()
-                .any(|session| session.holds_desktop_against(from_device))
-        })
-    }
-
-    /// Drops the device's host from signaling and ends its sessions; its connection closes
-    /// and leaves the room.
-    pub fn kick_host(&self, device_id: &str) {
-        let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let Some(members) = rooms.get_mut(device_id) else {
-            return;
-        };
-        let host_id = match &members.host {
+    async fn kick_host(&mut self) {
+        self.grace_deadline = None;
+        let host_id = match &self.host {
             Some(host) => {
-                // A full outbox means that connection is stuck; it times out by itself.
-                let _ = host.outbox.try_send(Outbound::Kicked);
-                host.id.clone()
+                let id = host.id.clone();
+                self.send_kick(&id).await;
+                id
             }
-            None => match members.departed.take() {
+            None => match self.departed.take() {
                 Some(departed) => departed,
                 None => return,
             },
         };
-        members.end_sessions_with_host(&host_id);
+        self.end_sessions_with_host(&host_id).await;
     }
 
-    /// Sends an event to the device's host; `false` if it is not on signaling or not draining
-    /// its queue.
-    pub fn push_to_host(&self, device_id: &str, name: &str, body: Value) -> bool {
-        let rooms = self.0.lock().expect("rooms lock poisoned");
-        rooms
-            .get(device_id)
-            .and_then(|members| members.host.as_ref())
-            .is_some_and(|host| host.event(name, body))
-    }
-
-    pub fn is_online(&self, device_id: &str) -> bool {
-        let rooms = self.0.lock().expect("rooms lock poisoned");
-        rooms
-            .get(device_id)
-            .is_some_and(|members| members.host.is_some())
-    }
-
-    /// The viewer `viewer_id`, connected with `room`, asks to control the host: forwards
-    /// `be-controlled` with the viewer's `ConnectOptions`, and returns what the viewer's
-    /// `control` is acknowledged with.
-    pub fn control(
-        &self,
+    async fn handle_endpoint_event(
+        &mut self,
         room: &Room,
+        client_id: String,
+        ack_id: Option<u64>,
+        event: SignalEvent,
+    ) {
+        match (&room.role, event) {
+            (Role::Host, SignalEvent::RoomInfo(_)) => {
+                if let Some(ack_id) = ack_id {
+                    self.send_ack(&client_id, ack_id, vec![json!({})]).await;
+                }
+                let ready = json!({
+                    "data": { "status": "online", "publisher_availability_status": "ready" }
+                });
+                self.send_event(&client_id, names::BMSG_PUSH, ready).await;
+            }
+            (_, SignalEvent::RefreshReconnectKey(_)) => {
+                if let Some(ack_id) = ack_id {
+                    let key = hex::encode(random::<16>());
+                    self.send_ack(
+                        &client_id,
+                        ack_id,
+                        vec![json!("success"), json!({ "reconnect_key": key })],
+                    )
+                    .await;
+                }
+            }
+            (
+                Role::Viewer {
+                    from_device,
+                    take_over,
+                },
+                SignalEvent::Control(ctrl),
+            ) => {
+                let result = self
+                    .control(
+                        &room.sub,
+                        &client_id,
+                        from_device.as_deref(),
+                        *take_over,
+                        ctrl.app_control_id.as_deref(),
+                        ctrl.streamer_data.as_ref(),
+                        &ctrl.connect_options,
+                    )
+                    .await;
+                let reply = match result {
+                    Ok(granted) => {
+                        tracing::info!(device_id = %self.device_id, "control granted");
+                        vec![json!("success"), granted]
+                    }
+                    Err(refused) => {
+                        let reason = refused.reason();
+                        tracing::info!(device_id = %self.device_id, reason, "control refused");
+                        vec![json!("failure"), json!({ "reason": reason })]
+                    }
+                };
+                if let Some(ack_id) = ack_id {
+                    self.send_ack(&client_id, ack_id, reply).await;
+                }
+            }
+            (_, SignalEvent::Soac(mut soac)) => {
+                let target_id = match &room.role {
+                    Role::Host => soac
+                        .client_id
+                        .as_deref()
+                        .and_then(|id| self.viewers.get(id))
+                        .map(|p| p.id.clone()),
+                    Role::Viewer { .. } => {
+                        let ice_id = soac.ice_id();
+                        let own = ice_id.is_some_and(|ice_id| {
+                            self.sessions
+                                .get(ice_id)
+                                .is_some_and(|session| session.viewer == client_id)
+                        });
+                        self.host.as_ref().filter(|_| own).map(|p| p.id.clone())
+                    }
+                };
+                let Some(target_id) = target_id else {
+                    tracing::debug!(event = names::SOAC, "dropped an event outside any session");
+                    return;
+                };
+                soac.client_id = Some(client_id);
+                let body = serde_json::to_value(soac).expect("soac serializes");
+                self.send_event(&target_id, names::SOAC, body).await;
+            }
+            (_, SignalEvent::ForwardSetting(mut fs)) => {
+                let target_id = match &room.role {
+                    Role::Host => fs
+                        .client_id
+                        .as_deref()
+                        .and_then(|id| self.viewers.get(id))
+                        .map(|p| p.id.clone()),
+                    Role::Viewer { .. } => {
+                        let ice_id = fs
+                            .data
+                            .get("ice_id")
+                            .or_else(|| fs.extra.get("ice_id"))
+                            .and_then(Value::as_str);
+                        let own = ice_id.is_some_and(|ice_id| {
+                            self.sessions
+                                .get(ice_id)
+                                .is_some_and(|session| session.viewer == client_id)
+                        });
+                        self.host.as_ref().filter(|_| own).map(|p| p.id.clone())
+                    }
+                };
+                let Some(target_id) = target_id else {
+                    tracing::debug!(
+                        event = names::FORWARD_SETTING,
+                        "dropped an event outside any session"
+                    );
+                    return;
+                };
+                fs.client_id = Some(client_id);
+                let body = serde_json::to_value(fs).expect("forward_setting serializes");
+                self.send_event(&target_id, names::FORWARD_SETTING, body)
+                    .await;
+            }
+            (_, other) => {
+                tracing::debug!(event = other.name(), "ignored event");
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn control(
+        &mut self,
+        user_id: &str,
         viewer_id: &str,
-        header: &Value,
+        from_device: Option<&str>,
+        take_over: bool,
+        app_control_id: Option<&str>,
+        streamer_data: Option<&Value>,
         connect_options: &[u8],
-        ice: &Grant,
     ) -> Result<Value, Refused> {
-        let (from_device, take_over) = match &room.role {
-            Role::Viewer {
-                from_device,
-                take_over,
-            } => (from_device.as_deref(), *take_over),
-            Role::Host => (None, false),
-        };
-        let mut rooms = self.0.lock().expect("rooms lock poisoned");
-        let members = rooms.get_mut(&room.device_id).ok_or(Refused::HostOffline)?;
-        let host = members.host.clone().ok_or(Refused::HostOffline)?;
+        let host_id = self.host.as_ref().ok_or(Refused::HostOffline)?.id.clone();
 
         let desktop = is_desktop(connect_options);
         if desktop {
-            let held: Vec<String> = members
+            let held: Vec<String> = self
                 .sessions
                 .iter()
                 .filter(|(_, session)| session.holds_desktop_against(from_device))
@@ -271,42 +703,43 @@ impl Rooms {
                 return Err(Refused::ControlledElsewhere);
             }
             for ice_id in held {
-                members.end_session(&ice_id, &host);
+                self.end_session(&ice_id, &host_id).await;
             }
         }
 
+        let ice = self.request_ice_grant(user_id).await;
         let ice_id = hex::encode(random::<16>());
-        let app_control_id = header.get("app_control_id").cloned().unwrap_or_default();
+        let app_control_id_value = app_control_id.map_or(Value::Null, |id| json!(id));
         let mut be_controlled = json!({
             "ice_id": ice_id,
             "client_id": viewer_id,
-            "app_control_id": app_control_id,
+            "app_control_id": app_control_id_value,
             "iceServers": ice.servers,
             "force_relay": ice.force_relay,
             "app_data": placeholder(0),
         });
-        if let Some(streamer_data) = header.get("streamer_data") {
+        if let Some(streamer_data) = streamer_data {
             be_controlled["streamer_data"] = streamer_data.clone();
         }
         if let Some(platform) = controller_platform(connect_options) {
             be_controlled["controller_platform"] = platform.into();
         }
         let frames = vec![
-            Frame::Text(encode_binary_event(
-                "be-controlled",
+            EndpointFrame::Text(encode_binary_event(
+                names::BE_CONTROLLED,
                 &[be_controlled],
                 1,
                 None,
             )),
-            Frame::Binary(connect_options.to_vec()),
+            EndpointFrame::Binary(connect_options.to_vec()),
         ];
-        if !host.send(frames) {
+        if self.send_frames(&host_id, frames).await == 0 {
             return Err(Refused::HostOffline);
         }
         let ack = json!({
             "ice_id": ice_id,
-            "client_id": host.id,
-            "app_control_id": app_control_id,
+            "client_id": host_id,
+            "app_control_id": app_control_id_value,
             "iceServers": ice.servers,
             "force_relay": ice.force_relay,
         });
@@ -315,63 +748,130 @@ impl Rooms {
             from_device: from_device.map(str::to_owned),
             desktop,
         };
-        members.sessions.insert(ice_id, session);
+        self.sessions.insert(ice_id, session);
         Ok(ack)
     }
 
-    /// Passes an event from connection `from` to the other side of its session. Events that do
-    /// not belong to one of the sender's sessions are dropped; returns whether it was passed.
-    pub fn relay(&self, room: &Room, from: &str, name: &str, mut body: Value) -> bool {
-        let rooms = self.0.lock().expect("rooms lock poisoned");
-        let Some(members) = rooms.get(&room.device_id) else {
-            return false;
-        };
-        let target = match &room.role {
-            Role::Host => body
-                .get("client_id")
-                .and_then(Value::as_str)
-                .and_then(|id| members.viewers.get(id)),
-            Role::Viewer { .. } => {
-                let ice_id = body.pointer("/data/ice_id").and_then(Value::as_str);
-                let own = ice_id.is_some_and(|ice_id| {
-                    members
-                        .sessions
-                        .get(ice_id)
-                        .is_some_and(|session| session.viewer == from)
-                });
-                members.host.as_ref().filter(|_| own)
-            }
-        };
-        let Some(target) = target else {
-            return false;
-        };
-        body["client_id"] = from.into();
-        target.event(name, body)
+    async fn request_ice_grant(&self, user_id: &str) -> Grant {
+        let (reply, rx) = Reply::channel();
+        let receivers = self
+            .bus
+            .publish(
+                TOPIC_RELAY,
+                BusMessage::RelayCommand(RelayCommand::Grant {
+                    user_id: user_id.to_owned(),
+                    reply,
+                }),
+            )
+            .await;
+        if receivers == 0 {
+            return Grant::default();
+        }
+        rx.await.unwrap_or_default()
     }
-}
 
-impl Members {
     /// The host is gone for good: every viewer in a session with it is told the host left.
-    fn end_sessions_with_host(&mut self, host_id: &str) {
-        for (ice_id, session) in self.sessions.drain() {
-            if let Some(viewer) = self.viewers.get(&session.viewer) {
-                viewer.event("left", json!({ "ice_id": ice_id, "client_id": host_id }));
+    async fn end_sessions_with_host(&mut self, host_id: &str) {
+        let sessions: Vec<(String, Session)> = self.sessions.drain().collect();
+        for (ice_id, session) in sessions {
+            if self.viewers.contains_key(&session.viewer) {
+                self.send_event(
+                    &session.viewer,
+                    names::LEFT,
+                    json!({ "ice_id": ice_id, "client_id": host_id }),
+                )
+                .await;
             }
         }
     }
 
     /// Ends one session as if each side had left the other.
-    fn end_session(&mut self, ice_id: &str, host: &Peer) {
+    async fn end_session(&mut self, ice_id: &str, host_id: &str) {
         let Some(session) = self.sessions.remove(ice_id) else {
             return;
         };
-        host.event(
-            "released",
+        self.send_event(
+            host_id,
+            names::RELEASED,
             json!({ "ice_id": ice_id, "client_id": session.viewer }),
-        );
-        if let Some(viewer) = self.viewers.get(&session.viewer) {
-            viewer.event("left", json!({ "ice_id": ice_id, "client_id": host.id }));
+        )
+        .await;
+        if self.viewers.contains_key(&session.viewer) {
+            self.send_event(
+                &session.viewer,
+                names::LEFT,
+                json!({ "ice_id": ice_id, "client_id": host_id }),
+            )
+            .await;
         }
+    }
+
+    async fn send_frames(&self, client_id: &str, frames: Vec<EndpointFrame>) -> usize {
+        self.bus
+            .publish(
+                TOPIC_TO_ENDPOINT,
+                BusMessage::ToEndpoint(ToEndpoint {
+                    device_id: self.device_id.clone(),
+                    event: EndpointEvent::Frames {
+                        client_id: client_id.to_owned(),
+                        frames,
+                    },
+                }),
+            )
+            .await
+    }
+
+    async fn send_event(&self, client_id: &str, name: &str, body: Value) -> usize {
+        self.bus
+            .publish(
+                TOPIC_TO_ENDPOINT,
+                BusMessage::ToEndpoint(ToEndpoint {
+                    device_id: self.device_id.clone(),
+                    event: EndpointEvent::Event {
+                        client_id: client_id.to_owned(),
+                        name: name.to_owned(),
+                        body,
+                    },
+                }),
+            )
+            .await
+    }
+
+    async fn send_ack(&self, client_id: &str, ack_id: u64, args: Vec<Value>) -> usize {
+        self.bus
+            .publish(
+                TOPIC_TO_ENDPOINT,
+                BusMessage::ToEndpoint(ToEndpoint {
+                    device_id: self.device_id.clone(),
+                    event: EndpointEvent::Ack {
+                        client_id: client_id.to_owned(),
+                        ack_id,
+                        args,
+                    },
+                }),
+            )
+            .await
+    }
+
+    async fn send_kick(&self, client_id: &str) -> usize {
+        self.bus
+            .publish(
+                TOPIC_TO_ENDPOINT,
+                BusMessage::ToEndpoint(ToEndpoint {
+                    device_id: self.device_id.clone(),
+                    event: EndpointEvent::Kick {
+                        client_id: client_id.to_owned(),
+                    },
+                }),
+            )
+            .await
+    }
+}
+
+fn sleep_until_opt(deadline: Option<Instant>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    match deadline {
+        Some(instant) => Box::pin(sleep_until(instant)),
+        None => Box::pin(std::future::pending()),
     }
 }
 
@@ -399,73 +899,226 @@ fn controller_platform(connect_options: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use remora_proto::signal::{Decoder, Packet};
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use remora_proto::signal::{ControlAck, Decoder, Packet, encode_event};
 
     use super::*;
+    use crate::bus::{LocalBus, Subscription};
+    use crate::room::RoomClient;
+
+    struct Harness {
+        bus: Arc<LocalBus>,
+        client: RoomClient,
+        outbound: Subscription,
+        buffered: VecDeque<ToEndpoint>,
+        next_ack: u64,
+    }
+
+    impl Harness {
+        fn start(grace: Duration) -> Self {
+            let bus = Arc::new(LocalBus::new());
+            let outbound = bus.subscribe(TOPIC_TO_ENDPOINT);
+            let registry_bus: Arc<dyn Bus> = bus.clone();
+            spawn(registry_bus, ReconnectGrace(grace));
+            let client = RoomClient::new(bus.clone());
+            Self {
+                bus,
+                client,
+                outbound,
+                buffered: VecDeque::new(),
+                next_ack: 1,
+            }
+        }
+
+        async fn join(&self, role: Role, id: &str) -> Member {
+            let room = Room {
+                sub: "1".into(),
+                device_id: "d".into(),
+                role,
+            };
+            let (reply, rx) = Reply::channel();
+            self.bus
+                .publish(
+                    TOPIC_ROOM_COMMAND,
+                    BusMessage::RoomCommand(RoomCommand::Join {
+                        room: room.clone(),
+                        client_id: id.to_owned(),
+                        profile: None,
+                        reply,
+                    }),
+                )
+                .await;
+            rx.await.unwrap();
+            Member {
+                room,
+                id: id.to_owned(),
+            }
+        }
+
+        async fn leave(&self, member: &Member) {
+            self.bus
+                .publish(
+                    TOPIC_ROOM_COMMAND,
+                    BusMessage::RoomCommand(RoomCommand::Leave {
+                        room: member.room.clone(),
+                        client_id: member.id.clone(),
+                    }),
+                )
+                .await;
+        }
+
+        async fn send_control(
+            &mut self,
+            viewer: &Member,
+            header: Value,
+            connect_options: &[u8],
+        ) -> ControlAck {
+            let ack_id = self.next_ack;
+            self.next_ack += 1;
+            let mut decoder = Decoder::new();
+            let raw_header = encode_binary_event(names::CONTROL, &[header], 1, Some(ack_id));
+            assert!(decoder.text(&raw_header).unwrap().is_none());
+            let Some(Packet::Event(ev)) = decoder.binary(connect_options).unwrap() else {
+                panic!("expected event");
+            };
+            let signal = SignalEvent::from_event(&ev);
+            self.bus
+                .publish(
+                    TOPIC_ROOM_COMMAND,
+                    BusMessage::RoomCommand(RoomCommand::EndpointEvent {
+                        room: viewer.room.clone(),
+                        client_id: viewer.id.clone(),
+                        ack_id: Some(ack_id),
+                        event: Box::new(signal),
+                    }),
+                )
+                .await;
+
+            // Collect outbound messages until the ack for `viewer` arrives, buffering others.
+            let mut deferred = VecDeque::new();
+            loop {
+                let to = if let Some(item) = self.buffered.pop_front() {
+                    item
+                } else {
+                    let Some(BusMessage::ToEndpoint(to)) = self.outbound.recv().await else {
+                        panic!("expected ToEndpoint");
+                    };
+                    to
+                };
+                if let EndpointEvent::Ack {
+                    client_id,
+                    ack_id: got_id,
+                    args,
+                } = &to.event
+                    && client_id == &viewer.id
+                    && *got_id == ack_id
+                {
+                    self.buffered = deferred;
+                    return ControlAck::decode(args);
+                }
+                deferred.push_back(to);
+            }
+        }
+
+        async fn relay(&self, from: &Member, name: &str, body: Value) {
+            let mut decoder = Decoder::new();
+            let Some(Packet::Event(ev)) = decoder.text(&encode_event(name, &[body], None)).unwrap()
+            else {
+                panic!("expected event");
+            };
+            let signal = SignalEvent::from_event(&ev);
+            self.bus
+                .publish(
+                    TOPIC_ROOM_COMMAND,
+                    BusMessage::RoomCommand(RoomCommand::EndpointEvent {
+                        room: from.room.clone(),
+                        client_id: from.id.clone(),
+                        ack_id: None,
+                        event: Box::new(signal),
+                    }),
+                )
+                .await;
+        }
+
+        async fn next_for(&mut self, target_id: &str) -> EndpointEvent {
+            if let Some(pos) = self.buffered.iter().position(|to| match &to.event {
+                EndpointEvent::Frames { client_id, .. }
+                | EndpointEvent::Event { client_id, .. }
+                | EndpointEvent::Ack { client_id, .. }
+                | EndpointEvent::Kick { client_id } => client_id == target_id,
+            }) {
+                return self.buffered.remove(pos).unwrap().event;
+            }
+            loop {
+                let to = tokio::time::timeout(Duration::from_secs(2), self.outbound.recv())
+                    .await
+                    .expect("timed out waiting for outbound")
+                    .expect("outbound open");
+                let BusMessage::ToEndpoint(to) = to else {
+                    continue;
+                };
+                let matches = match &to.event {
+                    EndpointEvent::Frames { client_id, .. }
+                    | EndpointEvent::Event { client_id, .. }
+                    | EndpointEvent::Ack { client_id, .. }
+                    | EndpointEvent::Kick { client_id } => client_id == target_id,
+                };
+                if matches {
+                    return to.event;
+                }
+                self.buffered.push_back(to);
+            }
+        }
+
+        async fn next_event_decoded(&mut self, target_id: &str) -> remora_proto::signal::Event {
+            match self.next_for(target_id).await {
+                EndpointEvent::Frames { frames, .. } => {
+                    let mut decoder = Decoder::new();
+                    let mut packet = None;
+                    for frame in frames {
+                        packet = match frame {
+                            EndpointFrame::Text(text) => decoder.text(&text).unwrap(),
+                            EndpointFrame::Binary(bytes) => decoder.binary(&bytes).unwrap(),
+                        };
+                    }
+                    let Some(Packet::Event(event)) = packet else {
+                        panic!("expected an event");
+                    };
+                    event
+                }
+                EndpointEvent::Event { name, body, .. } => remora_proto::signal::Event {
+                    ack_id: None,
+                    name,
+                    args: vec![body],
+                    attachments: Vec::new(),
+                },
+                other => panic!("expected event or frames, got {other:?}"),
+            }
+        }
+
+        async fn assert_idle(&mut self) {
+            tokio::task::yield_now().await;
+            assert!(
+                self.buffered.is_empty(),
+                "expected idle, buffered: {:?}",
+                self.buffered
+            );
+            let got = tokio::time::timeout(Duration::from_millis(20), self.outbound.recv()).await;
+            assert!(got.is_err(), "expected idle, got {got:?}");
+        }
+    }
 
     struct Member {
         room: Room,
         id: String,
-        inbox: mpsc::Receiver<Outbound>,
-    }
-
-    fn member(rooms: &Rooms, role: Role, id: &str) -> Member {
-        let room = Room {
-            sub: "1".into(),
-            device_id: "d".into(),
-            role,
-        };
-        let (outbox, inbox) = mpsc::channel(8);
-        rooms.join(
-            &room,
-            Peer {
-                id: id.into(),
-                outbox,
-            },
-        );
-        Member {
-            room,
-            id: id.into(),
-            inbox,
-        }
-    }
-
-    impl Member {
-        /// The next queued event, decoded, with its attachments.
-        fn event(&mut self) -> remora_proto::signal::Event {
-            let Ok(Outbound::Frames(frames)) = self.inbox.try_recv() else {
-                panic!("expected frames");
-            };
-            let mut decoder = Decoder::new();
-            let mut packet = None;
-            for frame in frames {
-                packet = match frame {
-                    Frame::Text(text) => decoder.text(&text).unwrap(),
-                    Frame::Binary(bytes) => decoder.binary(&bytes).unwrap(),
-                };
-            }
-            let Some(Packet::Event(event)) = packet else {
-                panic!("expected an event");
-            };
-            event
-        }
-
-        fn idle(&mut self) -> bool {
-            self.inbox.try_recv().is_err()
-        }
     }
 
     fn viewer_on(device: Option<&str>) -> Role {
         Role::Viewer {
             from_device: device.map(str::to_owned),
             take_over: false,
-        }
-    }
-
-    fn no_ice() -> Grant {
-        Grant {
-            servers: json!([]),
-            force_relay: false,
         }
     }
 
@@ -478,210 +1131,6 @@ mod tests {
         .encode_to_vec()
     }
 
-    #[test]
-    fn control_reaches_the_host_and_soac_flows_both_ways() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let header =
-            json!({ "app_control_id": "app", "streamer_data": "{}", "app_data": placeholder(0) });
-        let options = windows_viewer_options();
-
-        let ack = rooms
-            .control(&viewer.room, &viewer.id, &header, &options, &no_ice())
-            .unwrap();
-        let ice_id = ack["ice_id"].as_str().unwrap().to_owned();
-        assert_eq!(ack["client_id"], "host");
-        assert_eq!(ack["app_control_id"], "app");
-        assert_eq!(ack["iceServers"], json!([]));
-
-        let be_controlled = host.event();
-        assert_eq!(be_controlled.name, "be-controlled");
-        let header = &be_controlled.args[0];
-        assert_eq!(header["ice_id"], ice_id.as_str());
-        assert_eq!(header["client_id"], "viewer");
-        assert_eq!(header["app_control_id"], "app");
-        assert_eq!(header["streamer_data"], "{}");
-        assert_eq!(header["controller_platform"], 1);
-        assert_eq!(
-            be_controlled.attachment(&header["app_data"]),
-            Some(&options[..])
-        );
-
-        let offer = json!({ "client_id": "host", "data": { "type": "offer", "ice_id": ice_id } });
-        assert!(rooms.relay(&viewer.room, &viewer.id, "soac", offer));
-        let offer = host.event();
-        assert_eq!(
-            offer.args[0]["client_id"], "viewer",
-            "rewritten to the sender"
-        );
-        assert_eq!(offer.args[0]["data"]["type"], "offer");
-
-        let answer =
-            json!({ "client_id": "viewer", "data": { "type": "answer", "ice_id": ice_id } });
-        assert!(rooms.relay(&host.room, &host.id, "soac", answer));
-        let answer = viewer.event();
-        assert_eq!(answer.args[0]["client_id"], "host");
-        assert_eq!(answer.args[0]["data"]["type"], "answer");
-    }
-
-    #[test]
-    fn control_needs_the_host_online() {
-        let rooms = Rooms::default();
-        let viewer = member(&rooms, viewer_on(None), "viewer");
-        let options = windows_viewer_options();
-        let refused = rooms.control(&viewer.room, &viewer.id, &json!({}), &options, &no_ice());
-        assert_eq!(refused, Err(Refused::HostOffline));
-        let elsewhere = Room {
-            device_id: "other".into(),
-            ..viewer.room.clone()
-        };
-        assert_eq!(
-            rooms.control(&elsewhere, &viewer.id, &json!({}), &options, &no_ice()),
-            Err(Refused::HostOffline)
-        );
-    }
-
-    #[test]
-    fn relays_only_within_a_session() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let mut other = member(&rooms, viewer_on(None), "other");
-        let ack = rooms
-            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
-            .unwrap();
-        let ice_id = ack["ice_id"].clone();
-        host.event();
-
-        let soac = |ice_id: &Value| json!({ "data": { "type": "candidate", "ice_id": ice_id } });
-        assert!(!rooms.relay(&other.room, &other.id, "soac", soac(&ice_id)));
-        assert!(!rooms.relay(&viewer.room, &viewer.id, "soac", soac(&json!("unknown"))));
-        assert!(host.idle());
-
-        let to_nobody = json!({ "client_id": "nobody", "data": {} });
-        assert!(!rooms.relay(&host.room, &host.id, "soac", to_nobody));
-        assert!(viewer.idle() && other.idle());
-    }
-
-    /// Opens a session from `viewer`, and returns its `ice_id`.
-    fn open_session(rooms: &Rooms, host: &mut Member, viewer: &Member) -> Value {
-        let ice_id = rooms
-            .control(&viewer.room, &viewer.id, &json!({}), &[], &no_ice())
-            .unwrap()["ice_id"]
-            .clone();
-        assert_eq!(host.event().name, "be-controlled");
-        ice_id
-    }
-
-    #[test]
-    fn a_viewer_leaving_releases_its_sessions() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let viewer = member(&rooms, viewer_on(None), "viewer");
-        let ice_id = open_session(&rooms, &mut host, &viewer);
-
-        assert_eq!(rooms.leave(&viewer.room, &viewer.id), None);
-        let released = host.event();
-        assert_eq!(released.name, "released");
-        assert_eq!(
-            released.args[0],
-            json!({ "ice_id": ice_id, "client_id": "viewer" })
-        );
-        assert!(!rooms.controlled_elsewhere("d", None));
-    }
-
-    #[test]
-    fn a_host_that_does_not_reconnect_ends_its_sessions() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let ice_id = open_session(&rooms, &mut host, &viewer);
-
-        let departure = rooms.leave(&host.room, &host.id).unwrap();
-        assert!(!rooms.is_online("d"));
-        assert!(viewer.idle(), "the session waits for the host");
-        assert!(rooms.controlled_elsewhere("d", None));
-
-        rooms.expire(&departure);
-        let left = viewer.event();
-        assert_eq!(left.name, "left");
-        assert_eq!(
-            left.args[0],
-            json!({ "ice_id": ice_id, "client_id": "host" })
-        );
-        assert!(!rooms.controlled_elsewhere("d", None));
-    }
-
-    #[test]
-    fn a_host_without_sessions_leaves_nothing_behind() {
-        let rooms = Rooms::default();
-        let host = member(&rooms, Role::Host, "host");
-        assert_eq!(rooms.leave(&host.room, &host.id), None);
-    }
-
-    #[test]
-    fn a_reconnecting_host_takes_its_sessions_back() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let ice_id = open_session(&rooms, &mut host, &viewer);
-        let departure = rooms.leave(&host.room, &host.id).unwrap();
-
-        let mut back = member(&rooms, Role::Host, "back");
-        rooms.expire(&departure);
-        assert!(
-            viewer.idle(),
-            "expiring a departure taken over does nothing"
-        );
-
-        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
-        assert!(rooms.relay(&viewer.room, &viewer.id, "soac", candidate));
-        assert_eq!(back.event().name, "soac");
-        assert!(rooms.leave(&viewer.room, &viewer.id).is_none());
-        assert_eq!(back.event().name, "released");
-    }
-
-    #[test]
-    fn a_newer_host_kicks_the_older_one_and_takes_its_sessions() {
-        let rooms = Rooms::default();
-        let mut older = member(&rooms, Role::Host, "older");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        let ice_id = open_session(&rooms, &mut older, &viewer);
-
-        let mut newer = member(&rooms, Role::Host, "newer");
-        assert_eq!(older.inbox.try_recv(), Ok(Outbound::Kicked));
-        assert!(viewer.idle());
-
-        assert_eq!(rooms.leave(&older.room, &older.id), None);
-        assert!(
-            rooms.is_online("d"),
-            "the older host leaving keeps the newer one"
-        );
-        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
-        assert!(rooms.relay(&viewer.room, &viewer.id, "soac", candidate));
-        assert_eq!(newer.event().name, "soac");
-    }
-
-    #[test]
-    fn kicking_the_host_ends_its_sessions_at_once() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut viewer = member(&rooms, viewer_on(None), "viewer");
-        open_session(&rooms, &mut host, &viewer);
-
-        rooms.kick_host("d");
-        assert_eq!(host.inbox.try_recv(), Ok(Outbound::Kicked));
-        assert_eq!(viewer.event().name, "left");
-        assert_eq!(rooms.leave(&host.room, &host.id), None);
-
-        let mut host = member(&rooms, Role::Host, "host");
-        open_session(&rooms, &mut host, &viewer);
-        let _departure = rooms.leave(&host.room, &host.id).unwrap();
-        rooms.kick_host("d");
-        assert_eq!(viewer.event().name, "left", "also while the host is away");
-    }
-
     fn options(capture_type: i32) -> Vec<u8> {
         ConnectOptions {
             capture_type,
@@ -690,75 +1139,286 @@ mod tests {
         .encode_to_vec()
     }
 
-    #[test]
-    fn one_device_at_a_time_controls_the_desktop() {
-        const DESKTOP: i32 = 1;
-        const TERMINAL: i32 = 8;
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let phone = member(&rooms, viewer_on(Some("phone")), "phone");
-        let laptop = member(&rooms, viewer_on(Some("laptop")), "laptop");
-        let control = |viewer: &Member, capture_type| {
-            rooms.control(
-                &viewer.room,
-                &viewer.id,
-                &json!({}),
-                &options(capture_type),
-                &no_ice(),
-            )
+    #[tokio::test]
+    async fn control_reaches_the_host_and_soac_flows_both_ways() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let host = h.join(Role::Host, "host").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let header =
+            json!({ "app_control_id": "app", "streamer_data": "{}", "app_data": placeholder(0) });
+        let options = windows_viewer_options();
+
+        let ack = h.send_control(&viewer, header, &options).await;
+        let ControlAck::Success {
+            ice_id,
+            client_id,
+            app_control_id,
+            ice_servers,
+            ..
+        } = ack
+        else {
+            panic!("expected control success, got {ack:?}");
         };
+        assert_eq!(client_id, "host");
+        assert_eq!(app_control_id.as_deref(), Some("app"));
+        assert_eq!(ice_servers, json!([]));
 
-        control(&phone, DESKTOP).unwrap();
-        host.event();
-        assert!(rooms.controlled_elsewhere("d", Some("laptop")));
-        assert!(rooms.controlled_elsewhere("d", None));
-        assert!(!rooms.controlled_elsewhere("d", Some("phone")));
+        let be_controlled = h.next_event_decoded("host").await;
+        assert_eq!(be_controlled.name, "be-controlled");
+        let hdr = &be_controlled.args[0];
+        assert_eq!(hdr["ice_id"], ice_id.as_str());
+        assert_eq!(hdr["client_id"], "viewer");
+        assert_eq!(hdr["app_control_id"], "app");
+        assert_eq!(hdr["streamer_data"], "{}");
+        assert_eq!(hdr["controller_platform"], 1);
+        assert_eq!(
+            be_controlled.attachment(&hdr["app_data"]),
+            Some(&options[..])
+        );
 
-        assert_eq!(control(&laptop, DESKTOP), Err(Refused::ControlledElsewhere));
-        assert!(host.idle());
-        control(&laptop, TERMINAL).unwrap();
-        host.event();
-        control(&phone, DESKTOP).unwrap();
-        host.event();
+        let offer = json!({ "client_id": "host", "data": { "type": "offer", "ice_id": ice_id } });
+        h.relay(&viewer, "soac", offer).await;
+        let offer = h.next_event_decoded("host").await;
+        assert_eq!(offer.args[0]["client_id"], "viewer");
+        assert_eq!(offer.args[0]["data"]["type"], "offer");
+
+        let answer =
+            json!({ "client_id": "viewer", "data": { "type": "answer", "ice_id": ice_id } });
+        h.relay(&host, "soac", answer).await;
+        let answer = h.next_event_decoded("viewer").await;
+        assert_eq!(answer.args[0]["client_id"], "host");
+        assert_eq!(answer.args[0]["data"]["type"], "answer");
     }
 
-    #[test]
-    fn taking_over_ends_the_other_devices_desktop_sessions() {
-        let rooms = Rooms::default();
-        let mut host = member(&rooms, Role::Host, "host");
-        let mut phone = member(&rooms, viewer_on(Some("phone")), "phone");
-        let laptop = member(
-            &rooms,
-            Role::Viewer {
-                from_device: Some("laptop".into()),
-                take_over: true,
-            },
-            "laptop",
-        );
-        let desktop = options(1);
-        let ice_id = rooms
-            .control(&phone.room, &phone.id, &json!({}), &desktop, &no_ice())
-            .unwrap()["ice_id"]
-            .clone();
-        host.event();
+    #[tokio::test]
+    async fn control_needs_the_host_online() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let options = windows_viewer_options();
+        let ack = h.send_control(&viewer, json!({}), &options).await;
+        assert!(matches!(ack, ControlAck::Failure { .. }));
 
-        rooms
-            .control(&laptop.room, &laptop.id, &json!({}), &desktop, &no_ice())
-            .unwrap();
-        let released = host.event();
+        let elsewhere = Member {
+            room: Room {
+                device_id: "other".into(),
+                ..viewer.room.clone()
+            },
+            id: "viewer2".into(),
+        };
+        let ack = h.send_control(&elsewhere, json!({}), &options).await;
+        assert!(matches!(ack, ControlAck::Failure { .. }));
+    }
+
+    #[tokio::test]
+    async fn relays_only_within_a_session() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let host = h.join(Role::Host, "host").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let other = h.join(viewer_on(None), "other").await;
+        let ControlAck::Success { ice_id, .. } = h.send_control(&viewer, json!({}), &[]).await
+        else {
+            panic!("expected success");
+        };
+        h.next_event_decoded("host").await;
+
+        let soac = |id: &str| json!({ "data": { "type": "candidate", "ice_id": id } });
+        h.relay(&other, "soac", soac(&ice_id)).await;
+        h.relay(&viewer, "soac", soac("unknown")).await;
+        h.relay(&host, "soac", json!({ "client_id": "nobody", "data": {} }))
+            .await;
+        h.assert_idle().await;
+    }
+
+    async fn open_session(h: &mut Harness, host_id: &str, viewer: &Member) -> String {
+        let ControlAck::Success { ice_id, .. } = h.send_control(viewer, json!({}), &[]).await
+        else {
+            panic!("expected success");
+        };
+        assert_eq!(h.next_event_decoded(host_id).await.name, "be-controlled");
+        ice_id
+    }
+
+    #[tokio::test]
+    async fn a_viewer_leaving_releases_its_sessions() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let _host = h.join(Role::Host, "host").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let ice_id = open_session(&mut h, "host", &viewer).await;
+
+        h.leave(&viewer).await;
+        let released = h.next_event_decoded("host").await;
         assert_eq!(released.name, "released");
         assert_eq!(
             released.args[0],
-            json!({ "ice_id": ice_id, "client_id": "phone" })
+            json!({ "ice_id": ice_id, "client_id": "viewer" })
         );
-        assert_eq!(host.event().name, "be-controlled");
-        let left = phone.event();
+        assert!(!h.client.controlled_elsewhere("d", None).await);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_does_not_reconnect_ends_its_sessions() {
+        let mut h = Harness::start(Duration::from_millis(50));
+        let host = h.join(Role::Host, "host").await;
+        let _viewer = h.join(viewer_on(None), "viewer").await;
+        let ice_id = open_session(&mut h, "host", &_viewer).await;
+
+        h.leave(&host).await;
+        tokio::task::yield_now().await;
+        assert!(!h.client.is_online("d").await);
+        assert!(h.client.controlled_elsewhere("d", None).await);
+
+        let left = h.next_event_decoded("viewer").await;
         assert_eq!(left.name, "left");
         assert_eq!(
             left.args[0],
             json!({ "ice_id": ice_id, "client_id": "host" })
         );
-        assert!(!rooms.controlled_elsewhere("d", Some("laptop")));
+        assert!(!h.client.controlled_elsewhere("d", None).await);
+    }
+
+    #[tokio::test]
+    async fn a_reconnecting_host_takes_its_sessions_back() {
+        let mut h = Harness::start(Duration::from_millis(80));
+        let host = h.join(Role::Host, "host").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let ice_id = open_session(&mut h, "host", &viewer).await;
+
+        h.leave(&host).await;
+        let _back = h.join(Role::Host, "back").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.assert_idle().await;
+
+        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
+        h.relay(&viewer, "soac", candidate).await;
+        assert_eq!(h.next_event_decoded("back").await.name, "soac");
+        h.leave(&viewer).await;
+        assert_eq!(h.next_event_decoded("back").await.name, "released");
+    }
+
+    #[tokio::test]
+    async fn a_newer_host_kicks_the_older_one_and_takes_its_sessions() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let older = h.join(Role::Host, "older").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        let ice_id = open_session(&mut h, "older", &viewer).await;
+
+        let _newer = h.join(Role::Host, "newer").await;
+        assert_eq!(
+            h.next_for("older").await,
+            EndpointEvent::Kick {
+                client_id: "older".into()
+            }
+        );
+        h.leave(&older).await;
+        assert!(h.client.is_online("d").await);
+
+        let candidate = json!({ "data": { "type": "candidate", "ice_id": ice_id } });
+        h.relay(&viewer, "soac", candidate).await;
+        assert_eq!(h.next_event_decoded("newer").await.name, "soac");
+    }
+
+    #[tokio::test]
+    async fn kicking_the_host_ends_its_sessions_at_once() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let host = h.join(Role::Host, "host").await;
+        let viewer = h.join(viewer_on(None), "viewer").await;
+        open_session(&mut h, "host", &viewer).await;
+
+        h.client.kick_host("d").await;
+        assert_eq!(
+            h.next_for("host").await,
+            EndpointEvent::Kick {
+                client_id: "host".into()
+            }
+        );
+        assert_eq!(h.next_event_decoded("viewer").await.name, "left");
+        h.leave(&host).await;
+
+        let host = h.join(Role::Host, "host2").await;
+        let ControlAck::Success { .. } = h.send_control(&viewer, json!({}), &[]).await else {
+            panic!("expected control success");
+        };
+        assert_eq!(h.next_event_decoded("host2").await.name, "be-controlled");
+        h.leave(&host).await;
+        h.client.kick_host("d").await;
+        assert_eq!(h.next_event_decoded("viewer").await.name, "left");
+    }
+
+    #[tokio::test]
+    async fn one_device_at_a_time_controls_the_desktop() {
+        const DESKTOP: i32 = 1;
+        const TERMINAL: i32 = 8;
+        let mut h = Harness::start(Duration::from_secs(30));
+        let _host = h.join(Role::Host, "host").await;
+        let phone = h.join(viewer_on(Some("phone")), "phone").await;
+        let laptop = h.join(viewer_on(Some("laptop")), "laptop").await;
+
+        assert!(matches!(
+            h.send_control(&phone, json!({}), &options(DESKTOP)).await,
+            ControlAck::Success { .. }
+        ));
+        h.next_event_decoded("host").await;
+        assert!(h.client.controlled_elsewhere("d", Some("laptop")).await);
+        assert!(h.client.controlled_elsewhere("d", None).await);
+        assert!(!h.client.controlled_elsewhere("d", Some("phone")).await);
+
+        assert!(matches!(
+            h.send_control(&laptop, json!({}), &options(DESKTOP)).await,
+            ControlAck::Failure { .. }
+        ));
+        h.assert_idle().await;
+        assert!(matches!(
+            h.send_control(&laptop, json!({}), &options(TERMINAL)).await,
+            ControlAck::Success { .. }
+        ));
+        h.next_event_decoded("host").await;
+        assert!(matches!(
+            h.send_control(&phone, json!({}), &options(DESKTOP)).await,
+            ControlAck::Success { .. }
+        ));
+        h.next_event_decoded("host").await;
+    }
+
+    #[tokio::test]
+    async fn taking_over_ends_the_other_devices_desktop_sessions() {
+        let mut h = Harness::start(Duration::from_secs(30));
+        let _host = h.join(Role::Host, "host").await;
+        let phone = h.join(viewer_on(Some("phone")), "phone").await;
+        let laptop = h
+            .join(
+                Role::Viewer {
+                    from_device: Some("laptop".into()),
+                    take_over: true,
+                },
+                "laptop",
+            )
+            .await;
+        let desktop = options(1);
+
+        let ControlAck::Success { ice_id, .. } = h.send_control(&phone, json!({}), &desktop).await
+        else {
+            panic!("expected success");
+        };
+        h.next_event_decoded("host").await;
+
+        assert!(matches!(
+            h.send_control(&laptop, json!({}), &desktop).await,
+            ControlAck::Success { .. }
+        ));
+        let released = h.next_event_decoded("host").await;
+        assert_eq!(released.name, "released");
+        assert_eq!(
+            released.args[0],
+            json!({ "ice_id": ice_id, "client_id": "phone" })
+        );
+        assert_eq!(h.next_event_decoded("host").await.name, "be-controlled");
+        let left = h.next_event_decoded("phone").await;
+        assert_eq!(left.name, "left");
+        assert_eq!(
+            left.args[0],
+            json!({ "ice_id": ice_id, "client_id": "host" })
+        );
+        assert!(!h.client.controlled_elsewhere("d", Some("laptop")).await);
     }
 
     #[test]

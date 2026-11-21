@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::Request;
 use axum::http::request::Builder;
 use http_body_util::BodyExt;
-use remora_cloud::{Config, Database, Ping, ReconnectGrace};
+use remora_cloud::{Config, Database, Ping, ReconnectGrace, Roles};
 use remora_proto::control::{ApiError, parse_response};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ pub const PUBLIC_URL: &str = "https://remora.test";
 /// Signatures unchecked, logins confirmed automatically.
 pub fn config() -> Config {
     Config {
+        roles: Roles::all(),
         public_url: PUBLIC_URL.parse().unwrap(),
         sign_key: None,
         ping: Ping::default(),

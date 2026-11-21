@@ -1,21 +1,141 @@
-//! Rooms: the tickets to signaling, for a device's host and for viewers joining it.
+//! Rooms: the tickets to signaling, for a device's host and for viewers joining it, plus
+//! the bus-backed client API handlers use to query and control rooms.
 
 pub(crate) mod registry;
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::PublicUrl;
 use crate::api::auth::token::{Role, Room, TokenKey};
 use crate::api::device::{CallerDevice, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
-use crate::room::registry::Rooms;
+use crate::bus::{Bus, BusMessage, Reply, RoomCommand, TOPIC_ROOM_COMMAND};
 
 /// How long clients should wait for the signaling connection to come up.
 const WS_CONNECT_TIMEOUT_MS: u32 = 10_000;
+
+/// How long the sessions of a host that left signaling wait for it to reconnect before they
+/// end. Hosts wait a few seconds and ask for a new room before reconnecting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectGrace(pub Duration);
+
+impl Default for ReconnectGrace {
+    fn default() -> Self {
+        Self(Duration::from_secs(30))
+    }
+}
+
+/// Bus-backed handle used by control-plane handlers to query or instruct room actors without
+/// holding direct references to room state.
+#[derive(Clone)]
+pub struct RoomClient {
+    bus: Arc<dyn Bus>,
+}
+
+impl RoomClient {
+    pub fn new(bus: Arc<dyn Bus>) -> Self {
+        Self { bus }
+    }
+
+    pub async fn is_online(&self, device_id: &str) -> bool {
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::IsOnline {
+                    device_id: device_id.to_owned(),
+                    reply,
+                }),
+            )
+            .await;
+        if delivered == 0 {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn online_devices(&self, device_ids: Vec<String>) -> HashSet<String> {
+        if device_ids.is_empty() {
+            return HashSet::new();
+        }
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::OnlineDevices { device_ids, reply }),
+            )
+            .await;
+        if delivered == 0 {
+            return HashSet::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn controlled_elsewhere(&self, device_id: &str, from_device: Option<&str>) -> bool {
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::ControlledElsewhere {
+                    device_id: device_id.to_owned(),
+                    from_device: from_device.map(str::to_owned),
+                    reply,
+                }),
+            )
+            .await;
+        if delivered == 0 {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn kick_host(&self, device_id: &str) {
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::KickHost {
+                    device_id: device_id.to_owned(),
+                    reply,
+                }),
+            )
+            .await;
+        if delivered > 0 {
+            let _ = rx.await;
+        }
+    }
+
+    pub async fn push_to_host(&self, device_id: &str, name: &str, body: Value) -> bool {
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::PushToHost {
+                    device_id: device_id.to_owned(),
+                    name: name.to_owned(),
+                    body,
+                    reply,
+                }),
+            )
+            .await;
+        if delivered == 0 {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+}
 
 /// Issues room tokens and says where to use them.
 #[derive(Clone)]
@@ -91,7 +211,7 @@ pub async fn join_by_device(
     user: User,
     Path(device_id): Path<String>,
     State(devices): State<Devices>,
-    State(rooms): State<Rooms>,
+    State(rooms): State<RoomClient>,
     State(tickets): State<Tickets>,
     CallerDevice(from_device): CallerDevice,
     Body(request): Body<JoinRequest>,
@@ -99,10 +219,14 @@ pub async fn join_by_device(
     let publisher_platform = devices
         .platform_of_owned(&device_id, &user.id)?
         .ok_or(ApiError::UNKNOWN_DEVICE)?;
-    if !rooms.is_online(&device_id) {
+    if !rooms.is_online(&device_id).await {
         return Err(ApiError::DEVICE_OFFLINE);
     }
-    if !request.force_join && rooms.controlled_elsewhere(&device_id, from_device.as_deref()) {
+    if !request.force_join
+        && rooms
+            .controlled_elsewhere(&device_id, from_device.as_deref())
+            .await
+    {
         return Err(ApiError::BEING_CONTROLLED);
     }
 

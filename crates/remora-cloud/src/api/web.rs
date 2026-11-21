@@ -9,9 +9,10 @@ use std::time::UNIX_EPOCH;
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, Query, State};
-use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderValue};
+use axum::http::{HeaderName, Method, StatusCode, Uri};
 use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
+use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -26,7 +27,7 @@ use crate::api::files::Files;
 use crate::api::middleware::limit::Limits;
 use crate::api::user::{OWNER_ID, Profile, Sessions, Users};
 use crate::api::wake::{self, LanReports, WakeRefused};
-use crate::room::registry::Rooms;
+use crate::room::RoomClient;
 
 /// Ties a sign-in at the OpenID Connect provider to the browser that started it. Lax, because
 /// the provider sends the browser back from another site.
@@ -48,7 +49,7 @@ pub struct Web {
     pub lan_reports: LanReports,
     pub files: Files,
     pub sessions: Sessions,
-    pub rooms: Rooms,
+    pub rooms: RoomClient,
     /// Without a password, nobody can sign in with one.
     pub password: Option<Arc<OwnerPassword>>,
     pub oidc: Option<Arc<OidcProvider>>,
@@ -411,10 +412,14 @@ pub async fn devices(
         .map(|(id, _)| id)
         .collect();
     let wallpapers = web.files.wallpapers_of_user(&signed_in.user.id)?;
+    let online = web
+        .rooms
+        .online_devices(owned.iter().map(|d| d.id.clone()).collect())
+        .await;
     let list = owned
         .into_iter()
         .map(|device| ManagedDevice {
-            online: web.rooms.is_online(&device.id),
+            online: online.contains(&device.id),
             wakeable: reported.contains(&device.id),
             wallpaper: wallpapers.get(&device.id).map(|file| file.path()),
             id: device.id,
@@ -435,7 +440,7 @@ pub async fn unbind_device(
     if !web.devices.unbind(&id, &signed_in.user.id)? {
         return Err(WebError::NotFound);
     }
-    web.rooms.kick_host(&id);
+    web.rooms.kick_host(&id).await;
     tracing::info!(user_id = %signed_in.user.id, device_id = %id, "device unbound from web");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -452,13 +457,13 @@ pub async fn wake_device(
     if web.devices.platform_of_owned(&id, user_id)?.is_none() {
         return Err(WebError::NotFound);
     }
-    if web.rooms.is_online(&id) {
+    if web.rooms.is_online(&id).await {
         return Err(WebError::DeviceOnline);
     }
     if !web.limits.wake(address) {
         return Err(WebError::TooManyRequests);
     }
-    match wake::wake(&web.lan_reports, &web.rooms, user_id, &id)? {
+    match wake::wake(&web.lan_reports, &web.rooms, user_id, &id).await? {
         Ok(helper_id) => {
             tracing::info!(%user_id, device_id = %id, %helper_id, "wake_on_lan pushed");
             Ok(StatusCode::NO_CONTENT)
@@ -516,7 +521,7 @@ pub async fn revoke_client_session(
         .revoke(&id, &signed_in.user.id)?
         .ok_or(WebError::NotFound)?;
     if let Some(device_id) = device_id {
-        web.rooms.kick_host(&device_id);
+        web.rooms.kick_host(&device_id).await;
     }
     tracing::info!(user_id = %signed_in.user.id, "client session revoked");
     Ok(StatusCode::NO_CONTENT)
@@ -565,4 +570,60 @@ pub async fn revoke_browser(
         return Ok(([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response());
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Embed)]
+#[folder = "$REMORA_WEB_DIR"]
+struct Build;
+
+/// The page every route of the app starts from.
+const PAGE: &str = "app.html";
+
+/// Files whose names carry a hash of their content, so they never change.
+const IMMUTABLE: &str = "_app/immutable/";
+
+/// Paths that belong to the APIs: unknown ones are not the app's.
+const API_PREFIXES: [&str; 2] = ["/api/", "/socket.io/"];
+
+/// Sent with everything the app serves. The page carries its own CSP for scripts and styles,
+/// with hashes of its inline bootstrap; this adds what only a header can say.
+const SECURITY_HEADERS: [(HeaderName, &str); 4] = [
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::REFERRER_POLICY, "no-referrer"),
+    (
+        header::CONTENT_SECURITY_POLICY,
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+    ),
+];
+
+/// Serves the embedded web console (`web/build`).
+pub async fn serve_app(method: Method, uri: Uri) -> Response {
+    let path = uri.path();
+    if !matches!(method, Method::GET | Method::HEAD)
+        || API_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let name = path.trim_start_matches('/');
+    let (file, cache) = match Build::get(name).filter(|_| !name.is_empty()) {
+        Some(file) if name.starts_with(IMMUTABLE) => (file, "public, max-age=31536000, immutable"),
+        Some(file) => (file, "no-cache"),
+        None => (
+            Build::get(PAGE).expect("the build has its page; build.rs checks"),
+            "no-cache",
+        ),
+    };
+    let content_type = HeaderValue::from_str(file.metadata.mimetype())
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+    let headers = SECURITY_HEADERS.map(|(name, value)| (name, HeaderValue::from_static(value)));
+    (
+        headers,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+        ],
+        file.data,
+    )
+        .into_response()
 }

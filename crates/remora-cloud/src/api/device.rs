@@ -15,7 +15,7 @@ use crate::api::files::{FileId, Files};
 use crate::api::middleware::limit::Limits;
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body, Empty};
-use crate::room::registry::Rooms;
+use crate::room::RoomClient;
 use crate::{Database, PublicUrl};
 
 /// Identifies the calling installation once it has registered.
@@ -201,12 +201,12 @@ pub async fn windows_init(
 fn entry(
     device: Device,
     wallpaper: Option<&FileId>,
-    rooms: &Rooms,
+    online: bool,
     public_url: &PublicUrl,
 ) -> Entry {
     Entry {
         wallpaper_url: wallpaper.map(|file| file.url(public_url)),
-        status: if rooms.is_online(&device.id) {
+        status: if online {
             Status::Connected
         } else {
             Status::Disconnected
@@ -250,28 +250,39 @@ pub struct ListResponse {
 pub async fn list(
     user: User,
     State(devices): State<Devices>,
-    State(rooms): State<Rooms>,
+    State(rooms): State<RoomClient>,
     State(files): State<Files>,
     State(public_url): State<PublicUrl>,
     CallerDevice(caller): CallerDevice,
 ) -> Result<api::Ok<ListResponse>, ApiError> {
-    let current_device = match caller {
-        Some(id) => match devices.get(&id)? {
-            Some(device) => {
-                let wallpaper = files.wallpaper_of(&device.id)?;
-                Some(entry(device, wallpaper.as_ref(), &rooms, &public_url))
-            }
-            None => None,
-        },
+    let caller_device = match caller {
+        Some(id) => devices.get(&id)?,
+        None => None,
+    };
+    let owned = devices.owned_by(&user.id)?;
+    let mut query_ids: Vec<String> = owned.iter().map(|d| d.id.clone()).collect();
+    if let Some(device) = &caller_device
+        && !query_ids.contains(&device.id)
+    {
+        query_ids.push(device.id.clone());
+    }
+    let online = rooms.online_devices(query_ids).await;
+
+    let current_device = match caller_device {
+        Some(device) => {
+            let wallpaper = files.wallpaper_of(&device.id)?;
+            let is_online = online.contains(&device.id);
+            Some(entry(device, wallpaper.as_ref(), is_online, &public_url))
+        }
         None => None,
     };
     let wallpapers = files.wallpapers_of_user(&user.id)?;
-    let my_binded_devices = devices
-        .owned_by(&user.id)?
+    let my_binded_devices = owned
         .into_iter()
         .map(|device| {
             let wallpaper = wallpapers.get(&device.id);
-            entry(device, wallpaper, &rooms, &public_url)
+            let is_online = online.contains(&device.id);
+            entry(device, wallpaper, is_online, &public_url)
         })
         .collect();
     Ok(api::Ok(ListResponse {
@@ -288,12 +299,12 @@ pub async fn unbind(
     user: User,
     Path(device_id): Path<String>,
     State(devices): State<Devices>,
-    State(rooms): State<Rooms>,
+    State(rooms): State<RoomClient>,
 ) -> Result<api::Ok<Empty>, ApiError> {
     if !devices.unbind(&device_id, &user.id)? {
         return Err(ApiError::UNKNOWN_DEVICE);
     }
-    rooms.kick_host(&device_id);
+    rooms.kick_host(&device_id).await;
     tracing::info!(user_id = %user.id, %device_id, "device unbound");
     Ok(api::Ok(Empty {}))
 }

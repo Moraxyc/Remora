@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -15,6 +16,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::Sha1;
+
+use crate::bus::{Bus, BusMessage, RelayCommand, TOPIC_RELAY};
 
 /// How long issued TURN credentials stay valid. The TURN server checks them again whenever an
 /// allocation is refreshed, so this bounds how long one session can stay relayed.
@@ -36,6 +39,28 @@ pub struct Grant {
     pub servers: Value,
     /// Whether peers may only connect through TURN, which keeps their addresses from each other.
     pub force_relay: bool,
+}
+
+impl Default for Grant {
+    fn default() -> Self {
+        Self {
+            servers: json!([]),
+            force_relay: false,
+        }
+    }
+}
+
+/// Spawns the `relay` role service, subscribing synchronously before returning so no
+/// published requests are missed by early callers.
+pub fn spawn(bus: Arc<dyn Bus>, ice: Arc<Ice>) -> tokio::task::JoinHandle<()> {
+    let mut sub = bus.subscribe(TOPIC_RELAY);
+    tokio::spawn(async move {
+        while let Some(msg) = sub.recv().await {
+            if let BusMessage::RelayCommand(RelayCommand::Grant { user_id, reply }) = msg {
+                reply.send(ice.grant(&user_id));
+            }
+        }
+    })
 }
 
 #[derive(Debug)]
