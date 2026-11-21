@@ -3,58 +3,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+#[path = "src/profile/resolver.rs"]
+mod resolver;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProfileToml {
-    id: String,
-    platform: String,
-    plat: String,
-    version: String,
-    build: u32,
-    bundle_id: String,
-    channel: String,
-    min_os: String,
-    init_endpoint: String,
-    sign_headers: Vec<String>,
-    caps: CapsToml,
-    quirks: QuirksToml,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CapsToml {
-    codecs: Vec<String>,
-    audio_codecs: Vec<String>,
-    transports: Vec<String>,
-    data_channels: Vec<String>,
-    features: FeaturesToml,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FeaturesToml {
-    capture_setting: i32,
-    simple_action: i32,
-    system_metrics: i32,
-    private_screen: i32,
-    update_acquire: i32,
-    file_transfer_ftp: i32,
-    file_transfer_ftp2: i32,
-    clipboard: i32,
-    qos_stat: i32,
-    mumu_control: i32,
-    virtual_mouse_device: i32,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QuirksToml {
-    kcp_quic_optional: bool,
-    log_archive_push_only: bool,
-    wallpaper_raw_post: bool,
-}
+use resolver::ProfileToml;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // protox compiles the schema in pure Rust, so building needs no system protoc.
@@ -74,23 +26,28 @@ fn emit_profiles(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     paths.sort();
 
-    let mut out = String::from("pub static PROFILES: &[Profile] = &[\n");
+    let mut raw_profiles = Vec::with_capacity(paths.len());
     for path in paths {
         println!("cargo:rerun-if-changed={}", path.display());
         let raw = fs::read_to_string(&path)?;
-        let profile: ProfileToml = toml::from_str(&raw)?;
-        let platform = match profile.platform.as_str() {
-            "windows" => "Platform::Windows",
-            "macos" => "Platform::MacOs",
-            "linux" => "Platform::Linux",
-            "ios" => "Platform::Ios",
-            "android" => "Platform::Android",
-            other => return Err(format!("unknown platform {other:?} in {}", path.display()).into()),
-        };
+        let parsed: ProfileToml = toml::from_str(&raw)?;
+        raw_profiles.push(parsed);
+    }
 
+    let profiles = resolver::resolve_all(raw_profiles)
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
+    let mut out = String::from("pub static PROFILES: &[Profile] = &[\n");
+    for profile in profiles {
         writeln!(out, "    Profile {{").unwrap();
         writeln!(out, "        id: {:?},", profile.id).unwrap();
-        writeln!(out, "        platform: {platform},").unwrap();
+        match &profile.inherits {
+            Some(parent) => writeln!(out, "        inherits: Some({parent:?}),").unwrap(),
+            None => writeln!(out, "        inherits: None,").unwrap(),
+        }
+        writeln!(out, "        source: {},", profile.source).unwrap();
+        write_str_slice(&mut out, "        ", "evidence", &profile.evidence);
+        writeln!(out, "        platform: {},", profile.platform).unwrap();
         writeln!(out, "        plat: {:?},", profile.plat).unwrap();
         writeln!(out, "        version: {:?},", profile.version).unwrap();
         writeln!(out, "        build: {},", profile.build).unwrap();
@@ -99,28 +56,31 @@ fn emit_profiles(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out, "        min_os: {:?},", profile.min_os).unwrap();
         writeln!(out, "        init_endpoint: {:?},", profile.init_endpoint).unwrap();
         write_str_slice(&mut out, "        ", "sign_headers", &profile.sign_headers);
+        writeln!(out, "        detect: DetectRule {{").unwrap();
+        writeln!(out, "            plat: {:?},", profile.detect_plat).unwrap();
+        writeln!(out, "            version: {:?},", profile.detect_version).unwrap();
+        match profile.detect_build {
+            Some(b) => writeln!(out, "            build: Some({b}),").unwrap(),
+            None => writeln!(out, "            build: None,").unwrap(),
+        }
+        writeln!(out, "        }},").unwrap();
         writeln!(out, "        caps: Caps {{").unwrap();
-        write_str_slice(&mut out, "            ", "codecs", &profile.caps.codecs);
+        write_str_slice(&mut out, "            ", "codecs", &profile.codecs);
         write_str_slice(
             &mut out,
             "            ",
             "audio_codecs",
-            &profile.caps.audio_codecs,
+            &profile.audio_codecs,
         );
-        write_str_slice(
-            &mut out,
-            "            ",
-            "transports",
-            &profile.caps.transports,
-        );
+        write_str_slice(&mut out, "            ", "transports", &profile.transports);
         write_str_slice(
             &mut out,
             "            ",
             "data_channels",
-            &profile.caps.data_channels,
+            &profile.data_channels,
         );
         writeln!(out, "            features: FeatureCaps {{").unwrap();
-        let f = &profile.caps.features;
+        let f = &profile.features;
         writeln!(
             out,
             "                capture_setting: {},",

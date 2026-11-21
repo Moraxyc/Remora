@@ -1,4 +1,8 @@
 id = "macos-4.48.1"
+source = "reverse_engineered"
+evidence = [
+    "static analysis of uuyc_4.48.1_gwpf.pkg (build 633): Info.plist, UURemote, UURemoteServer, libstreamer.dylib",
+]
 platform = "macos"
 plat = "4"
 version = "4.48.1"

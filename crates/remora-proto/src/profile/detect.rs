@@ -30,9 +30,12 @@ pub fn detect_from_headers<'a>(
 
     let (plat, version) = (plat?, version?);
     PROFILES.iter().find(|profile| {
-        profile.plat == plat
-            && profile.version == version
-            && build.is_none_or(|vc| profile.build == vc)
+        profile.detect.plat == plat
+            && profile.detect.version == version
+            && match (profile.detect.build, build) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (Some(_), None) | (None, _) => true,
+            }
     })
 }
 
