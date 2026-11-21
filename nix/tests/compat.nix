@@ -63,6 +63,7 @@ in
       serverAddress = nodes.server.networking.primaryIPAddress;
     in
     ''
+      import glob
       import json
 
       start_all()
@@ -73,9 +74,16 @@ in
       server.wait_for_open_port(3478, "${serverAddress}")
       client.wait_for_unit("multi-user.target")
 
+      cloud_files = sorted(glob.glob("${compatScenarios}/cloud/*.yaml"))
       with subtest("remora-lab runs cloud scenarios against the NixOS remora service"):
           client.succeed(
-              "remora-lab run ${compatScenarios}/cloud "
+              "remora-lab run " + " ".join(cloud_files[:9]) + " "
+              "--target url --url http://server:8680 --sign-key ${signKeyValue}"
+          )
+          server.succeed("systemctl restart remora.service")
+          server.wait_for_open_port(8680)
+          client.succeed(
+              "remora-lab run " + " ".join(cloud_files[9:]) + " "
               "--target url --url http://server:8680 --sign-key ${signKeyValue}"
           )
 

@@ -19,7 +19,7 @@ async fn all_cloud_scenarios_pass_against_fakecloud_and_normalize_identically() 
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("yaml"))
         .collect();
     files.sort();
-    assert_eq!(files.len(), 9);
+    assert_eq!(files.len(), 10);
 
     for path in files {
         let scenario = Scenario::load(&path).unwrap();

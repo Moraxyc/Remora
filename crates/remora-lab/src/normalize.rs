@@ -74,7 +74,10 @@ impl SymbolTable {
                     .iter()
                     .map(|item| self.normalize_value(key_hint, item))
                     .collect();
-                if key_hint == Some("my_binded_devices") {
+                if matches!(
+                    key_hint,
+                    Some("my_binded_devices" | "desktop_devices" | "mobile_devices" | "tv_devices")
+                ) {
                     items.sort_by_cached_key(|v| v.to_string());
                 }
                 Value::Array(items)
@@ -82,7 +85,11 @@ impl SymbolTable {
             Value::Object(map) => {
                 let mut out = serde_json::Map::with_capacity(map.len());
                 for (k, v) in map {
-                    out.insert(k.clone(), self.normalize_value(Some(k.as_str()), v));
+                    if k == "controlled_time" && v.is_u64() {
+                        out.insert(k.clone(), Value::from(0));
+                    } else {
+                        out.insert(k.clone(), self.normalize_value(Some(k.as_str()), v));
+                    }
                 }
                 Value::Object(out)
             }
@@ -95,7 +102,7 @@ impl SymbolTable {
             return String::new();
         }
         match key_hint {
-            Some("device_id") => self.intern("device", raw),
+            Some("device_id" | "current_device_id") => self.intern("device", raw),
             Some("client_id") => self.intern("client", raw),
             Some("ice_id") => self.intern("ice", raw),
             Some("token") => {
@@ -111,7 +118,9 @@ impl SymbolTable {
             Some("username") => self.intern("turn_user", raw),
             Some("credential") => self.intern("turn_cred", raw),
             Some("urls") => self.intern("ice_url", raw),
-            Some("signaling_server" | "signaling_list") => self.normalize_url_origin(raw),
+            Some("signaling_server" | "signaling_list" | "sni_required_signaling_list") => {
+                self.normalize_url_origin(raw)
+            }
             Some("sdp") => redact_and_symbolize_sdp(raw),
             _ => raw.to_owned(),
         }

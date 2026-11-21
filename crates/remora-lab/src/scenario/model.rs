@@ -168,6 +168,24 @@ pub enum StepAction {
         #[serde(default)]
         device_id: Option<String>,
     },
+    DeviceGroups {
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    DevicePreferences {
+        target: String,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    MacControllable {
+        controllable: bool,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     DeviceUnbind {
         target: String,
         #[serde(default)]

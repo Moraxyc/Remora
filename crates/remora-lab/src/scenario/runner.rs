@@ -739,6 +739,72 @@ async fn execute_action_step(
             };
             ("device_list", out)
         }
+        StepAction::DeviceGroups { token, device_id } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let dev = explicit_dev.or_else(|| actor.device_id.clone());
+            let out = match actor.http.device_groups(&tok, dev.as_deref()).await {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_groups", out)
+        }
+        StepAction::DevicePreferences { target, token } => {
+            let target_id = resolve_target_device(env, target).await?;
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let out = match actor
+                .http
+                .device_preferences(&tok, &target_id, actor.device_id.as_deref())
+                .await
+            {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_preferences", out)
+        }
+        StepAction::MacControllable {
+            controllable,
+            token,
+            device_id,
+        } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let dev = explicit_dev
+                .or_else(|| actor.device_id.clone())
+                .unwrap_or_default();
+            let out = match actor.http.mac_controllable(&tok, &dev, *controllable).await {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("mac_controllable", out)
+        }
         StepAction::DeviceUnbind { target, token } => {
             let target_id = resolve_target_device(env, target).await?;
             let explicit_tok = match token {

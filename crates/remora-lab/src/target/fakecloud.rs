@@ -42,6 +42,8 @@ struct DeviceRecord {
     client_id: String,
     name: String,
     platform: u8,
+    controllable: bool,
+    version_name: String,
     owner: Option<String>,
 }
 
@@ -130,13 +132,20 @@ impl FakeCloudInstance {
             .route("/api/web/session", get(web_session))
             .route("/api/v1/device/windows/init", post(device_init_win))
             .route("/api/v1/device/macos/init", post(device_init_mac))
+            .route("/api/v1/device/mac_controllable", post(mac_controllable))
             .route("/api/v1/qrcode/gen/login", post(qr_gen))
             .route("/api/v1/qrcode/login/status", post(qr_status))
             .route("/api/v1/login/by_qrcode", post(login_by_qrcode))
             .route("/api/v1/user/info", get(user_info))
             .route("/api/v1/user/logout", post(user_logout))
             .route("/api/v1/device/list", get(device_list))
+            .route("/api/v1/device/groups/of/my", get(device_groups))
+            .route(
+                "/api/v1/device/{device_id}/preferences",
+                get(device_preferences),
+            )
             .route("/api/v1/device/{device_id}/unbind", post(device_unbind))
+            .route("/api/v1/member/entitlements", get(member_entitlements))
             .route("/api/v1/room/create", post(room_create))
             .route("/api/v1/room/join/by_device/{device_id}", post(room_join))
             .route("/socket.io/", get(ws_connect))
@@ -318,14 +327,27 @@ async fn device_init_impl(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let controllable = val.get("controllable").and_then(Value::as_bool);
+    let version_name = headers
+        .get("x-param-vn")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
     let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
-    let device_id = if let Some(existing) = guard.devices_by_client.get_mut(client_id) {
+    let rec = if let Some(existing) = guard.devices_by_client.get_mut(client_id) {
         existing.name = name.clone();
-        let id = existing.device_id.clone();
-        if let Some(by_id) = guard.devices_by_id.get_mut(&id) {
-            by_id.name = name;
+        if let Some(c) = controllable {
+            existing.controllable = c;
         }
-        id
+        if !version_name.is_empty() {
+            existing.version_name = version_name.clone();
+        }
+        let cloned = existing.clone();
+        if let Some(by_id) = guard.devices_by_id.get_mut(&cloned.device_id) {
+            *by_id = cloned.clone();
+        }
+        cloned
     } else {
         let seq = guard.next_id;
         guard.next_id += 1;
@@ -335,17 +357,34 @@ async fn device_init_impl(
             client_id: client_id.to_owned(),
             name,
             platform,
+            controllable: controllable.unwrap_or(true),
+            version_name,
             owner: None,
         };
         guard
             .devices_by_client
             .insert(client_id.to_owned(), rec.clone());
-        guard.devices_by_id.insert(id.clone(), rec);
-        id
+        guard.devices_by_id.insert(id, rec.clone());
+        rec
     };
+    let mut obj = json!({
+        "device_id": rec.device_id,
+        "platform": rec.platform,
+        "status": "DISCONNECTED",
+        "participants_info": [],
+        "version_name": rec.version_name,
+        "support_wol": false,
+        "controllable": rec.controllable,
+        "publisher_availability_status": "offline",
+        "controlled_support": matches!(rec.platform, 1 | 4 | 5),
+        "update_started_at": 0,
+    });
+    if !rec.name.is_empty() {
+        obj["alias"] = json!(rec.name);
+    }
     json_envelope(
         StatusCode::OK,
-        serde_json::to_value(ok_envelope(json!({ "device_id": device_id }))).unwrap(),
+        serde_json::to_value(ok_envelope(obj)).unwrap(),
     )
 }
 
@@ -539,6 +578,17 @@ async fn device_list(
             "device_id": d.device_id,
             "platform": d.platform,
             "status": if online { "CONNECTED" } else { "DISCONNECTED" },
+            "participants_info": [],
+            "version_name": d.version_name,
+            "support_wol": false,
+            "controllable": d.controllable,
+            "publisher_availability_status": if matches!(d.platform, 1 | 4 | 5) {
+                Value::String(if online { "ready" } else { "offline" }.to_owned())
+            } else {
+                Value::Null
+            },
+            "controlled_support": matches!(d.platform, 1 | 4 | 5),
+            "update_started_at": 0,
         });
         if !d.name.is_empty() {
             obj["alias"] = json!(d.name);
@@ -561,6 +611,203 @@ async fn device_list(
             "current_device": current_device,
             "my_binded_devices": owned,
             "others_shared_devices": []
+        })))
+        .unwrap(),
+    )
+}
+
+async fn device_groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let caller_id = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .filter(|id| guard.devices_by_id.contains_key(*id));
+    let mut desktop = Vec::new();
+    let mut mobile = Vec::new();
+    let mut tv = Vec::new();
+    let mut owned: Vec<_> = guard
+        .devices_by_id
+        .values()
+        .filter(|d| d.owner.as_deref() == Some("1"))
+        .collect();
+    owned.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+    for d in owned {
+        let online = guard.hosts_ws.contains_key(&d.device_id);
+        let mut obj = json!({
+            "device_id": d.device_id,
+            "platform": d.platform,
+            "status": if online { "CONNECTED" } else { "DISCONNECTED" },
+            "participants_info": [],
+            "version_name": d.version_name,
+            "support_wol": false,
+            "controllable": d.controllable,
+            "publisher_availability_status": if matches!(d.platform, 1 | 4 | 5) {
+                Value::String(if online { "ready" } else { "offline" }.to_owned())
+            } else {
+                Value::Null
+            },
+            "controlled_support": matches!(d.platform, 1 | 4 | 5),
+            "update_started_at": 0,
+        });
+        if !d.name.is_empty() {
+            obj["alias"] = json!(d.name);
+        }
+        if matches!(d.platform, 2 | 3) {
+            mobile.push(obj);
+        } else if matches!(d.platform, 1 | 4 | 5) {
+            desktop.push(obj);
+        } else {
+            tv.push(obj);
+        }
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "current_device_id": caller_id,
+            "mobile_devices": mobile,
+            "desktop_devices": desktop,
+            "tv_devices": tv,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn mac_controllable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(val) = serde_json::from_slice::<Value>(&body) else {
+        return json_envelope(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::to_value(error_envelope(ErrorCode::InvalidRequest, "invalid request"))
+                .unwrap(),
+        );
+    };
+    let Some(controllable) = val.get("controllable").and_then(Value::as_bool) else {
+        return json_envelope(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::to_value(error_envelope(ErrorCode::InvalidRequest, "invalid request"))
+                .unwrap(),
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let Some(device_id) = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    let Some(dev) = guard.devices_by_id.get_mut(&device_id) else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    dev.controllable = controllable;
+    let cid = dev.client_id.clone();
+    if let Some(by_client) = guard.devices_by_client.get_mut(&cid) {
+        by_client.controllable = controllable;
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn device_preferences(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if guard
+        .devices_by_id
+        .get(&device_id)
+        .is_none_or(|d| d.owner.as_deref() != Some("1"))
+    {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "device_preferences": {
+                "device_id": device_id,
+                "tools": {
+                    "sequence": [
+                        "file_transfer",
+                        "view_mode",
+                        "remote_connection_cli",
+                        "port_mapping",
+                        "wake_on_lan",
+                        "device_reboot",
+                        "device_shutdown",
+                    ]
+                }
+            }
+        })))
+        .unwrap(),
+    )
+}
+
+async fn member_entitlements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "version": 0,
+            "user_id": "1",
+            "features": {}
         })))
         .unwrap(),
     )
@@ -707,8 +954,12 @@ async fn room_create(
         serde_json::to_value(ok_envelope(json!({
             "signaling_server": state.ws_url,
             "signaling_list": [state.ws_url],
+            "sni_required_signaling_list": [],
             "token": ticket,
-            "ws_connect_timeout_ms": 10_000
+            "ws_connect_timeout_ms": 16_000,
+            "max_reconnect_delta": 300,
+            "streamer_retry_delta_ms": 1_000,
+            "international_connect": false
         })))
         .unwrap(),
     )
@@ -787,9 +1038,14 @@ async fn room_join(
     json_envelope(
         StatusCode::OK,
         serde_json::to_value(ok_envelope(json!({
+            "signaling_server": state.ws_url,
             "signaling_list": [state.ws_url],
+            "sni_required_signaling_list": [],
             "token": ticket,
-            "ws_connect_timeout_ms": 10_000,
+            "ws_connect_timeout_ms": 16_000,
+            "max_reconnect_delta": 300,
+            "streamer_retry_delta_ms": 1_000,
+            "international_connect": false,
             "report_token": "",
             "report_url": "",
             "publisher_platform": platform

@@ -1,0 +1,92 @@
+name: 10-macos-device-controls
+description: macOS registration, controllable toggle, grouped device listing, and preferences
+profile: macos-4.48.2
+
+actors:
+  host:
+    kind: host
+    client_id: lab-10-mac-host
+    device_name: mac-studio
+  viewer:
+    kind: viewer
+    client_id: lab-10-mac-viewer
+    device_name: macbook
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        platform: 4
+        controllable: true
+
+  - actor: viewer
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        platform: 4
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: mac_controllable
+    controllable: false
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_groups
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        current_device_id: "${viewer.device_id}"
+      json_contains:
+        desktop_devices:
+          device_id: "${host.device_id}"
+          alias: mac-studio
+          platform: 4
+          controllable: false
+
+  - actor: host
+    action: mac_controllable
+    controllable: true
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_preferences
+    target: host
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - device_preferences.device_id
+        - device_preferences.tools.sequence
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace
