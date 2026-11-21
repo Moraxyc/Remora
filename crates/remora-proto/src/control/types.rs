@@ -215,7 +215,25 @@ pub enum DeviceStatus {
     Unknown,
 }
 
-/// A single device entry in `/api/v1/device/list`.
+/// An active viewer session entry inside [`DeviceEntry::participants_info`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParticipantInfo {
+    pub client_id: String,
+    pub device_id: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    pub platform: u8,
+    #[serde(default)]
+    pub user_join_type: u8,
+    #[serde(default)]
+    pub controlled_time: u64,
+    #[serde(default)]
+    pub app_flag: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A single device entry in `/api/v1/device/list` and `/api/v1/device/groups/of/my`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceEntry {
     pub device_id: String,
@@ -224,7 +242,21 @@ pub struct DeviceEntry {
     pub platform: u8,
     pub status: DeviceStatus,
     #[serde(default)]
+    pub participants_info: Vec<ParticipantInfo>,
+    #[serde(default)]
     pub wallpaper_url: Option<String>,
+    #[serde(default)]
+    pub version_name: String,
+    #[serde(default)]
+    pub support_wol: bool,
+    #[serde(default)]
+    pub controllable: Option<bool>,
+    #[serde(default)]
+    pub publisher_availability_status: Option<String>,
+    #[serde(default)]
+    pub controlled_support: bool,
+    #[serde(default)]
+    pub update_started_at: u64,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -240,6 +272,55 @@ pub struct DeviceListResponse {
     pub others_shared_devices: Vec<DeviceEntry>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Response `data` from `GET /api/v1/device/groups/of/my`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeviceGroupsResponse {
+    #[serde(default)]
+    pub current_device_id: Option<String>,
+    #[serde(default)]
+    pub mobile_devices: Vec<DeviceEntry>,
+    #[serde(default)]
+    pub desktop_devices: Vec<DeviceEntry>,
+    #[serde(default)]
+    pub tv_devices: Vec<DeviceEntry>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Request body for `POST /api/v1/device/mac_controllable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacControllableRequest {
+    pub controllable: bool,
+}
+
+/// Tool bar order inside [`DevicePreferences`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceTools {
+    #[serde(default)]
+    pub sequence: Vec<String>,
+}
+
+/// Per-device preferences object inside [`DevicePreferencesResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicePreferences {
+    pub device_id: String,
+    #[serde(default)]
+    pub tools: DeviceTools,
+}
+
+/// Response `data` from `GET /api/v1/device/{device_id}/preferences`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicePreferencesResponse {
+    pub device_preferences: DevicePreferences,
+}
+
+/// Optional request body for `POST /api/v1/room/create`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomCreateRequest {
+    #[serde(default)]
+    pub last_controlled_interval: Option<i64>,
 }
 
 /// Response `data` from `POST /api/v1/room/create`.

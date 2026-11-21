@@ -62,6 +62,16 @@ mod tests {
             Some("macos-4.48.1")
         );
 
+        let with_vc = [
+            ("x-param-plat", "4"),
+            ("x-param-vn", "4.48.1"),
+            ("x-param-vc", "633"),
+        ];
+        assert_eq!(
+            detect_from_headers(with_vc).map(|p| p.id.as_str()),
+            Some("macos-4.48.1")
+        );
+
         let mismatched = [
             ("x-param-plat", "4"),
             ("x-param-vn", "4.48.1"),

@@ -26,6 +26,31 @@
       ],
       "body_hex": "",
       "expected_signature": "a577257f61e702192f237f5292022ce51f27caeb56b2b611185599d23eab30d4"
+    },
+    {
+      "name": "macos_host_room_create_with_empty_ent_param",
+      "key": "test-sign-key",
+      "method": "POST",
+      "path": "/api/v1/room/create",
+      "headers": [
+        ["x-param-plat", "4"],
+        ["x-param-vn", "4.48.1"],
+        ["x-param-vc", "633"],
+        ["x-param-pkgn", "com.netease.uuremote"],
+        ["x-param-chn", "nochannel"],
+        ["x-param-ent", ""],
+        ["x-param-lang", "zh-US"],
+        ["x-param-cnt", "US"],
+        ["x-param-opr", "None"],
+        ["x-param-rel", "prod"],
+        ["x-param-ts", "1795264629"],
+        ["x-param-nonce", "n1"],
+        ["x-param-user-id", "u1"],
+        ["x-param-device-id", "d1"],
+        ["x-param-client-id", "c1"]
+      ],
+      "body_hex": "7b226c6173745f636f6e74726f6c6c65645f696e74657276616c223a2d317d",
+      "expected_signature": "2b3b7eb7c133613e7ffe9cd1473fbd44bfb808c8fcb6308565cbc61b9cbfbe9f"
     }
   ]
 }
