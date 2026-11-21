@@ -29,20 +29,20 @@ use crate::record::{TraceDirection, TraceRecorder};
 const AUTH_HEADER: &str = "x-nrd-auth";
 
 /// Transport and timing settings derived from a client [`Profile`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketConfig {
     pub signal: SignalProfile,
-    pub plat: &'static str,
-    pub version: &'static str,
+    pub plat: String,
+    pub version: String,
     pub build: u32,
 }
 
 impl SocketConfig {
     pub fn from_profile(profile: &Profile) -> Self {
         Self {
-            signal: profile.signal,
-            plat: profile.plat,
-            version: profile.version,
+            signal: profile.signal.clone(),
+            plat: profile.plat.clone(),
+            version: profile.version.clone(),
             build: profile.build,
         }
     }
@@ -212,7 +212,7 @@ impl SignalingSocket {
         #[cfg(feature = "record")] recorder: Option<Arc<TraceRecorder>>,
     ) -> Result<Self, SocketError> {
         let config = SocketConfig::from_profile(profile);
-        let ws_url = build_signaling_url(server_url, config.signal.path)?;
+        let ws_url = build_signaling_url(server_url, &config.signal.path)?;
         let request = build_upgrade_request(&ws_url, room_token, &config)?;
 
         let host = ws_url
@@ -378,11 +378,11 @@ fn build_upgrade_request(
     );
     headers.insert(
         HeaderName::from_static("x-param-plat"),
-        HeaderValue::from_str(config.plat).map_err(|_| SocketError::InvalidHeader)?,
+        HeaderValue::from_str(&config.plat).map_err(|_| SocketError::InvalidHeader)?,
     );
     headers.insert(
         HeaderName::from_static("x-param-vn"),
-        HeaderValue::from_str(config.version).map_err(|_| SocketError::InvalidHeader)?,
+        HeaderValue::from_str(&config.version).map_err(|_| SocketError::InvalidHeader)?,
     );
     headers.insert(
         HeaderName::from_static("x-param-vc"),
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn builds_ws_urls_from_profile_path() {
         let p = profile::by_id("macos-4.48.2").unwrap();
-        let url = build_signaling_url("https://cloud.example.com:8443", p.signal.path).unwrap();
+        let url = build_signaling_url("https://cloud.example.com:8443", &p.signal.path).unwrap();
         assert_eq!(
             url.as_str(),
             "wss://cloud.example.com:8443/socket.io/?EIO=4&transport=websocket"

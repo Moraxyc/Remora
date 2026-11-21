@@ -58,7 +58,7 @@ mod tests {
     fn detects_without_vc_and_rejects_mismatched_vc() {
         let headers = [("x-param-plat", "4"), ("x-param-vn", "4.48.1")];
         assert_eq!(
-            detect_from_headers(headers).map(|p| p.id),
+            detect_from_headers(headers).map(|p| p.id.as_str()),
             Some("macos-4.48.1")
         );
 

@@ -167,7 +167,7 @@ async fn serve(
     tracing::info!(
         %device_id,
         ?role,
-        profile = profile.map(|p| p.id),
+        profile = profile.map(|p| p.id.as_str()),
         "signaling connected"
     );
 

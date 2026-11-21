@@ -151,7 +151,7 @@ impl ControlClient {
         &self,
         req: &DeviceInitRequest,
     ) -> Result<DeviceInitResponse, HttpError> {
-        self.post_json(self.profile.init_endpoint, None, None, Some(req))
+        self.post_json(&self.profile.init_endpoint, None, None, Some(req))
             .await
     }
 

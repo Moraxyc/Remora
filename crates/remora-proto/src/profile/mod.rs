@@ -1,152 +1,26 @@
 //! Compile-time embedded official client profiles and capabilities.
 
-use std::time::Duration;
+use std::sync::LazyLock;
 
 pub mod detect;
 #[cfg(test)]
 #[allow(dead_code)]
 mod resolver;
+mod types;
 
 pub use detect::detect_from_headers;
+pub use types::{
+    Caps, DetectRule, FeatureCaps, Platform, Profile, ProfileSource, Quirks, SignalProfile,
+};
 
-/// Operating system family of a UU Remote client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Platform {
-    Windows,
-    MacOs,
-    Linux,
-    Ios,
-    Android,
-}
-
-/// How the profile data was obtained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ProfileSource {
-    /// Inferred or extrapolated from adjacent releases; evidence is optional.
-    Inferred,
-    /// Extracted by statically inspecting an official package or binary; requires evidence.
-    ReverseEngineered,
-    /// Observed from live wire captures against an official client; requires evidence.
-    Captured,
-}
-
-/// Header-matching rule used to identify a client profile on incoming requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DetectRule {
-    pub plat: &'static str,
-    pub version: &'static str,
-    pub build: Option<u32>,
-}
-
-/// Supported `FeatureFlag` revision levels advertised by a client build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FeatureCaps {
-    pub capture_setting: i32,
-    pub simple_action: i32,
-    pub system_metrics: i32,
-    pub private_screen: i32,
-    pub update_acquire: i32,
-    pub file_transfer_ftp: i32,
-    pub file_transfer_ftp2: i32,
-    pub clipboard: i32,
-    pub qos_stat: i32,
-    pub mumu_control: i32,
-    pub virtual_mouse_device: i32,
-}
-
-/// Wire and media capabilities of an official client build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Caps {
-    pub codecs: &'static [&'static str],
-    pub audio_codecs: &'static [&'static str],
-    pub transports: &'static [&'static str],
-    pub data_channels: &'static [&'static str],
-    pub features: FeatureCaps,
-}
-
-/// Version-specific transport and protocol quirks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Quirks {
-    pub kcp_quic_optional: bool,
-    pub log_archive_push_only: bool,
-    pub wallpaper_raw_post: bool,
-}
-
-/// Engine.IO / Socket.IO signaling timing and reconnect backoff parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SignalProfile {
-    pub path: &'static str,
-    pub handshake_timeout_ms: u64,
-    pub ping_interval_ms: u64,
-    pub ping_timeout_ms: u64,
-    pub reconnect_initial_ms: u64,
-    pub reconnect_max_ms: u64,
-    pub reconnect_key_refresh_ms: u64,
-}
-
-impl SignalProfile {
-    pub const fn handshake_timeout(&self) -> Duration {
-        Duration::from_millis(self.handshake_timeout_ms)
-    }
-
-    pub const fn ping_interval(&self) -> Duration {
-        Duration::from_millis(self.ping_interval_ms)
-    }
-
-    pub const fn ping_timeout(&self) -> Duration {
-        Duration::from_millis(self.ping_timeout_ms)
-    }
-
-    pub fn liveness_timeout(&self) -> Duration {
-        let ms = self.ping_interval_ms.saturating_add(self.ping_timeout_ms);
-        Duration::from_millis(ms).clamp(Duration::from_secs(5), Duration::from_secs(300))
-    }
-
-    pub const fn reconnect_initial(&self) -> Duration {
-        Duration::from_millis(self.reconnect_initial_ms)
-    }
-
-    pub const fn reconnect_max(&self) -> Duration {
-        Duration::from_millis(self.reconnect_max_ms)
-    }
-
-    pub const fn reconnect_key_refresh(&self) -> Duration {
-        Duration::from_millis(self.reconnect_key_refresh_ms)
-    }
-}
-
-/// Static description of an official client release, embedded from `profiles/*.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Profile {
-    pub id: &'static str,
-    pub inherits: Option<&'static str>,
-    pub source: ProfileSource,
-    pub evidence: &'static [&'static str],
-    pub platform: Platform,
-    /// `X-Param-PLAT` wire value (e.g. `"4"` for macOS).
-    pub plat: &'static str,
-    /// `X-Param-VN` wire value (e.g. `"4.48.2"`).
-    pub version: &'static str,
-    /// `X-Param-VC` build number (e.g. `634`).
-    pub build: u32,
-    pub bundle_id: &'static str,
-    pub channel: &'static str,
-    pub min_os: &'static str,
-    pub init_endpoint: &'static str,
-    pub sign_headers: &'static [&'static str],
-    pub detect: DetectRule,
-    pub caps: Caps,
-    pub quirks: Quirks,
-    pub signal: SignalProfile,
-}
-
-include!(concat!(env!("OUT_DIR"), "/profiles.rs"));
+static PROFILES: LazyLock<Vec<Profile>> = LazyLock::new(|| {
+    serde_json::from_slice(include_bytes!(concat!(env!("OUT_DIR"), "/profiles.json")))
+        .expect("embedded profiles.json must be valid")
+});
 
 /// All compile-time embedded client profiles.
 pub fn all() -> &'static [Profile] {
-    PROFILES
+    &PROFILES
 }
 
 /// Looks up an embedded profile by its identifier (e.g. `"macos-4.48.2"`).
@@ -156,65 +30,68 @@ pub fn by_id(id: &str) -> Option<&'static Profile> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolver::{CapsToml, FeaturesToml, ProfileToml, QuirksToml, resolve_all};
+    use super::resolver::resolve_all;
     use super::*;
 
-    fn base_toml(id: &str, version: &str, build: u32) -> ProfileToml {
-        ProfileToml {
-            id: id.into(),
-            inherits: None,
-            source: Some("inferred".into()),
-            evidence: Some(vec![]),
-            platform: Some("macos".into()),
-            plat: Some("4".into()),
-            version: Some(version.into()),
-            build: Some(build),
-            bundle_id: Some("com.netease.uuremote".into()),
-            channel: Some("nochannel".into()),
-            min_os: Some("11.0".into()),
-            init_endpoint: Some("/api/v1/device/macos/init".into()),
-            sign_headers: Some(vec!["X-Param-PLAT".into()]),
-            detect: None,
-            caps: Some(CapsToml {
-                codecs: Some(vec!["h264".into()]),
-                audio_codecs: Some(vec!["opus".into()]),
-                transports: Some(vec!["webrtc".into()]),
-                data_channels: Some(vec!["CONTROL_DATA_CHANNEL".into()]),
-                features: Some(FeaturesToml {
-                    capture_setting: Some(6),
-                    simple_action: Some(3),
-                    system_metrics: Some(3),
-                    private_screen: Some(2),
-                    update_acquire: Some(1),
-                    file_transfer_ftp: Some(2),
-                    file_transfer_ftp2: Some(2),
-                    clipboard: Some(3),
-                    qos_stat: Some(1),
-                    mumu_control: Some(1),
-                    virtual_mouse_device: Some(1),
-                }),
-            }),
-            quirks: Some(QuirksToml {
-                kcp_quic_optional: Some(true),
-                log_archive_push_only: Some(true),
-                wallpaper_raw_post: Some(true),
-            }),
-            signal: None,
-        }
+    fn base_toml_str(id: &str, version: &str, build: u32) -> String {
+        format!(
+            r#"
+id = "{id}"
+source = "inferred"
+evidence = []
+platform = "macos"
+plat = "4"
+version = "{version}"
+build = {build}
+bundle_id = "com.netease.uuremote"
+channel = "nochannel"
+min_os = "11.0"
+init_endpoint = "/api/v1/device/macos/init"
+sign_headers = ["X-Param-PLAT"]
+
+[caps]
+codecs = ["h264"]
+audio_codecs = ["opus"]
+transports = ["webrtc"]
+data_channels = ["CONTROL_DATA_CHANNEL"]
+
+[caps.features]
+capture_setting = 6
+simple_action = 3
+system_metrics = 3
+private_screen = 2
+update_acquire = 1
+file_transfer_ftp = 2
+file_transfer_ftp2 = 2
+clipboard = 3
+qos_stat = 1
+mumu_control = 1
+virtual_mouse_device = 1
+
+[quirks]
+kcp_quic_optional = true
+log_archive_push_only = true
+wallpaper_raw_post = true
+"#
+        )
+    }
+
+    fn parse_table(raw: &str) -> toml::Table {
+        toml::from_str(raw).expect("valid test TOML")
     }
 
     #[test]
     fn embeds_macos_profiles_with_inheritance() {
         assert!(all().len() >= 2);
         let p481 = by_id("macos-4.48.1").expect("macos-4.48.1 embedded");
-        assert_eq!(p481.inherits, None);
+        assert_eq!(p481.inherits.as_deref(), None);
         assert_eq!(p481.source, ProfileSource::ReverseEngineered);
         assert!(!p481.evidence.is_empty());
         assert_eq!(p481.platform, Platform::MacOs);
         assert_eq!(p481.build, 633);
 
         let p482 = by_id("macos-4.48.2").expect("macos-4.48.2 embedded");
-        assert_eq!(p482.inherits, Some("macos-4.48.1"));
+        assert_eq!(p482.inherits.as_deref(), Some("macos-4.48.1"));
         assert_eq!(p482.source, ProfileSource::ReverseEngineered);
         assert_eq!(p482.build, 634);
         assert_eq!(p482.caps, p481.caps);
@@ -225,7 +102,7 @@ mod tests {
     #[test]
     fn embeds_windows_4_48_2_profile() {
         let win = by_id("windows-4.48.2").expect("windows-4.48.2 embedded");
-        assert_eq!(win.inherits, None);
+        assert_eq!(win.inherits.as_deref(), None);
         assert_eq!(win.source, ProfileSource::ReverseEngineered);
         assert!(!win.evidence.is_empty());
         assert_eq!(win.platform, Platform::Windows);
@@ -236,52 +113,89 @@ mod tests {
         assert_eq!(win.channel, "nochannel");
         assert_eq!(win.min_os, "6.0");
         assert_eq!(win.init_endpoint, "/api/v1/device/windows/init");
-        assert_eq!(win.caps.codecs, &["h264", "h265"]);
-        assert_eq!(win.caps.audio_codecs, &["opus"]);
-        assert_eq!(win.caps.transports, &["webrtc", "mix-kcp", "quic"]);
+        assert_eq!(win.caps.codecs, ["h264", "h265"]);
+        assert_eq!(win.caps.audio_codecs, ["opus"]);
+        assert_eq!(win.caps.transports, ["webrtc", "mix-kcp", "quic"]);
         assert_eq!(win.caps.features.capture_setting, 6);
         assert_eq!(win.caps.features.virtual_mouse_device, 1);
     }
 
     #[test]
     fn rejects_unknown_capability_names() {
-        let mut p = base_toml("bad-cap", "4.48.1", 633);
-        p.caps.as_mut().unwrap().codecs = Some(vec!["vp9".into()]);
+        let mut p = parse_table(&base_toml_str("bad-cap", "4.48.1", 633));
+        p["caps"].as_table_mut().unwrap().insert(
+            "codecs".into(),
+            toml::Value::Array(vec![toml::Value::String("vp9".into())]),
+        );
         let err = resolve_all(vec![p]).unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
     }
 
     #[test]
     fn rejects_inherits_cycles() {
-        let mut a = base_toml("a", "4.48.1", 633);
-        a.inherits = Some("b".into());
-        let mut b = base_toml("b", "4.48.2", 634);
-        b.inherits = Some("a".into());
+        let mut a = parse_table(&base_toml_str("a", "4.48.1", 633));
+        a.insert("inherits".into(), toml::Value::String("b".into()));
+        let mut b = parse_table(&base_toml_str("b", "4.48.2", 634));
+        b.insert("inherits".into(), toml::Value::String("a".into()));
         let err = resolve_all(vec![a, b]).unwrap_err();
         assert!(err.contains("cycle"), "{err}");
     }
 
     #[test]
     fn rejects_duplicate_detect_rules() {
-        let a = base_toml("a", "4.48.1", 633);
-        let b = base_toml("b", "4.48.1", 633);
+        let a = parse_table(&base_toml_str("a", "4.48.1", 633));
+        let b = parse_table(&base_toml_str("b", "4.48.1", 633));
         let err = resolve_all(vec![a, b]).unwrap_err();
         assert!(err.contains("duplicate detect rule"), "{err}");
     }
 
     #[test]
     fn requires_evidence_only_for_reverse_engineered_and_captured() {
-        let inferred = base_toml("inf", "4.48.0", 632);
+        let inferred = parse_table(&base_toml_str("inf", "4.48.0", 632));
         assert!(resolve_all(vec![inferred]).is_ok());
 
-        let mut rev = base_toml("rev", "4.48.1", 633);
-        rev.source = Some("reverse_engineered".into());
+        let mut rev = parse_table(&base_toml_str("rev", "4.48.1", 633));
+        rev.insert(
+            "source".into(),
+            toml::Value::String("reverse_engineered".into()),
+        );
         let err = resolve_all(vec![rev]).unwrap_err();
         assert!(err.contains("evidence"), "{err}");
 
-        let mut cap = base_toml("cap", "4.48.2", 634);
-        cap.source = Some("captured".into());
+        let mut cap = parse_table(&base_toml_str("cap", "4.48.2", 634));
+        cap.insert("source".into(), toml::Value::String("captured".into()));
         let err = resolve_all(vec![cap]).unwrap_err();
         assert!(err.contains("evidence"), "{err}");
+    }
+
+    #[test]
+    fn merges_nested_tables_and_defaults_signal_and_detect() {
+        let parent = parse_table(&format!(
+            "{}\n[signal]\nping_interval_ms = 10000\n",
+            base_toml_str("parent", "4.48.1", 633)
+        ));
+        let child = parse_table(
+            r#"
+id = "child"
+inherits = "parent"
+version = "4.48.2"
+build = 634
+
+[caps.features]
+simple_action = 4
+
+[signal]
+ping_timeout_ms = 5000
+"#,
+        );
+        let resolved = resolve_all(vec![parent, child]).expect("merge should succeed");
+        let child = &resolved[1];
+        assert_eq!(child.caps.features.capture_setting, 6);
+        assert_eq!(child.caps.features.simple_action, 4);
+        assert_eq!(child.signal.ping_interval_ms, 10_000);
+        assert_eq!(child.signal.ping_timeout_ms, 5_000);
+        assert_eq!(child.signal.handshake_timeout_ms, 20_000);
+        assert_eq!(child.detect.version, "4.48.2");
+        assert_eq!(child.detect.build, Some(634));
     }
 }

@@ -56,7 +56,7 @@ mod tests {
     async fn handler(ClientProfile(profile): ClientProfile, request: Request) -> String {
         let from_ext = request.extensions().get::<&'static Profile>().copied();
         assert_eq!(profile, from_ext);
-        profile.map_or("none", |p| p.id).to_owned()
+        profile.map_or("none", |p| p.id.as_str()).to_owned()
     }
 
     #[tokio::test]
