@@ -12,6 +12,7 @@ use super::engineio::Handshake;
 pub const CONNECT: &str = "40";
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Packet {
     Open(Handshake),
     Close,
@@ -100,6 +101,11 @@ pub struct Decoder {
 impl Decoder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the decoder is waiting for binary attachment frames.
+    pub fn is_awaiting_binary(&self) -> bool {
+        self.awaiting.is_some()
     }
 
     /// Returns `None` while a binary packet still waits for attachments.

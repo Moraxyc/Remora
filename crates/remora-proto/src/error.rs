@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Numeric status code carried in the cloud JSON response envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// Success (`0`).
     Ok,

@@ -6,6 +6,7 @@ use crate::control::signing::{SIGN_HEADER, SignKey, verify};
 
 /// Why a signed control-plane request failed signature verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VerifyError {
     MissingSignature,
     InvalidSignature,

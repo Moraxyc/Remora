@@ -28,6 +28,7 @@ struct Envelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ApiError {
     /// The user token is invalid or expired: log in again, do not retry.
     TokenExpired,
