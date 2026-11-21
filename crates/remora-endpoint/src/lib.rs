@@ -25,9 +25,9 @@ mod sdk {
     use rand::RngCore;
     use rand::SeedableRng;
     use remora_proto::control::{
-        ApiError, DeviceInitRequest, DeviceInitResponse, DeviceListResponse, LoginByQrcodeRequest,
-        LoginResponse, QrCodeStatus, QrLoginGenResponse, QrLoginStatusRequest, RoomJoinRequest,
-        SignKey, UserInfoResponse,
+        ApiError, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse, DeviceListResponse,
+        DevicePreferencesResponse, LoginByQrcodeRequest, LoginResponse, QrCodeStatus,
+        QrLoginGenResponse, QrLoginStatusRequest, RoomJoinRequest, SignKey, UserInfoResponse,
     };
     use remora_proto::machine::Timestamp;
     use remora_proto::machine::signaling::{SignalingEvent, SignalingMachine};
@@ -386,6 +386,43 @@ mod sdk {
                 .http
                 .device_list(&token, device_id.as_deref())
                 .await?)
+        }
+
+        /// Lists owned devices grouped by form factor (`GET /api/v1/device/groups/of/my`).
+        pub async fn device_groups(&self) -> Result<DeviceGroupsResponse, EndpointError> {
+            let (token, device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .device_groups(&token, device_id.as_deref())
+                .await?)
+        }
+
+        /// Fetches per-device preferences (`GET /api/v1/device/{id}/preferences`).
+        pub async fn device_preferences(
+            &self,
+            target_device_id: impl AsRef<str>,
+        ) -> Result<DevicePreferencesResponse, EndpointError> {
+            let (token, device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .device_preferences(&token, target_device_id.as_ref(), device_id.as_deref())
+                .await?)
+        }
+
+        /// Updates whether this macOS installation allows incoming remote control.
+        pub async fn set_controllable(&self, controllable: bool) -> Result<(), EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            self.inner
+                .http
+                .mac_controllable(&token, &device_id, controllable)
+                .await?;
+            Ok(())
         }
 
         /// Registers or updates this installation's device record and stores `device_id`.
@@ -1223,6 +1260,37 @@ mod tests {
                                 "others_shared_devices": []
                             }
                         }),
+                        ("GET", "/api/v1/device/groups/of/my") => json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {
+                                "current_device_id": "dev-mac-1",
+                                "mobile_devices": [],
+                                "desktop_devices": [{
+                                    "device_id": "dev-mac-1",
+                                    "alias": "Mac",
+                                    "platform": 4,
+                                    "status": "CONNECTED",
+                                    "controllable": true
+                                }],
+                                "tv_devices": []
+                            }
+                        }),
+                        ("POST", "/api/v1/device/mac_controllable") => json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {}
+                        }),
+                        ("GET", "/api/v1/device/dev-mac-1/preferences") => json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {
+                                "device_preferences": {
+                                    "device_id": "dev-mac-1",
+                                    "tools": { "sequence": ["file_transfer"] }
+                                }
+                            }
+                        }),
                         ("POST", "/api/v1/room/create") => json!({
                             "code": 0,
                             "msg": "ok",
@@ -1277,6 +1345,12 @@ mod tests {
 
         let devices = endpoint.devices().await.unwrap();
         assert_eq!(devices.my_binded_devices[0].status, DeviceStatus::Connected);
+
+        let groups = endpoint.device_groups().await.unwrap();
+        assert_eq!(groups.desktop_devices.len(), 1);
+        endpoint.set_controllable(false).await.unwrap();
+        let prefs = endpoint.device_preferences("dev-mac-1").await.unwrap();
+        assert_eq!(prefs.device_preferences.device_id, "dev-mac-1");
 
         let mut host_room = endpoint.register_host().await.unwrap();
         assert_eq!(host_room.role(), RoomRole::Host);

@@ -6,9 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngCore;
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
-    ApiError, DeviceInitRequest, DeviceInitResponse, DeviceListResponse, LoginByQrcodeRequest,
-    LoginResponse, QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse,
-    RoomCreateResponse, RoomJoinRequest, RoomJoinResponse, UserInfoResponse, parse_response,
+    ApiError, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse, DeviceListResponse,
+    DevicePreferencesResponse, LoginByQrcodeRequest, LoginResponse, MacControllableRequest,
+    QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse, RoomCreateResponse,
+    RoomJoinRequest, RoomJoinResponse, UserInfoResponse, parse_response,
 };
 use remora_proto::machine::auth::SignedHttpRequest;
 use remora_proto::profile::Profile;
@@ -210,6 +211,45 @@ impl ControlClient {
     ) -> Result<DeviceListResponse, HttpError> {
         self.get("/api/v1/device/list", Some(user_token), device_id)
             .await
+    }
+
+    /// Lists owned devices grouped by form factor (`GET /api/v1/device/groups/of/my`).
+    pub async fn device_groups(
+        &self,
+        user_token: &str,
+        device_id: Option<&str>,
+    ) -> Result<DeviceGroupsResponse, HttpError> {
+        self.get("/api/v1/device/groups/of/my", Some(user_token), device_id)
+            .await
+    }
+
+    /// Fetches per-device preferences (`GET /api/v1/device/{id}/preferences`).
+    pub async fn device_preferences(
+        &self,
+        user_token: &str,
+        target_device_id: &str,
+        caller_device_id: Option<&str>,
+    ) -> Result<DevicePreferencesResponse, HttpError> {
+        let path = format!("/api/v1/device/{target_device_id}/preferences");
+        self.get(&path, Some(user_token), caller_device_id).await
+    }
+
+    /// Updates whether the calling macOS host allows incoming control
+    /// (`POST /api/v1/device/mac_controllable`).
+    pub async fn mac_controllable(
+        &self,
+        user_token: &str,
+        device_id: &str,
+        controllable: bool,
+    ) -> Result<EmptyData, HttpError> {
+        let body = MacControllableRequest { controllable };
+        self.post_json(
+            "/api/v1/device/mac_controllable",
+            Some(user_token),
+            Some(device_id),
+            Some(&body),
+        )
+        .await
     }
 
     /// Unbinds `target_device_id` from the authenticated user (`POST /api/v1/device/{id}/unbind`).
@@ -582,6 +622,43 @@ mod tests {
                         .to_string(),
                     )
                 }
+                ("GET", "/api/v1/device/groups/of/my") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "current_device_id": "dev-1",
+                            "mobile_devices": [],
+                            "desktop_devices": [{
+                                "device_id": "dev-1",
+                                "alias": "Mac",
+                                "platform": 4,
+                                "status": "CONNECTED",
+                                "controllable": true
+                            }],
+                            "tv_devices": []
+                        }
+                    })
+                    .to_string(),
+                ),
+                ("POST", "/api/v1/device/mac_controllable") => {
+                    (200, json!({"code": 0, "msg": "ok", "data": {}}).to_string())
+                }
+                ("GET", "/api/v1/device/dev-1/preferences") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": {
+                            "device_preferences": {
+                                "device_id": "dev-1",
+                                "tools": { "sequence": ["file_transfer"] }
+                            }
+                        }
+                    })
+                    .to_string(),
+                ),
                 ("POST", "/api/v1/room/create") => (
                     200,
                     json!({
@@ -659,6 +736,23 @@ mod tests {
             .unwrap();
         assert_eq!(devices.my_binded_devices.len(), 1);
         assert_eq!(devices.my_binded_devices[0].status, DeviceStatus::Connected);
+
+        let groups = client
+            .device_groups(&login.token, Some("dev-1"))
+            .await
+            .unwrap();
+        assert_eq!(groups.desktop_devices.len(), 1);
+        assert_eq!(groups.desktop_devices[0].controllable, Some(true));
+
+        client
+            .mac_controllable(&login.token, "dev-1", false)
+            .await
+            .unwrap();
+        let prefs = client
+            .device_preferences(&login.token, "dev-1", Some("dev-1"))
+            .await
+            .unwrap();
+        assert_eq!(prefs.device_preferences.device_id, "dev-1");
 
         let created = client.room_create(&login.token, "dev-1").await.unwrap();
         assert_eq!(created.ws_connect_timeout_ms, 10000);
