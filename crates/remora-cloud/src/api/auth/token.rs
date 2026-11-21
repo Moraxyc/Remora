@@ -192,6 +192,8 @@ struct RoomClaims {
     kind: Kind,
     #[serde(flatten)]
     room: Room,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
     exp: u64,
 }
 
@@ -224,6 +226,7 @@ impl TokenKey {
         self.sign(&RoomClaims {
             kind: Kind::Room,
             room,
+            jti: Some(hex::encode(random::<8>())),
             exp: now() + ROOM_TOKEN_LIFETIME.as_secs(),
         })
     }
@@ -363,6 +366,8 @@ mod tests {
     fn room_tokens_expire() {
         let key = TokenKey::generate();
         let token = key.issue_room(room());
+        let second = key.issue_room(room());
+        assert_ne!(token, second);
         let exp = payload(&token)["exp"].as_u64().unwrap();
         assert!(exp > now() && exp <= now() + ROOM_TOKEN_LIFETIME.as_secs());
         assert_eq!(key.verify_room(&token), Some(room()));
@@ -370,6 +375,7 @@ mod tests {
         let expired = key.sign(&RoomClaims {
             kind: Kind::Room,
             room: room(),
+            jti: None,
             exp: now() - 1,
         });
         assert_eq!(key.verify_room(&expired), None);
