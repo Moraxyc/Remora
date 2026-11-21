@@ -1,0 +1,148 @@
+name: 07-concurrent-join
+description: Parallel join rejection without force_join (2002) and takeover with force_join
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: concurrent-host
+  viewer1:
+    kind: viewer
+    device_name: viewer-one
+  viewer2:
+    kind: viewer
+    device_name: viewer-two
+  viewer3:
+    kind: viewer
+    device_name: viewer-three
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: ws_connect
+    auto_room_info: true
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+
+  # First viewer acquires desktop session.
+  - actor: viewer1
+    action: room_join
+    target: host
+    token: "${host.user_token}"
+    force_join: false
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer1
+    action: ws_connect
+
+  - actor: viewer1
+    action: send_control
+    app_control_id: v1-desktop
+    capture_type: 1
+    save:
+      v1_ice: ice_id
+    expect:
+      ack_status: success
+
+  - actor: host
+    action: wait_event
+    event: be-controlled
+    expect:
+      json_eq:
+        ice_id: "${vars.v1_ice}"
+
+  # Two competing viewers concurrently attempt non-forced join and must both receive 2002.
+  - parallel:
+      - - actor: viewer2
+          action: room_join
+          target: host
+          token: "${host.user_token}"
+          force_join: false
+          expect:
+            http_status: 400
+            code: 2002
+      - - actor: viewer3
+          action: room_join
+          target: host
+          token: "${host.user_token}"
+          force_join: false
+          expect:
+            http_status: 400
+            code: 2002
+
+  # Forced join takes over: viewer1 gets left, host gets released + new be-controlled.
+  - actor: viewer2
+    action: room_join
+    target: host
+    token: "${host.user_token}"
+    force_join: true
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer2
+    action: ws_connect
+
+  - actor: viewer2
+    action: send_control
+    app_control_id: v2-takeover
+    capture_type: 1
+    save:
+      v2_ice: ice_id
+    expect:
+      ack_status: success
+
+  - actor: host
+    action: wait_event
+    event: released
+    expect:
+      json_eq:
+        ice_id: "${vars.v1_ice}"
+
+  - actor: viewer1
+    action: wait_event
+    event: left
+    expect:
+      json_eq:
+        ice_id: "${vars.v1_ice}"
+
+  - actor: host
+    action: wait_event
+    event: be-controlled
+    expect:
+      json_eq:
+        ice_id: "${vars.v2_ice}"
+
+  - actor: viewer2
+    action: device_unbind
+    target: host
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

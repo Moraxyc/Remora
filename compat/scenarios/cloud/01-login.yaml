@@ -1,0 +1,65 @@
+name: 01-login
+description: QR login flow, user info lookup, logout, and post-logout token rejection
+profile: windows-4.48.2
+
+actors:
+  viewer:
+    kind: viewer
+    device_name: login-viewer
+
+steps:
+  - actor: viewer
+    action: qr_generate
+    save:
+      ticket: status_query_ticket
+      jump_url: qrcode_jump_url
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - qrcode_jump_url
+        - status_query_ticket
+
+  - actor: viewer
+    action: qr_status
+    login_status: 1
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        status: 4
+
+  - actor: viewer
+    action: login_by_qrcode
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - token
+        - user_id
+        - nickname
+
+  - actor: viewer
+    action: user_info
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        user_id: "1"
+
+  - actor: viewer
+    action: user_logout
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: user_info
+    expect:
+      http_status: 422
+      code: 1120
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

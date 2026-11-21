@@ -1,0 +1,46 @@
+name: 03-device-register
+description: Device registration stability per client_id, distinctness across clients, and rename on re-init
+profile: windows-4.48.2
+
+actors:
+  host_a:
+    kind: host
+    client_id: lab-03-install-a
+    device_name: studio-old
+  host_b:
+    kind: host
+    client_id: lab-03-install-b
+    device_name: laptop-b
+
+steps:
+  - actor: host_a
+    action: device_init
+    save:
+      first_a_id: device_id
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - device_id
+
+  - actor: host_a
+    action: device_init
+    name: studio-new
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        device_id: "${vars.first_a_id}"
+
+  - actor: host_b
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - device_id
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

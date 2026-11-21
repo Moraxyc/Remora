@@ -1,0 +1,106 @@
+name: 09-error-codes
+description: Wire error codes 1001, 1002, 1120, 1190, 2001, and 2003
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: error-host
+  viewer:
+    kind: viewer
+    device_name: error-viewer
+
+steps:
+  # 1002: unsigned request when sign_key is configured
+  - actor: viewer
+    action: device_init
+    sign: false
+    expect:
+      http_status: 403
+      code: 1002
+
+  # 1001: malformed JSON body
+  - actor: viewer
+    action: raw_http
+    method: POST
+    path: /api/v1/device/windows/init
+    raw_body: "{"
+    sign: true
+    expect:
+      http_status: 422
+      code: 1001
+
+  # 1120: invalid user token
+  - actor: viewer
+    action: raw_http
+    method: GET
+    path: /api/v1/user/info
+    token: invalid-user-token
+    sign: true
+    expect:
+      http_status: 422
+      code: 1120
+
+  # 1190: unknown QR login ticket
+  - actor: viewer
+    action: raw_http
+    method: POST
+    path: /api/v1/login/by_qrcode
+    body:
+      token: unknown-ticket
+      qrcode_jump_url: https://remora.invalid/login/unknown
+    sign: true
+    expect:
+      http_status: 400
+      code: 1190
+
+  # Login + register an offline device (room_create without ws_connect).
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  # 2001: target device is bound but offline
+  - actor: viewer
+    action: room_join
+    target: host
+    token: "${host.user_token}"
+    force_join: false
+    expect:
+      http_status: 400
+      code: 2001
+
+  # 2003: unknown device id
+  - actor: viewer
+    action: room_join
+    target: unknown-device-id
+    token: "${host.user_token}"
+    force_join: false
+    expect:
+      http_status: 400
+      code: 2003
+
+  - actor: host
+    action: device_unbind
+    target: host
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

@@ -15,6 +15,7 @@
 
       packages = {
         remora = final.callPackage ./package.nix { craneLib = inputs.crane.mkLib final; };
+        remora-lab = config.packages.remora.passthru.lab;
         remora-web = pkgs.buildPackages.callPackage ./web.nix { };
         default = config.packages.remora;
       }

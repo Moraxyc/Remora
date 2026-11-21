@@ -115,6 +115,21 @@
           cargoDenyExtraArgs = "--manifest-path crates/remora-proto/Cargo.toml --config crates/remora-proto/deny.toml";
           cargoDenyChecks = "bans";
         };
+        lab = craneLib.buildPackage {
+          pname = "remora-lab";
+          inherit (prevAttrs)
+            version
+            src
+            strictDeps
+            cargoArtifacts
+            AWS_LC_SYS_USE_SYSTEM
+            LIBSQLITE3_SYS_USE_PKG_CONFIG
+            buildInputs
+            ;
+          nativeBuildInputs = [ pkg-config ];
+          cargoExtraArgs = "--package remora-lab";
+          doCheck = false;
+        };
       };
 
       meta = (prevAttrs.meta or { }) // {

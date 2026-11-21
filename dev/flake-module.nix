@@ -34,6 +34,13 @@
           nixos = pkgs.testers.runNixOSTest (
             import ../nix/tests/remora.nix { module = self.nixosModules.default; }
           );
+          compat = pkgs.testers.runNixOSTest (
+            import ../nix/tests/compat.nix {
+              remoraModule = self.nixosModules.default;
+              remoraPackage = self'.packages.remora;
+              labPackage = self'.packages.remora-lab;
+            }
+          );
           interop-linux = pkgs.testers.runNixOSTest (
             import ../nix/tests/interop-linux.nix {
               remoraModule = self.nixosModules.default;

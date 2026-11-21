@@ -1,0 +1,38 @@
+# Standalone dependency policy for remora-lab (MIT OR Apache-2.0).
+# Ensures remora-lab never depends on remora-cloud, GPL crates, or webpki-roots.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "remora-cloud", reason = "remora-lab must interact with remora-cloud as an external binary/service, never link it" },
+    { crate = "webpki-roots", reason = "TLS clients must verify against the OS trust store via rustls-platform-verifier" },
+    { crate = "rusqlite", reason = "lab must not pull cloud storage dependencies" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

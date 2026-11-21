@@ -1,0 +1,125 @@
+name: 08-reconnect
+description: Session survives host signaling reconnect within grace period; unbind kicks host with left without ice_id
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: reconnect-host
+  viewer:
+    kind: viewer
+    device_name: reconnect-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: ws_connect
+    auto_room_info: true
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+
+  - actor: viewer
+    action: room_join
+    target: host
+    token: "${host.user_token}"
+    force_join: false
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: ws_connect
+
+  - actor: viewer
+    action: send_control
+    app_control_id: reconn-app
+    capture_type: 1
+    save:
+      ice_id: ice_id
+    expect:
+      ack_status: success
+
+  - actor: host
+    action: wait_event
+    event: be-controlled
+
+  # Host drops signaling and reconnects with a fresh room ticket.
+  - actor: host
+    action: ws_disconnect
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: ws_connect
+    auto_room_info: true
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+
+  # Existing session remains alive so viewer can still relay soac to the reconnected host.
+  - actor: viewer
+    action: send_soac
+    ice_id: "${vars.ice_id}"
+    kind: candidate
+    candidate: "candidate:1 1 UDP 2130706431 192.0.2.1 50000 typ host"
+
+  - actor: host
+    action: wait_event
+    event: soac
+    expect:
+      json_eq:
+        data.type: candidate
+        data.ice_id: "${vars.ice_id}"
+
+  # Unbinding the host sends a room-kick `left` (no ice_id) to host and ends viewer's session.
+  - actor: viewer
+    action: device_unbind
+    target: host
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: wait_event
+    event: left
+    expect:
+      json_eq:
+        is_room_kick: true
+
+  - actor: viewer
+    action: wait_event
+    event: left
+    expect:
+      json_eq:
+        ice_id: "${vars.ice_id}"
+        is_room_kick: false
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

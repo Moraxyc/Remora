@@ -1,0 +1,88 @@
+name: 05-presence
+description: Host online/offline presence transitions reflected in device/list
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: presence-host
+  viewer:
+    kind: viewer
+    device_name: presence-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_list
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      json_contains:
+        my_binded_devices:
+          device_id: "${host.device_id}"
+          status: DISCONNECTED
+
+  - actor: host
+    action: ws_connect
+    expect:
+      event_name: connected
+
+  - actor: host
+    action: send_room_info
+    expect:
+      event_name: room_info_ack
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      json_eq:
+        data.publisher_availability_status: ready
+
+  - actor: viewer
+    action: device_list
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      json_contains:
+        my_binded_devices:
+          device_id: "${host.device_id}"
+          status: CONNECTED
+
+  - actor: host
+    action: ws_disconnect
+
+  - actor: host
+    action: poll_device_status
+    target: host
+    expected_status: DISCONNECTED
+    timeout_ms: 3000
+
+  - actor: host
+    action: device_unbind
+    target: host
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

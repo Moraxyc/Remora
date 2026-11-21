@@ -1,0 +1,85 @@
+name: 04-device-list
+description: Device list visibility before/after room binding and removal + host session revocation on unbind
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: listed-host
+  viewer:
+    kind: viewer
+    device_name: listed-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  # Before room_create binds the device to the user, my_binded_devices is empty.
+  - actor: viewer
+    action: device_list
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        my_binded_devices: []
+        others_shared_devices: []
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_list
+    expect:
+      http_status: 200
+      code: 0
+      json_contains:
+        my_binded_devices:
+          device_id: "${host.device_id}"
+          alias: listed-host
+          platform: 1
+          status: DISCONNECTED
+
+  - actor: viewer
+    action: device_unbind
+    target: host
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_list
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        my_binded_devices: []
+
+  # Unbinding also revokes the host's login session bound to that device.
+  - actor: host
+    action: user_info
+    expect:
+      http_status: 422
+      code: 1120
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

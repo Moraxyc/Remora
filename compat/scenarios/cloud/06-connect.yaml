@@ -1,0 +1,143 @@
+name: 06-connect
+description: Viewer joins host room, negotiates control + ConnectOptions, and relays soac/forward_setting
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: connect-host
+  viewer:
+    kind: viewer
+    device_name: connect-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: ws_connect
+    auto_room_info: true
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      json_eq:
+        data.publisher_availability_status: ready
+
+  - actor: viewer
+    action: room_join
+    target: host
+    token: "${host.user_token}"
+    force_join: false
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        publisher_platform: 1
+      json_exists:
+        - token
+
+  - actor: viewer
+    action: ws_connect
+
+  - actor: viewer
+    action: send_control
+    app_control_id: ctrl-app-1
+    capture_type: 1
+    save:
+      ice_id: ice_id
+    expect:
+      ack_status: success
+      json_eq:
+        app_control_id: ctrl-app-1
+      json_exists:
+        - ice_id
+        - client_id
+
+  - actor: host
+    action: wait_event
+    event: be-controlled
+    expect:
+      event_name: be-controlled
+      json_eq:
+        ice_id: "${vars.ice_id}"
+        app_control_id: ctrl-app-1
+        connect_options_len: 2
+
+  - actor: viewer
+    action: send_soac
+    ice_id: "${vars.ice_id}"
+    kind: offer
+    sdp: "v=0\r\na=ice-ufrag:labufrag\r\na=ice-pwd:labsupersecretpwd\r\n"
+
+  - actor: host
+    action: wait_event
+    event: soac
+    expect:
+      event_name: soac
+      json_eq:
+        data.type: offer
+        data.ice_id: "${vars.ice_id}"
+
+  - actor: host
+    action: send_soac
+    ice_id: "${vars.ice_id}"
+    client_id: "${host.last_peer_client_id}"
+    kind: answer
+    sdp: "v=0\r\na=ice-ufrag:answrufrag\r\na=ice-pwd:answrsecretpwd\r\n"
+
+  - actor: viewer
+    action: wait_event
+    event: soac
+    expect:
+      event_name: soac
+      json_eq:
+        data.type: answer
+        data.ice_id: "${vars.ice_id}"
+
+  - actor: host
+    action: send_forward_setting
+    ice_id: "${vars.ice_id}"
+    client_id: "${host.last_peer_client_id}"
+    data:
+      device_capability:
+        codecs: ["h264"]
+
+  - actor: viewer
+    action: wait_event
+    event: forward_setting
+    expect:
+      event_name: forward_setting
+
+  - actor: host
+    action: headless_roundtrip
+    expected_frames: 3
+
+  - actor: viewer
+    action: device_unbind
+    target: host
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

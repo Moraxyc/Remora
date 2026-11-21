@@ -1,0 +1,90 @@
+name: 02-refresh-token
+description: Host signaling refresh_reconnect_key ack and room ticket renewal
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: refresh-host
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - device_id
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    save:
+      first_room_token: token
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - token
+        - signaling_server
+
+  - actor: host
+    action: ws_connect
+    expect:
+      event_name: connected
+
+  - actor: host
+    action: send_room_info
+    expect:
+      event_name: room_info_ack
+
+  - actor: host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      event_name: bmsg_push
+      json_eq:
+        data.publisher_availability_status: ready
+
+  - actor: host
+    action: send_refresh_reconnect_key
+    expect:
+      ack_status: success
+      json_eq:
+        refreshed: true
+
+  # Renewing a room issues a fresh room ticket and cleanly replaces the old connection.
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - token
+
+  - actor: host
+    action: ws_connect
+    expect:
+      event_name: connected
+
+  - actor: host
+    action: send_refresh_reconnect_key
+    expect:
+      ack_status: success
+
+  - actor: host
+    action: device_unbind
+    target: host
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace
