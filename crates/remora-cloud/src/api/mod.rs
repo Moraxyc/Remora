@@ -14,19 +14,19 @@ use axum::extract::FromRequest;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use remora_proto::error::ErrorCode;
+use remora_proto::server::{EmptyData, error_envelope, ok_envelope};
 use serde::Serialize;
-use serde_json::json;
 
 /// Success: HTTP 200, `code` 0.
 pub struct Ok<T>(pub T);
 
 /// `data` of a success that has nothing to say: `{}`.
-#[derive(Serialize)]
-pub struct Empty {}
+pub type Empty = EmptyData;
 
 impl<T: Serialize> IntoResponse for Ok<T> {
     fn into_response(self) -> Response {
-        Json(json!({ "code": 0, "msg": "ok", "data": self.0 })).into_response()
+        Json(ok_envelope(self.0)).into_response()
     }
 }
 
@@ -34,7 +34,7 @@ impl<T: Serialize> IntoResponse for Ok<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApiError {
     status: StatusCode,
-    code: i64,
+    code: ErrorCode,
     msg: &'static str,
 }
 
@@ -42,21 +42,21 @@ impl ApiError {
     /// The request body is missing, not JSON, or lacks required fields.
     pub const INVALID_REQUEST: Self = Self {
         status: StatusCode::UNPROCESSABLE_ENTITY,
-        code: 1001,
+        code: ErrorCode::InvalidRequest,
         msg: "invalid request",
     };
 
     /// The user token is missing, invalid or expired: clients log in again.
     pub const TOKEN_INVALID: Self = Self {
         status: StatusCode::UNPROCESSABLE_ENTITY,
-        code: 1120,
+        code: ErrorCode::TokenExpired,
         msg: "login expired",
     };
 
     /// The QR login is unknown, expired or already used.
     pub const QR_EXPIRED: Self = Self {
         status: StatusCode::BAD_REQUEST,
-        code: 1190,
+        code: ErrorCode::QrCodeExpired,
         msg: "QR code expired",
     };
 
@@ -64,35 +64,35 @@ impl ApiError {
     /// non-zero code as a rejection.
     pub const INVALID_SIGNATURE: Self = Self {
         status: StatusCode::FORBIDDEN,
-        code: 1002,
+        code: ErrorCode::InvalidSignature,
         msg: "invalid signature",
     };
 
     /// The device is not one of the user's. This code and the next are Remora's own.
     pub const UNKNOWN_DEVICE: Self = Self {
         status: StatusCode::BAD_REQUEST,
-        code: 2003,
+        code: ErrorCode::UnknownDevice,
         msg: "no such device",
     };
 
     /// Another device controls the host's desktop. Clients know this code and say so.
     pub const BEING_CONTROLLED: Self = Self {
         status: StatusCode::BAD_REQUEST,
-        code: 2002,
+        code: ErrorCode::BeingControlled,
         msg: "被控端正在被远控中，无法发起连接",
     };
 
     /// Something on the server failed, such as the database. Remora's own code.
     pub const INTERNAL: Self = Self {
         status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: 1000,
+        code: ErrorCode::Internal,
         msg: "internal error",
     };
 
     /// The device's host is not on signaling.
     pub const DEVICE_OFFLINE: Self = Self {
         status: StatusCode::BAD_REQUEST,
-        code: 2001,
+        code: ErrorCode::DeviceOffline,
         msg: "device is offline",
     };
 
@@ -100,15 +100,14 @@ impl ApiError {
     /// clients treat it like any other failure.
     pub const TOO_MANY_REQUESTS: Self = Self {
         status: StatusCode::TOO_MANY_REQUESTS,
-        code: 1429,
+        code: ErrorCode::TooManyRequests,
         msg: "too many requests",
     };
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "code": self.code, "msg": self.msg, "data": {} });
-        (self.status, Json(body)).into_response()
+        (self.status, Json(error_envelope(self.code, self.msg))).into_response()
     }
 }
 

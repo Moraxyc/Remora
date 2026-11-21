@@ -1,0 +1,58 @@
+id = "macos-4.48.1"
+platform = "macos"
+plat = "4"
+version = "4.48.1"
+build = 633
+bundle_id = "com.netease.uuremote"
+channel = "nochannel"
+min_os = "11.0"
+init_endpoint = "/api/v1/device/macos/init"
+sign_headers = [
+    "X-Param-PLAT",
+    "X-Param-VN",
+    "X-Param-VC",
+    "X-Param-PKGN",
+    "X-Param-CHN",
+    "X-Param-LANG",
+    "X-Param-CNT",
+    "X-Param-ENT",
+    "X-Param-TS",
+    "X-Param-NONCE",
+    "X-Param-REL",
+    "X-Param-OPR",
+    "X-Param-user-id",
+    "X-Param-device-id",
+    "X-Param-client-id",
+    "X-Param-guest-id",
+    "X-Param-global-net",
+]
+
+[caps]
+codecs = ["h264", "h265"]
+audio_codecs = ["opus"]
+transports = ["webrtc", "mix-kcp", "quic"]
+data_channels = [
+    "CONTROL_DATA_CHANNEL",
+    "TEXT_DATA_CHANNEL",
+    "FILE_DATA_CHANNEL",
+    "BINARY_DATA_CHANNEL",
+    "STREAMER_DATA_CHANNEL",
+]
+
+[caps.features]
+capture_setting = 6
+simple_action = 3
+system_metrics = 3
+private_screen = 2
+update_acquire = 1
+file_transfer_ftp = 2
+file_transfer_ftp2 = 2
+clipboard = 3
+qos_stat = 1
+mumu_control = 1
+virtual_mouse_device = 1
+
+[quirks]
+kcp_quic_optional = true
+log_archive_push_only = true
+wallpaper_raw_post = true

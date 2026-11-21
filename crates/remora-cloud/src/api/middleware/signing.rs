@@ -1,4 +1,4 @@
-//! Optional `x-param-sign` verification.
+//! Optional `x-param-sign` verification middleware.
 
 use std::sync::Arc;
 
@@ -6,7 +6,8 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use remora_proto::control::{SIGN_HEADER, SignKey, verify};
+use remora_proto::control::SignKey;
+use remora_proto::server::verify_request;
 
 use crate::api::ApiError;
 
@@ -28,16 +29,9 @@ pub async fn require_signature(
         .headers
         .iter()
         .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)));
-    let signature = parts
-        .headers
-        .get(SIGN_HEADER)
-        .and_then(|value| value.to_str().ok());
     let path = parts.uri.path_and_query().map_or("/", |path| path.as_str());
 
-    let valid = signature.is_some_and(|signature| {
-        verify(&key, parts.method.as_str(), path, headers, &body, signature)
-    });
-    if !valid {
+    if verify_request(&key, parts.method.as_str(), path, headers, &body).is_err() {
         tracing::warn!(method = %parts.method, path = parts.uri.path(), "bad request signature");
         return ApiError::INVALID_SIGNATURE.into_response();
     }

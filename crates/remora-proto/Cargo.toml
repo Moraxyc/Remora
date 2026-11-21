@@ -18,3 +18,5 @@ sha2 = "0.11.0"
 [build-dependencies]
 prost-build = "0.14.6"
 protox = "0.10.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }

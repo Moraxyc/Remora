@@ -1,6 +1,7 @@
 //! Engine.IO v4 / Socket.IO v5 framing over WebSocket, default namespace only.
 
 pub mod engineio;
+pub mod events;
 pub mod socketio;
 
 pub use engineio::{Handshake, MAX_PAYLOAD, PING, PONG};
