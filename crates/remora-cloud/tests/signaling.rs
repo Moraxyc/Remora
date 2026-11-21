@@ -630,3 +630,32 @@ async fn room_tokens_of_unbound_devices_are_refused() {
     };
     assert_eq!(response.status(), 401);
 }
+
+#[tokio::test]
+async fn device_list_reports_active_desktop_participants() {
+    let (app, addr) = start(common::config()).await;
+    let (_host, token, device_id) = online_host(&app, addr).await;
+    let viewer_device = common::register_named(&app, "viewer-mac", "MacBook").await;
+
+    let joined = join_from(&app, &token, &device_id, Some(&viewer_device), false)
+        .await
+        .unwrap();
+    let (_viewer, _) = control_desktop(addr, &joined).await;
+
+    let list: Value = common::get_as(&app, "/api/v1/device/list", &token, &viewer_device)
+        .await
+        .unwrap();
+    let entry = list["my_binded_devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == device_id.as_str())
+        .unwrap();
+    assert_eq!(entry["publisher_availability_status"], "ready");
+    let parts = entry["participants_info"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["device_id"], viewer_device.as_str());
+    assert_eq!(parts[0]["alias"], "MacBook");
+    assert_eq!(parts[0]["platform"], 1);
+    assert_eq!(parts[0]["user_join_type"], 1);
+}

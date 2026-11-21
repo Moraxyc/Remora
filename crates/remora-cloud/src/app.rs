@@ -34,6 +34,18 @@ struct Cloud {
     limits: Arc<api::middleware::limit::Limits>,
 }
 
+impl FromRef<Cloud> for api::device::DeviceInitService {
+    fn from_ref(cloud: &Cloud) -> Self {
+        Self {
+            devices: cloud.devices.clone(),
+            files: cloud.files.clone(),
+            lan_reports: cloud.lan_reports.clone(),
+            public_url: cloud.public_url.clone(),
+            limits: cloud.limits.clone(),
+        }
+    }
+}
+
 impl FromRef<Cloud> for room::Tickets {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
@@ -137,10 +149,32 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 "/api/v1/device/windows/init",
                 post(api::device::windows_init),
             )
+            .route("/api/v1/device/macos/init", post(api::device::macos_init))
+            .route(
+                "/api/v1/device/mac_controllable",
+                post(api::device::mac_controllable),
+            )
             .route("/api/v1/device/list", get(api::device::list))
+            .route("/api/v1/device/groups/of/my", get(api::device::groups))
+            .route(
+                "/api/v1/device/{device_id}/preferences",
+                get(api::device::preferences),
+            )
+            .route(
+                "/api/v1/app/list/of/device/{device_id}",
+                get(api::device::app_list_of_device),
+            )
+            .route(
+                "/api/v1/app/list/of/current_device",
+                post(api::device::update_current_app_list),
+            )
             .route("/api/v1/device/wake_on_lan/info", post(api::wake::report))
             .route("/api/v1/device/wallpaper", post(api::files::set_wallpaper))
             .route("/api/v1/tool/fp/token", get(api::files::token))
+            .route(
+                "/api/v1/tool/configures_with_version",
+                post(api::compat::configures_with_version),
+            )
             .route(
                 "/api/v1/device/{device_id}/unbind",
                 post(api::device::unbind),
@@ -153,6 +187,23 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
             .route("/api/v1/login/by_qrcode", post(api::auth::login::by_qrcode))
             .route("/api/v1/user/info", get(api::user::info))
             .route("/api/v1/user/logout", post(api::user::logout))
+            .route(
+                "/api/v1/member/entitlements",
+                get(api::compat::member_entitlements),
+            )
+            .route(
+                "/api/v1/cloud_pc/ui_switch",
+                get(api::compat::cloud_pc_ui_switch),
+            )
+            .route("/api/v1/message/summary", get(api::compat::message_summary))
+            .route(
+                "/api/v1/campaign/strategies",
+                get(api::compat::campaign_strategies),
+            )
+            .route(
+                "/api/v1/release/fetch/popups/info",
+                get(api::compat::release_popups),
+            )
             .route("/api/v1/room/create", post(room::create))
             .route(
                 "/api/v1/room/join/by_device/{device_id}",

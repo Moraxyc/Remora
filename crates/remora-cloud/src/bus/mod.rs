@@ -5,7 +5,7 @@
 pub mod local;
 pub mod unix;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -141,11 +141,23 @@ pub enum RoomCommand {
         device_ids: Vec<String>,
         reply: Reply<HashSet<String>>,
     },
+    DesktopParticipants {
+        device_ids: Vec<String>,
+        reply: Reply<HashMap<String, Vec<ActiveParticipant>>>,
+    },
     ControlledElsewhere {
         device_id: String,
         from_device: Option<String>,
         reply: Reply<bool>,
     },
+}
+
+/// Active desktop viewer session reported by a room actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveParticipant {
+    pub client_id: String,
+    pub from_device: Option<String>,
+    pub controlled_secs: u64,
 }
 
 /// Presence transition published by a gateway when an endpoint connects or disconnects.

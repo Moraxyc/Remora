@@ -2,6 +2,7 @@
 
 pub(crate) mod address;
 pub(crate) mod auth;
+pub(crate) mod compat;
 pub(crate) mod device;
 pub(crate) mod files;
 pub(crate) mod middleware;

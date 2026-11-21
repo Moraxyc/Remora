@@ -13,8 +13,12 @@ use serde_json::Value;
 struct Room {
     signaling_server: String,
     signaling_list: Vec<String>,
+    sni_required_signaling_list: Vec<String>,
     token: String,
     ws_connect_timeout_ms: u32,
+    max_reconnect_delta: u32,
+    streamer_retry_delta_ms: u32,
+    international_connect: bool,
 }
 
 const PATH: &str = "/api/v1/room/create";
@@ -29,10 +33,22 @@ async fn a_logged_in_host_gets_signaling_on_this_server() {
     let device_id = common::register(&app, "client-a").await;
     let token = common::log_in(&app).await;
 
-    let room = create(&app, &token, Some(&device_id)).await.unwrap();
+    let room: Room = common::post_as(
+        &app,
+        PATH,
+        &token,
+        Some(&device_id),
+        r#"{"last_controlled_interval":-1}"#,
+    )
+    .await
+    .unwrap();
     assert_eq!(room.signaling_server, "wss://remora.test");
     assert_eq!(room.signaling_list, ["wss://remora.test"]);
+    assert_eq!(room.sni_required_signaling_list, ["wss://remora.test"]);
     assert!(room.ws_connect_timeout_ms > 0);
+    assert_eq!(room.max_reconnect_delta, 300);
+    assert_eq!(room.streamer_retry_delta_ms, 1000);
+    assert!(!room.international_connect);
 
     // Clients read the room token's lifetime from its `exp` claim.
     let payload = room.token.split('.').nth(1).unwrap();

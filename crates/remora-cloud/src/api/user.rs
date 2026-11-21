@@ -125,7 +125,8 @@ impl Sessions {
     pub fn owned_by(&self, user_id: &str) -> rusqlite::Result<Vec<ClientSession>> {
         let connection = self.0.connection();
         let mut statement = connection.prepare_cached(
-            "SELECT sessions.id, sessions.created, devices.id, devices.name, devices.platform
+            "SELECT sessions.id, sessions.created, devices.id, devices.name, devices.platform,
+                    devices.controllable, devices.version_name
              FROM sessions
              LEFT JOIN devices ON devices.id = sessions.device_id
              WHERE sessions.user_id = ?1
@@ -141,6 +142,8 @@ impl Sessions {
                             id,
                             name: row.get(3)?,
                             platform: row.get(4)?,
+                            controllable: row.get::<_, i64>(5)? != 0,
+                            version_name: row.get(6)?,
                         })
                     })
                     .transpose()?;
@@ -222,6 +225,18 @@ where
 pub struct InfoResponse {
     user_id: String,
     nickname: String,
+    member_type: u8,
+    member_display_status: u8,
+    member_expired_at: u64,
+    member_additional_desc: &'static str,
+    pending_member_info_list: [serde_json::Value; 0],
+    member_trial_status: u8,
+    is_verified_realname: bool,
+    coin_balance: u64,
+    email: &'static str,
+    family_name: &'static str,
+    given_name: &'static str,
+    is_private_email: Option<bool>,
 }
 
 /// `GET /api/v1/user/info`.
@@ -233,6 +248,18 @@ pub async fn info(
     Ok(api::Ok(InfoResponse {
         user_id: profile.id,
         nickname: profile.name,
+        member_type: 0,
+        member_display_status: 0,
+        member_expired_at: 0,
+        member_additional_desc: "",
+        pending_member_info_list: [],
+        member_trial_status: 0,
+        is_verified_realname: false,
+        coin_balance: 0,
+        email: "",
+        family_name: "",
+        given_name: "",
+        is_private_email: None,
     }))
 }
 

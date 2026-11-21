@@ -60,8 +60,31 @@ async fn the_list_holds_the_users_hosts() {
     common::create_room(&app, &token, &unnamed).await;
     let list: Value = common::get_as(&app, LIST, &token, &viewer).await.unwrap();
     let mut expected = [
-        json!({ "device_id": host, "alias": "studio", "platform": 1, "status": "DISCONNECTED" }),
-        json!({ "device_id": unnamed, "platform": 1, "status": "DISCONNECTED" }),
+        json!({
+            "device_id": host,
+            "alias": "studio",
+            "platform": 1,
+            "status": "DISCONNECTED",
+            "participants_info": [],
+            "version_name": "",
+            "support_wol": false,
+            "controllable": true,
+            "publisher_availability_status": "offline",
+            "controlled_support": true,
+            "update_started_at": 0,
+        }),
+        json!({
+            "device_id": unnamed,
+            "platform": 1,
+            "status": "DISCONNECTED",
+            "participants_info": [],
+            "version_name": "",
+            "support_wol": false,
+            "controllable": true,
+            "publisher_availability_status": "offline",
+            "controlled_support": true,
+            "update_started_at": 0,
+        }),
     ];
     expected.sort_by_key(|entry| entry["device_id"].as_str().unwrap().to_owned());
     assert_eq!(list["my_binded_devices"], json!(expected));
@@ -131,4 +154,165 @@ async fn devices_and_logins_outlive_a_restart() {
     let again = init(&app, registration("client-host")).await.unwrap();
     assert_eq!(again.device_id, host);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn macos_init_groups_controllable_preferences_and_apps() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use remora_proto::control::{DeviceGroupsResponse, DevicePreferencesResponse, parse_response};
+    use tower::ServiceExt;
+
+    let app = remora_cloud::router(common::config());
+    let req = Request::post("/api/v1/device/macos/init")
+        .header("content-type", "application/json")
+        .header("x-param-vn", "4.48.1")
+        .body(Body::from(
+            json!({
+                "client_id": "mac-client-1",
+                "name": "MacBook",
+                "controllable": false,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let status = res.status().as_u16();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let mac_init: Value = parse_response(status, &bytes).unwrap();
+    let mac_id = mac_init["device_id"].as_str().unwrap().to_owned();
+    assert_eq!(mac_init["platform"], 4);
+    assert_eq!(mac_init["controllable"], false);
+    assert_eq!(mac_init["version_name"], "4.48.1");
+    assert_eq!(mac_init["publisher_availability_status"], "offline");
+
+    let token = common::log_in(&app).await;
+    common::create_room(&app, &token, &mac_id).await;
+
+    let toggled: Value = common::post_as(
+        &app,
+        "/api/v1/device/mac_controllable",
+        &token,
+        Some(&mac_id),
+        &json!({ "controllable": true }).to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(toggled, json!({}));
+
+    let groups: DeviceGroupsResponse =
+        common::get_as(&app, "/api/v1/device/groups/of/my", &token, &mac_id)
+            .await
+            .unwrap();
+    assert_eq!(groups.current_device_id.as_deref(), Some(mac_id.as_str()));
+    assert_eq!(groups.desktop_devices.len(), 1);
+    assert_eq!(groups.desktop_devices[0].device_id, mac_id);
+    assert_eq!(groups.desktop_devices[0].controllable, Some(true));
+    assert!(groups.mobile_devices.is_empty());
+
+    let prefs: DevicePreferencesResponse = common::get_as(
+        &app,
+        &format!("/api/v1/device/{mac_id}/preferences"),
+        &token,
+        &mac_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prefs.device_preferences.device_id, mac_id);
+    assert!(!prefs.device_preferences.tools.sequence.is_empty());
+
+    let app_payload = json!({
+        "device_app_list": [{
+            "dapp_id": "abc",
+            "app_type": 2,
+            "name": "Demo",
+            "target_path": "/Applications/Demo.app",
+            "app_status": 0,
+            "last_launched_at": 0,
+        }]
+    });
+    let updated: Value = common::post_as(
+        &app,
+        "/api/v1/app/list/of/current_device",
+        &token,
+        Some(&mac_id),
+        &app_payload.to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated["device_app_list"].as_array().unwrap().len(), 1);
+
+    let fetched: Value = common::get_as(
+        &app,
+        &format!("/api/v1/app/list/of/device/{mac_id}"),
+        &token,
+        &mac_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched, updated);
+}
+
+#[tokio::test]
+async fn client_compat_endpoints_answer_with_expected_envelopes() {
+    let app = remora_cloud::router(common::config());
+    let mac = common::register_named(&app, "client-mac", "Mac").await;
+    let token = common::log_in(&app).await;
+
+    let ent: Value = common::get_as(&app, "/api/v1/member/entitlements", &token, &mac)
+        .await
+        .unwrap();
+    assert_eq!(
+        ent["features"]["screen_quality"]["periods"][0]["limit"]["quality"],
+        json!(["general", "hd", "bluray"])
+    );
+
+    let cfg: Value = common::post_as(
+        &app,
+        "/api/v1/tool/configures_with_version",
+        &token,
+        Some(&mac),
+        &json!({
+            "configures": [
+                { "name": "app_viewscreen_limit", "version": "123" },
+                { "name": "mac_h5_entrance_url_config", "version": "" },
+            ]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cfg["app_viewscreen_limit"]["status"], 1);
+    assert_eq!(cfg["mac_h5_entrance_url_config"]["status"], 2);
+
+    let ui: Value = common::get_as(&app, "/api/v1/cloud_pc/ui_switch", &token, &mac)
+        .await
+        .unwrap();
+    assert_eq!(ui, json!({ "switch": false }));
+
+    let msg: Value = common::get_as(&app, "/api/v1/message/summary", &token, &mac)
+        .await
+        .unwrap();
+    assert_eq!(msg, json!({ "no_read_num": 0 }));
+
+    let strat: Value = common::get_as(
+        &app,
+        "/api/v1/campaign/strategies?scene=enter_home",
+        &token,
+        &mac,
+    )
+    .await
+    .unwrap();
+    assert_eq!(strat, json!({ "strategy": null }));
+
+    let popups: Value = common::get_as(
+        &app,
+        "/api/v1/release/fetch/popups/info?source_version=4.26.0",
+        &token,
+        &mac,
+    )
+    .await
+    .unwrap();
+    assert_eq!(popups, json!({ "popups": [] }));
 }

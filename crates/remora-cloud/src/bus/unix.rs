@@ -21,8 +21,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    Bus, BusMessage, EndpointEvent, EndpointFrame, PresenceChanged, RelayCommand, Reply,
-    RoomCommand, Subscription, ToEndpoint,
+    ActiveParticipant, Bus, BusMessage, EndpointEvent, EndpointFrame, PresenceChanged,
+    RelayCommand, Reply, RoomCommand, Subscription, ToEndpoint,
 };
 use crate::api::auth::token::{Role, Room};
 use crate::relay::ice::Grant;
@@ -152,6 +152,9 @@ enum WireBusMessage {
     RoomOnlineDevices {
         device_ids: Vec<String>,
     },
+    RoomDesktopParticipants {
+        device_ids: Vec<String>,
+    },
     RoomControlledElsewhere {
         device_id: String,
         from_device: Option<String>,
@@ -162,10 +165,38 @@ enum WireBusMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireParticipant {
+    client_id: String,
+    from_device: Option<String>,
+    controlled_secs: u64,
+}
+
+impl From<ActiveParticipant> for WireParticipant {
+    fn from(p: ActiveParticipant) -> Self {
+        Self {
+            client_id: p.client_id,
+            from_device: p.from_device,
+            controlled_secs: p.controlled_secs,
+        }
+    }
+}
+
+impl From<WireParticipant> for ActiveParticipant {
+    fn from(p: WireParticipant) -> Self {
+        Self {
+            client_id: p.client_id,
+            from_device: p.from_device,
+            controlled_secs: p.controlled_secs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireReply {
     Unit,
     Bool(bool),
     Set(HashSet<String>),
+    Participants(HashMap<String, Vec<WireParticipant>>),
     Grant(Grant),
     Closed,
 }
@@ -174,6 +205,7 @@ enum PendingReply {
     Unit(Reply<()>),
     Bool(Reply<bool>),
     Set(Reply<HashSet<String>>),
+    Participants(Reply<HashMap<String, Vec<ActiveParticipant>>>),
     Grant(Reply<Grant>),
 }
 
@@ -183,6 +215,13 @@ impl PendingReply {
             (Self::Unit(r), WireReply::Unit) => r.send(()),
             (Self::Bool(r), WireReply::Bool(b)) => r.send(b),
             (Self::Set(r), WireReply::Set(s)) => r.send(s),
+            (Self::Participants(r), WireReply::Participants(map)) => {
+                let converted = map
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into_iter().map(Into::into).collect()))
+                    .collect();
+                r.send(converted);
+            }
             (Self::Grant(r), WireReply::Grant(g)) => r.send(g),
             _ => {}
         }
@@ -198,6 +237,7 @@ impl WireBusMessage {
                 | Self::RoomPushToHost { .. }
                 | Self::RoomIsOnline { .. }
                 | Self::RoomOnlineDevices { .. }
+                | Self::RoomDesktopParticipants { .. }
                 | Self::RoomControlledElsewhere { .. }
                 | Self::RelayGrant { .. }
         )
@@ -312,6 +352,10 @@ impl WireBusMessage {
                 RoomCommand::OnlineDevices { device_ids, reply } => (
                     Self::RoomOnlineDevices { device_ids },
                     Some(PendingReply::Set(reply)),
+                ),
+                RoomCommand::DesktopParticipants { device_ids, reply } => (
+                    Self::RoomDesktopParticipants { device_ids },
+                    Some(PendingReply::Participants(reply)),
                 ),
                 RoomCommand::ControlledElsewhere {
                     device_id,
@@ -437,6 +481,22 @@ impl WireBusMessage {
                 let (reply, rx) = Reply::channel();
                 bridge_reply(reply_to, out_tx.clone(), rx, WireReply::Set);
                 BusMessage::RoomCommand(RoomCommand::OnlineDevices { device_ids, reply })
+            }
+            Self::RoomDesktopParticipants { device_ids } => {
+                let (reply, rx) = Reply::channel();
+                bridge_reply(
+                    reply_to,
+                    out_tx.clone(),
+                    rx,
+                    |map: HashMap<String, Vec<ActiveParticipant>>| {
+                        WireReply::Participants(
+                            map.into_iter()
+                                .map(|(k, v)| (k, v.into_iter().map(Into::into).collect()))
+                                .collect(),
+                        )
+                    },
+                );
+                BusMessage::RoomCommand(RoomCommand::DesktopParticipants { device_ids, reply })
             }
             Self::RoomControlledElsewhere {
                 device_id,

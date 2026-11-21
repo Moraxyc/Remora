@@ -88,6 +88,14 @@ const MIGRATIONS: &[&str] = &[
         file_id TEXT NOT NULL
     ) STRICT;
 ",
+    "
+    ALTER TABLE devices ADD COLUMN controllable INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE devices ADD COLUMN version_name TEXT NOT NULL DEFAULT '';
+    CREATE TABLE device_apps (
+        device_id TEXT PRIMARY KEY,
+        apps_json TEXT NOT NULL
+    ) STRICT;
+",
 ];
 
 /// What `PRAGMA user_version` says once every migration is applied.

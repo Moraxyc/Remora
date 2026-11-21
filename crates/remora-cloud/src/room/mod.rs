@@ -3,7 +3,7 @@
 
 pub(crate) mod registry;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,13 +13,17 @@ use serde_json::Value;
 
 use crate::PublicUrl;
 use crate::api::auth::token::{Role, Room, TokenKey};
-use crate::api::device::{CallerDevice, Devices};
+use crate::api::device::{CallerDevice, CallerVersion, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
-use crate::bus::{Bus, BusMessage, Reply, RoomCommand, TOPIC_ROOM_COMMAND};
+use crate::bus::{ActiveParticipant, Bus, BusMessage, Reply, RoomCommand, TOPIC_ROOM_COMMAND};
 
 /// How long clients should wait for the signaling connection to come up.
-const WS_CONNECT_TIMEOUT_MS: u32 = 10_000;
+const WS_CONNECT_TIMEOUT_MS: u32 = 16_000;
+/// Maximum interval in seconds between signaling `refresh_reconnect_key` calls.
+const MAX_RECONNECT_DELTA_SECS: u32 = 300;
+/// Retry delay in milliseconds for client streamer reconnection.
+const STREAMER_RETRY_DELTA_MS: u32 = 1_000;
 
 /// How long the sessions of a host that left signaling wait for it to reconnect before they
 /// end. Hosts wait a few seconds and ask for a new room before reconnecting.
@@ -76,6 +80,27 @@ impl RoomClient {
             .await;
         if delivered == 0 {
             return HashSet::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn desktop_participants(
+        &self,
+        device_ids: Vec<String>,
+    ) -> HashMap<String, Vec<ActiveParticipant>> {
+        if device_ids.is_empty() {
+            return HashMap::new();
+        }
+        let (reply, rx) = Reply::channel();
+        let delivered = self
+            .bus
+            .publish(
+                TOPIC_ROOM_COMMAND,
+                BusMessage::RoomCommand(RoomCommand::DesktopParticipants { device_ids, reply }),
+            )
+            .await;
+        if delivered == 0 {
+            return HashMap::new();
         }
         rx.await.unwrap_or_default()
     }
@@ -155,21 +180,29 @@ impl Tickets {
 pub struct CreateResponse {
     signaling_server: String,
     signaling_list: [String; 1],
+    sni_required_signaling_list: Vec<String>,
     token: String,
     ws_connect_timeout_ms: u32,
+    max_reconnect_delta: u32,
+    streamer_retry_delta_ms: u32,
+    international_connect: bool,
 }
 
 /// `POST /api/v1/room/create`, for a logged-in host on its registered device, which becomes the
-/// user's. The body (`{}`) carries nothing.
+/// user's. Official hosts send `{"last_controlled_interval": -1}` or `{}`.
 pub async fn create(
     user: User,
     State(devices): State<Devices>,
     State(tickets): State<Tickets>,
     CallerDevice(device_id): CallerDevice,
+    CallerVersion(version_name): CallerVersion,
 ) -> Result<api::Ok<CreateResponse>, ApiError> {
     let device_id = device_id.ok_or(ApiError::INVALID_REQUEST)?;
     if !devices.bind(&device_id, &user)? {
         return Err(ApiError::INVALID_REQUEST);
+    }
+    if let Some(version_name) = version_name.as_deref() {
+        devices.set_version_name(&device_id, version_name)?;
     }
 
     tracing::info!(user_id = %user.id, %device_id, "room created");
@@ -178,19 +211,33 @@ pub async fn create(
         device_id,
         role: Role::Host,
     });
+    let sni_required_signaling_list = if tickets.public_url.requires_sni() {
+        vec![signaling_server.clone()]
+    } else {
+        Vec::new()
+    };
     Ok(api::Ok(CreateResponse {
         signaling_list: [signaling_server.clone()],
         signaling_server,
+        sni_required_signaling_list,
         token,
         ws_connect_timeout_ms: WS_CONNECT_TIMEOUT_MS,
+        max_reconnect_delta: MAX_RECONNECT_DELTA_SECS,
+        streamer_retry_delta_ms: STREAMER_RETRY_DELTA_MS,
+        international_connect: false,
     }))
 }
 
 #[derive(Serialize)]
 pub struct JoinResponse {
+    signaling_server: String,
     signaling_list: [String; 1],
+    sni_required_signaling_list: Vec<String>,
     token: String,
     ws_connect_timeout_ms: u32,
+    max_reconnect_delta: u32,
+    streamer_retry_delta_ms: u32,
+    international_connect: bool,
     /// Where the official clients send connection reports. Remora collects none.
     report_token: &'static str,
     report_url: &'static str,
@@ -239,10 +286,20 @@ pub async fn join_by_device(
             take_over: request.force_join,
         },
     });
+    let sni_required_signaling_list = if tickets.public_url.requires_sni() {
+        vec![signaling_server.clone()]
+    } else {
+        Vec::new()
+    };
     Ok(api::Ok(JoinResponse {
-        signaling_list: [signaling_server],
+        signaling_list: [signaling_server.clone()],
+        signaling_server,
+        sni_required_signaling_list,
         token,
         ws_connect_timeout_ms: WS_CONNECT_TIMEOUT_MS,
+        max_reconnect_delta: MAX_RECONNECT_DELTA_SECS,
+        streamer_retry_delta_ms: STREAMER_RETRY_DELTA_MS,
+        international_connect: false,
         report_token: "",
         report_url: "",
         publisher_platform,

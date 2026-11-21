@@ -129,6 +129,34 @@ impl LanReports {
         rows.filter_map(Result::transpose).collect()
     }
 
+    /// Identifiers of `user_id`'s devices that have reported a LAN identity.
+    pub fn reported_devices(
+        &self,
+        user_id: &str,
+    ) -> rusqlite::Result<std::collections::HashSet<String>> {
+        let connection = self.0.connection();
+        let mut statement = connection.prepare_cached(
+            "SELECT lan_reports.device_id
+             FROM lan_reports JOIN devices ON devices.id = lan_reports.device_id
+             WHERE devices.owner = ?1",
+        )?;
+        let rows = statement.query_map([user_id], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    /// Whether `device_id` has reported a LAN identity.
+    pub fn has_report(&self, device_id: &str) -> rusqlite::Result<bool> {
+        self.0
+            .connection()
+            .query_row(
+                "SELECT 1 FROM lan_reports WHERE device_id = ?1",
+                [device_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+
     /// The report of `device_id`, if it belongs to `user_id`.
     fn of_owned(&self, device_id: &str, user_id: &str) -> rusqlite::Result<Option<LanReport>> {
         self.0

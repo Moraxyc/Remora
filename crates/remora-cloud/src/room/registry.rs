@@ -19,8 +19,8 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::api::auth::token::{Role, Room, random};
 use crate::bus::{
-    Bus, BusMessage, EndpointEvent, EndpointFrame, RelayCommand, Reply, RoomCommand, TOPIC_RELAY,
-    TOPIC_ROOM_COMMAND, TOPIC_TO_ENDPOINT, ToEndpoint,
+    ActiveParticipant, Bus, BusMessage, EndpointEvent, EndpointFrame, RelayCommand, Reply,
+    RoomCommand, TOPIC_RELAY, TOPIC_ROOM_COMMAND, TOPIC_TO_ENDPOINT, ToEndpoint,
 };
 use crate::relay::ice::Grant;
 use crate::room::ReconnectGrace;
@@ -267,6 +267,39 @@ impl RoomRegistry {
                     reply.send(online);
                 });
             }
+            RoomCommand::DesktopParticipants { device_ids, reply } => {
+                let mut receivers = Vec::new();
+                for device_id in device_ids {
+                    if self.handles.contains_key(&device_id) {
+                        let (item_reply, rx) = oneshot::channel();
+                        if self
+                            .send_if_exists(
+                                &device_id,
+                                ActorMessage::DesktopParticipants { reply: item_reply },
+                            )
+                            .await
+                            .is_none()
+                        {
+                            receivers.push((device_id, rx));
+                        }
+                    }
+                }
+                if receivers.is_empty() {
+                    reply.send(HashMap::new());
+                    return;
+                }
+                tokio::spawn(async move {
+                    let mut map = HashMap::new();
+                    for (device_id, rx) in receivers {
+                        if let Ok(list) = rx.await
+                            && !list.is_empty()
+                        {
+                            map.insert(device_id, list);
+                        }
+                    }
+                    reply.send(map);
+                });
+            }
             RoomCommand::ControlledElsewhere {
                 device_id,
                 from_device,
@@ -317,6 +350,9 @@ enum ActorMessage {
     CheckOnline {
         reply: oneshot::Sender<bool>,
     },
+    DesktopParticipants {
+        reply: oneshot::Sender<Vec<ActiveParticipant>>,
+    },
     ControlledElsewhere {
         from_device: Option<String>,
         reply: Reply<bool>,
@@ -340,6 +376,7 @@ struct Session {
     /// The device the viewer runs on, if known.
     from_device: Option<String>,
     desktop: bool,
+    started_at: Instant,
 }
 
 impl Session {
@@ -452,6 +489,22 @@ impl RoomActor {
             }
             ActorMessage::CheckOnline { reply } => {
                 let _ = reply.send(self.host.is_some());
+            }
+            ActorMessage::DesktopParticipants { reply } => {
+                let now = Instant::now();
+                let list = self
+                    .sessions
+                    .values()
+                    .filter(|session| session.desktop)
+                    .map(|session| ActiveParticipant {
+                        client_id: session.viewer.clone(),
+                        from_device: session.from_device.clone(),
+                        controlled_secs: now
+                            .saturating_duration_since(session.started_at)
+                            .as_secs(),
+                    })
+                    .collect();
+                let _ = reply.send(list);
             }
             ActorMessage::ControlledElsewhere { from_device, reply } => {
                 let held = self
@@ -747,6 +800,7 @@ impl RoomActor {
             viewer: viewer_id.to_owned(),
             from_device: from_device.map(str::to_owned),
             desktop,
+            started_at: Instant::now(),
         };
         self.sessions.insert(ice_id, session);
         Ok(ack)

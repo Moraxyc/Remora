@@ -70,9 +70,23 @@ impl PublicUrl {
     }
 
     /// The signaling URL handed to clients: the same origin as `ws://` or `wss://`.
-    fn signaling(&self) -> String {
+    pub(crate) fn signaling(&self) -> String {
         let scheme = if self.secure { "wss" } else { "ws" };
         format!("{scheme}://{}", self.authority)
+    }
+
+    /// Whether clients should send TLS SNI when connecting to this origin (HTTPS with a DNS host,
+    /// rather than a bare IP address).
+    pub(crate) fn requires_sni(&self) -> bool {
+        if !self.secure {
+            return false;
+        }
+        let host = if let Some(rest) = self.authority.strip_prefix('[') {
+            rest.split(']').next().unwrap_or("")
+        } else {
+            self.authority.split(':').next().unwrap_or("")
+        };
+        host.parse::<std::net::IpAddr>().is_err()
     }
 }
 
