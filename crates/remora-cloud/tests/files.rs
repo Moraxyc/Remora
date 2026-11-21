@@ -4,7 +4,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use remora_proto::cloud::ApiError;
+use remora_proto::control::ApiError;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 

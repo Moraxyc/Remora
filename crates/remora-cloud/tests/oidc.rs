@@ -484,7 +484,7 @@ async fn users_manage_only_their_own_devices_and_sessions() {
         .await
         .unwrap()
         .to_bytes();
-    let qr_data: Value = remora_proto::cloud::parse_response(200, &qr_bytes).unwrap();
+    let qr_data: Value = remora_proto::control::parse_response(200, &qr_bytes).unwrap();
     let qr_id = qr_data["qrcode_jump_url"]
         .as_str()
         .unwrap()

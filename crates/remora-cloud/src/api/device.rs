@@ -10,12 +10,12 @@ use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::address::ClientAddress;
+use crate::api::address::ClientAddress;
+use crate::api::files::{FileId, Files};
+use crate::api::middleware::limit::Limits;
+use crate::api::user::User;
 use crate::api::{self, ApiError, Body, Empty};
-use crate::files::{FileId, Files};
-use crate::limit::Limits;
-use crate::rooms::Rooms;
-use crate::user::User;
+use crate::room::registry::Rooms;
 use crate::{Database, PublicUrl};
 
 /// Identifies the calling installation once it has registered.

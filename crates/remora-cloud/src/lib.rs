@@ -1,26 +1,12 @@
 //! Self-hostable stand-in for the UU Remote cloud.
 
-mod address;
 mod api;
 mod app;
-mod browser;
-mod database;
-mod device;
-mod files;
-mod ice;
-mod limit;
-mod login;
-mod oidc;
-mod password;
+mod gateway;
+mod relay;
 mod room;
-mod rooms;
 mod settings;
-mod signaling;
-mod signing;
-mod token;
-mod user;
-mod wake;
-mod web;
+mod store;
 
 use std::fmt;
 use std::str::FromStr;
@@ -30,16 +16,16 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::middleware::{from_fn_with_state, map_response};
 use axum::routing::{delete, get, post};
-use remora_proto::cloud::SignKey;
+use remora_proto::control::SignKey;
 use serde::Deserialize;
 
-pub use address::{PeerAddress, TrustedProxies, TrustedProxy};
-pub use database::{Database, DatabaseError};
-pub use ice::{Ice, IceError, IceUrl, TurnSecret};
-pub use oidc::{InvalidOidc, OidcProvider, OidcRegistration};
-pub use password::{InvalidPasswordHash, OwnerPassword};
+pub use api::address::{PeerAddress, TrustedProxies, TrustedProxy};
+pub use api::auth::oidc::{InvalidOidc, OidcProvider, OidcRegistration};
+pub use api::auth::password::{InvalidPasswordHash, OwnerPassword};
+pub use gateway::{Ping, ReconnectGrace};
+pub use relay::ice::{Ice, IceError, IceUrl, TurnSecret};
 pub use settings::{IceSettings, Listen, LoginSettings, Settings, SettingsError};
-pub use signaling::{Ping, ReconnectGrace};
+pub use store::database::{Database, DatabaseError};
 
 pub struct Config {
     /// Where clients reach this server.
@@ -139,23 +125,23 @@ impl std::error::Error for InvalidPublicUrl {}
 /// Everything the endpoints share.
 #[derive(Clone, FromRef)]
 struct Cloud {
-    devices: device::Devices,
-    lan_reports: wake::LanReports,
-    files: files::Files,
-    sessions: user::Sessions,
-    users: user::Users,
-    browsers: browser::Browsers,
-    logins: login::Logins,
-    tokens: Arc<token::TokenKey>,
+    devices: api::device::Devices,
+    lan_reports: api::wake::LanReports,
+    files: api::files::Files,
+    sessions: api::user::Sessions,
+    users: api::user::Users,
+    browsers: api::auth::browser::Browsers,
+    logins: api::auth::login::Logins,
+    tokens: Arc<api::auth::token::TokenKey>,
     public_url: PublicUrl,
-    rooms: rooms::Rooms,
+    rooms: room::registry::Rooms,
     ping: Ping,
     reconnect_grace: ReconnectGrace,
     ice: Arc<Ice>,
     owner_password: Option<Arc<OwnerPassword>>,
     oidc: Option<Arc<OidcProvider>>,
     trusted_proxies: TrustedProxies,
-    limits: Arc<limit::Limits>,
+    limits: Arc<api::middleware::limit::Limits>,
 }
 
 impl FromRef<Cloud> for room::Tickets {
@@ -167,7 +153,7 @@ impl FromRef<Cloud> for room::Tickets {
     }
 }
 
-impl FromRef<Cloud> for files::FileService {
+impl FromRef<Cloud> for api::files::FileService {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             files: cloud.files.clone(),
@@ -179,7 +165,7 @@ impl FromRef<Cloud> for files::FileService {
     }
 }
 
-impl FromRef<Cloud> for web::Web {
+impl FromRef<Cloud> for api::web::Web {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             logins: cloud.logins.clone(),
@@ -198,7 +184,7 @@ impl FromRef<Cloud> for web::Web {
     }
 }
 
-impl FromRef<Cloud> for signaling::Switchboard {
+impl FromRef<Cloud> for gateway::Switchboard {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             rooms: cloud.rooms.clone(),
@@ -209,7 +195,7 @@ impl FromRef<Cloud> for signaling::Switchboard {
     }
 }
 
-impl FromRef<Cloud> for signaling::Admission {
+impl FromRef<Cloud> for gateway::Admission {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             tokens: cloud.tokens.clone(),
@@ -229,7 +215,7 @@ pub fn router(config: Config) -> Router {
         sessions: config.database.clone().into(),
         users: config.database.clone().into(),
         browsers: config.database.clone().into(),
-        logins: login::Logins::new(config.public_url.clone(), config.auto_confirm),
+        logins: api::auth::login::Logins::new(config.public_url.clone(), config.auto_confirm),
         tokens: config.database.tokens(),
         public_url: config.public_url,
         rooms: Default::default(),
@@ -241,70 +227,81 @@ pub fn router(config: Config) -> Router {
         trusted_proxies: config.trusted_proxies,
         limits: Default::default(),
     };
-    let api = Router::new()
-        .route("/api/v1/device/windows/init", post(device::windows_init))
-        .route("/api/v1/device/list", get(device::list))
-        .route("/api/v1/device/wake_on_lan/info", post(wake::report))
-        .route("/api/v1/device/wallpaper", post(files::set_wallpaper))
-        .route("/api/v1/tool/fp/token", get(files::token))
-        .route("/api/v1/device/{device_id}/unbind", post(device::unbind))
-        .route("/api/v1/qrcode/gen/login", post(login::generate))
-        .route("/api/v1/qrcode/login/status", post(login::status))
-        .route("/api/v1/login/by_qrcode", post(login::by_qrcode))
-        .route("/api/v1/user/info", get(user::info))
-        .route("/api/v1/user/logout", post(user::logout))
+    let api_routes = Router::new()
+        .route(
+            "/api/v1/device/windows/init",
+            post(api::device::windows_init),
+        )
+        .route("/api/v1/device/list", get(api::device::list))
+        .route("/api/v1/device/wake_on_lan/info", post(api::wake::report))
+        .route("/api/v1/device/wallpaper", post(api::files::set_wallpaper))
+        .route("/api/v1/tool/fp/token", get(api::files::token))
+        .route(
+            "/api/v1/device/{device_id}/unbind",
+            post(api::device::unbind),
+        )
+        .route("/api/v1/qrcode/gen/login", post(api::auth::login::generate))
+        .route(
+            "/api/v1/qrcode/login/status",
+            post(api::auth::login::status),
+        )
+        .route("/api/v1/login/by_qrcode", post(api::auth::login::by_qrcode))
+        .route("/api/v1/user/info", get(api::user::info))
+        .route("/api/v1/user/logout", post(api::user::logout))
         .route("/api/v1/room/create", post(room::create))
         .route(
             "/api/v1/room/join/by_device/{device_id}",
             post(room::join_by_device),
         )
         .with_state(cloud.clone());
-    let api = match config.sign_key {
-        Some(key) => api.layer(from_fn_with_state(
+    let api_routes = match config.sign_key {
+        Some(key) => api_routes.layer(from_fn_with_state(
             Arc::new(key),
-            signing::require_signature,
+            api::middleware::signing::require_signature,
         )),
-        None => api,
+        None => api_routes,
     };
     let web_api = Router::new()
         .route(
             "/api/web/session",
-            get(web::session)
-                .post(web::sign_in_with_password)
-                .delete(web::sign_out),
+            get(api::web::session)
+                .post(api::web::sign_in_with_password)
+                .delete(api::web::sign_out),
         )
-        .route("/api/web/oidc/start", get(web::start_oidc))
-        .route(oidc::CALLBACK_PATH, get(web::finish_oidc))
+        .route("/api/web/oidc/start", get(api::web::start_oidc))
+        .route(api::auth::oidc::CALLBACK_PATH, get(api::web::finish_oidc))
         .route(
             "/api/web/logins/{id}",
-            get(web::login).post(web::decide_login),
+            get(api::web::login).post(api::web::decide_login),
         )
-        .route("/api/web/devices", get(web::devices))
-        .route("/api/web/devices/{id}", delete(web::unbind_device))
-        .route("/api/web/devices/{id}/wake", post(web::wake_device))
-        .route("/api/web/client-sessions", get(web::client_sessions))
+        .route("/api/web/devices", get(api::web::devices))
+        .route("/api/web/devices/{id}", delete(api::web::unbind_device))
+        .route("/api/web/devices/{id}/wake", post(api::web::wake_device))
+        .route("/api/web/client-sessions", get(api::web::client_sessions))
         .route(
             "/api/web/client-sessions/{id}",
-            delete(web::revoke_client_session),
+            delete(api::web::revoke_client_session),
         )
-        .route("/api/web/browsers", get(web::browsers))
-        .route("/api/web/browsers/{id}", delete(web::revoke_browser))
-        .layer(map_response(web::no_store))
+        .route("/api/web/browsers", get(api::web::browsers))
+        .route("/api/web/browsers/{id}", delete(api::web::revoke_browser))
+        .layer(map_response(api::web::no_store))
         .with_state(cloud.clone());
     // Uploads carry an upload token instead of a signature, and files are fetched without
     // credentials. A form around the file may add a little to its size.
     let files = Router::new()
         .route(
-            files::UPLOAD_PATH,
-            post(files::upload).layer(DefaultBodyLimit::max(files::MAX_FILE_SIZE + 64 * 1024)),
+            api::files::UPLOAD_PATH,
+            post(api::files::upload)
+                .layer(DefaultBodyLimit::max(api::files::MAX_FILE_SIZE + 64 * 1024)),
         )
-        .route("/api/files/{id}", get(files::serve))
+        .route("/api/files/{id}", get(api::files::serve))
         .with_state(cloud.clone());
     // Signaling requests carry the room token instead of a signature, and browsers sign
     // nothing.
     let signaling = Router::new()
-        .route("/socket.io/", get(signaling::connect))
+        .route("/socket.io/", get(gateway::connect))
         .with_state(cloud);
+    let api = api_routes;
     api.merge(web_api)
         .merge(files)
         .merge(signaling)

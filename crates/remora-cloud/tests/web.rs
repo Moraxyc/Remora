@@ -8,8 +8,8 @@ use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use remora_cloud::{Config, OwnerPassword};
-use remora_proto::cloud::ApiError;
-use remora_proto::socketio::{Decoder, Packet};
+use remora_proto::control::ApiError;
+use remora_proto::signal::{Decoder, Packet};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -122,7 +122,7 @@ impl Qr {
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let data: Value = remora_proto::cloud::parse_response(200, &bytes).unwrap();
+        let data: Value = remora_proto::control::parse_response(200, &bytes).unwrap();
         let url = data["qrcode_jump_url"].as_str().unwrap().to_owned();
         let page = url.strip_prefix(common::PUBLIC_URL).unwrap();
         Self {

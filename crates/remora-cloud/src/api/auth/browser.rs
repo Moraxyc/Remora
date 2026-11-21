@@ -10,9 +10,9 @@ use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 use crate::Database;
-use crate::token::{now, random};
-use crate::user::Profile;
-use crate::web::WebError;
+use crate::api::auth::token::{now, random};
+use crate::api::user::Profile;
+use crate::api::web::WebError;
 
 pub const COOKIE: &str = "remora_session";
 

@@ -6,7 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use remora_proto::cloud::{SIGN_HEADER, SignKey, verify};
+use remora_proto::control::{SIGN_HEADER, SignKey, verify};
 
 use crate::api::ApiError;
 

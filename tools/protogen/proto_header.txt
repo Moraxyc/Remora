@@ -1,0 +1,15 @@
+// gv_pb.proto — UU Remote CONTROL/RPC schema, reconstructed (unofficial).
+//
+// Source: SwiftProtobuf metadata in the official macOS UU Remote 4.48.1 (build 633)
+//   UURemote.app/Contents/Helpers/UURemoteServer  (identical schema in MacOS/UURemote)
+//   Swift module "UUProtoGenerated", Swift prefix "GvPb_", proto package "gv_pb".
+// Method: docs/tools/protogen.py + emit_proto.py (see docs/proto/README.md).
+//
+// Exact:   message/enum names, field names, field numbers, enum values, nesting, oneof membership,
+//          repeated, proto3 `optional` (Swift Optional scalar), message-vs-scalar kind.
+// Inferred: the protobuf *scalar flavour*. Swift Int32 is emitted as int32 here, but could be
+//          sint32/sfixed32 on the wire (same Swift type). uint64 likewise vs fixed64. Every
+//          field that a third-party host already exchanges with official viewers uses plain
+//          varint encoding, so int32/uint32/int64/uint64 is the safe default.
+// Not in this file: JSON payloads (input events, terminal control, port-mapping SYN), the
+//          "TERM" binary framing, Socket.IO events. See docs/05..10.

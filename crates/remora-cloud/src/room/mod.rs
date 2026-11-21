@@ -1,16 +1,18 @@
 //! Rooms: the tickets to signaling, for a device's host and for viewers joining it.
 
+pub(crate) mod registry;
+
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 
 use crate::PublicUrl;
+use crate::api::auth::token::{Role, Room, TokenKey};
+use crate::api::device::{CallerDevice, Devices};
+use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
-use crate::device::{CallerDevice, Devices};
-use crate::rooms::Rooms;
-use crate::token::{Role, Room, TokenKey};
-use crate::user::User;
+use crate::room::registry::Rooms;
 
 /// How long clients should wait for the signaling connection to come up.
 const WS_CONNECT_TIMEOUT_MS: u32 = 10_000;

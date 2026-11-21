@@ -9,10 +9,10 @@ use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
 use crate::Database;
+use crate::api::auth::oidc::Identity;
+use crate::api::auth::token::{TokenKey, UserToken, now, random};
+use crate::api::device::Device;
 use crate::api::{self, ApiError, Empty};
-use crate::device::Device;
-use crate::oidc::Identity;
-use crate::token::{TokenKey, UserToken, now, random};
 
 /// The user who signs in with the password.
 pub const OWNER_ID: &str = "1";

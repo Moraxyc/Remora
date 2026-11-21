@@ -1,7 +1,7 @@
 mod common;
 
 use axum::Router;
-use remora_proto::cloud::ApiError;
+use remora_proto::control::ApiError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

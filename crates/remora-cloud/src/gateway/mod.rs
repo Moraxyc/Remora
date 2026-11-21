@@ -2,7 +2,7 @@
 //!
 //! Hosts and viewers connect with a room token in `X-NRD-AUTH`. A host asks for `room_info`
 //! and from then on counts as online; a viewer sends `control` to open a session with it.
-//! Routing between them lives in [`crate::rooms`].
+//! Routing between them lives in [`crate::room::registry`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use remora_proto::socketio::{
+use remora_proto::signal::{
     Decoder, Event, Handshake, PING, Packet, encode_ack, encode_connected, encode_event,
 };
 use serde::Deserialize;
@@ -20,10 +20,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::api::ApiError;
-use crate::device::Devices;
-use crate::ice::Ice;
-use crate::rooms::{Frame, Outbound, Peer, Refused, Rooms};
-use crate::token::{Role, Room, TokenKey, random};
+use crate::api::auth::token::{Role, Room, TokenKey, random};
+use crate::api::device::Devices;
+use crate::relay::ice::Ice;
+use crate::room::registry::{Frame, Outbound, Peer, Refused, Rooms};
 
 const AUTH_HEADER: &str = "x-nrd-auth";
 

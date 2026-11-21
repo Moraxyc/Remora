@@ -1,5 +1,5 @@
 use prost::Message as _;
-use remora_proto::gv_pb::{FeatureFlag, Message, SimpleAction, message, simple_action};
+use remora_proto::pb::{FeatureFlag, Message, SimpleAction, message, simple_action};
 
 /// Echo response: seq 1, ts 2, request seq 200, host FeatureFlag capture_setting 4.
 #[test]

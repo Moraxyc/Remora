@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use prost::Message as _;
-use remora_proto::gv_pb::ConnectOptions;
-use remora_proto::socketio::{encode_binary_event, encode_event, placeholder};
+use remora_proto::pb::ConnectOptions;
+use remora_proto::signal::{encode_binary_event, encode_event, placeholder};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::ice::Grant;
-use crate::token::{Role, Room, random};
+use crate::api::auth::token::{Role, Room, random};
+use crate::relay::ice::Grant;
 
 /// Signaling connections in rooms, by device id.
 #[derive(Debug, Default, Clone)]
@@ -399,7 +399,7 @@ fn controller_platform(connect_options: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use remora_proto::socketio::{Decoder, Packet};
+    use remora_proto::signal::{Decoder, Packet};
 
     use super::*;
 
@@ -432,7 +432,7 @@ mod tests {
 
     impl Member {
         /// The next queued event, decoded, with its attachments.
-        fn event(&mut self) -> remora_proto::socketio::Event {
+        fn event(&mut self) -> remora_proto::signal::Event {
             let Ok(Outbound::Frames(frames)) = self.inbox.try_recv() else {
                 panic!("expected frames");
             };

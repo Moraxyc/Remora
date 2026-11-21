@@ -6,7 +6,7 @@ use axum::http::Request;
 use axum::http::request::Builder;
 use http_body_util::BodyExt;
 use remora_cloud::{Config, Database, Ping, ReconnectGrace};
-use remora_proto::cloud::{ApiError, parse_response};
+use remora_proto::control::{ApiError, parse_response};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tower::ServiceExt;

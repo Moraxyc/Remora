@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Router;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use remora_proto::cloud::ApiError;
+use remora_proto::control::ApiError;
 use serde::Deserialize;
 use serde_json::Value;
 

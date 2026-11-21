@@ -1,6 +1,6 @@
 mod common;
 
-use remora_proto::cloud::ApiError;
+use remora_proto::control::ApiError;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

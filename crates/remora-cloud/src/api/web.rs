@@ -1,5 +1,5 @@
 //! The web app's API: plain JSON under `/api/web/`, for browsers signed in with a session
-//! cookie (see [`crate::browser`]). Bodies are JSON, which other sites cannot send without the
+//! cookie (see [`crate::api::auth::browser`]). Bodies are JSON, which other sites cannot send without the
 //! browser asking this server first.
 
 use std::collections::HashSet;
@@ -16,17 +16,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::PublicUrl;
-use crate::address::ClientAddress;
-use crate::browser::{self, Browsers, SignedIn, read_cookie};
-use crate::device::Devices;
-use crate::files::Files;
-use crate::limit::Limits;
-use crate::login::{Logins, Progress};
-use crate::oidc::OidcProvider;
-use crate::password::OwnerPassword;
-use crate::rooms::Rooms;
-use crate::user::{OWNER_ID, Profile, Sessions, Users};
-use crate::wake::{self, LanReports, WakeRefused};
+use crate::api::address::ClientAddress;
+use crate::api::auth::browser::{self, Browsers, SignedIn, read_cookie};
+use crate::api::auth::login::{Logins, Progress};
+use crate::api::auth::oidc::OidcProvider;
+use crate::api::auth::password::OwnerPassword;
+use crate::api::device::Devices;
+use crate::api::files::Files;
+use crate::api::middleware::limit::Limits;
+use crate::api::user::{OWNER_ID, Profile, Sessions, Users};
+use crate::api::wake::{self, LanReports, WakeRefused};
+use crate::room::registry::Rooms;
 
 /// Ties a sign-in at the OpenID Connect provider to the browser that started it. Lax, because
 /// the provider sends the browser back from another site.

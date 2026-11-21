@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::Database;
+use crate::api::device::{CallerDevice, Devices};
+use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
-use crate::device::{CallerDevice, Devices};
-use crate::rooms::Rooms;
-use crate::user::User;
+use crate::room::registry::Rooms;
 
 /// A device's LAN identity. Its `Debug` hides the addresses.
 #[derive(Clone, PartialEq, Eq)]

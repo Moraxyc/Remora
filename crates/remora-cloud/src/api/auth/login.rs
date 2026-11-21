@@ -1,6 +1,6 @@
 //! QR-code login. The QR code holds the address of a page of the web app: a user opens it,
 //! which counts as scanning it, and confirms the login as themselves or denies it there (see
-//! [`crate::web`]). With `auto_confirm`, every login is confirmed for the owner as soon as it is
+//! [`crate::api::web`]). With `auto_confirm`, every login is confirmed for the owner as soon as it is
 //! generated instead.
 
 use std::collections::HashMap;
@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::PublicUrl;
-use crate::address::ClientAddress;
+use crate::api::address::ClientAddress;
+use crate::api::auth::token::{TokenKey, random};
+use crate::api::device::{CallerDevice, Devices};
+use crate::api::middleware::limit::Limits;
+use crate::api::user::{OWNER_ID, Sessions, Users};
 use crate::api::{self, ApiError, Body};
-use crate::device::{CallerDevice, Devices};
-use crate::limit::Limits;
-use crate::token::{TokenKey, random};
-use crate::user::{OWNER_ID, Sessions, Users};
 
 /// How long a generated QR code can be used to log in.
 const QR_LIFETIME: Duration = Duration::from_secs(180);

@@ -1,5 +1,14 @@
 //! The `{code, msg, data}` envelope every REST endpoint answers with.
 
+pub(crate) mod address;
+pub(crate) mod auth;
+pub(crate) mod device;
+pub(crate) mod files;
+pub(crate) mod middleware;
+pub(crate) mod user;
+pub(crate) mod wake;
+pub(crate) mod web;
+
 use axum::Json;
 use axum::extract::FromRequest;
 use axum::extract::rejection::JsonRejection;

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::token::{TokenKey, random};
+use crate::api::auth::token::{TokenKey, random};
 
 /// Schema changes, applied in order. `PRAGMA user_version` counts those already applied.
 const MIGRATIONS: &[&str] = &[
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn the_token_key_outlives_a_restart() {
         let path = temp_file("key");
-        let user = crate::token::UserToken {
+        let user = crate::api::auth::token::UserToken {
             user_id: "1".into(),
             session_id: "s".into(),
         };
