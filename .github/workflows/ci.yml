@@ -55,9 +55,10 @@ jobs:
         env:
           checks: .#checks.${{ matrix.system }}
         # `--no-build` evaluates in read-only mode, which cannot copy the dev partition's flake
-        # into the store, so `nix eval` must copy it first. Skip checks already covered on x86_64.
+        # into the store, so `nix eval` must copy it first. Skip checks already covered on x86_64
+        # (including NixOS VM tests, since arm runners have no KVM).
         run: |
-          read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" "clippy" "treefmt" ]))')"
+          read -ra names <<< "$(nix eval --raw "$checks" --apply 'c: toString (builtins.attrNames (removeAttrs c [ "nixos" "compat" "interop-linux" "clippy" "fmt" "treefmt" ]))')"
           nix flake check --no-build
           nix build --no-link --print-build-logs --keep-going "${names[@]/#/$checks.}"
 

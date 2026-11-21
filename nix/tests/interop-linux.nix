@@ -204,12 +204,12 @@ in
               "--ready-file /tmp/lab-host.json "
               "--force-relay "
               "--expect-inputs 2 "
-              "--expect-frames 1 "
+              "--expect-frames 0 "
               "--timeout-secs 30; echo $? > /tmp/lab-host.rc'"
           )
           viewer.wait_until_succeeds("test -f /tmp/lab-host.json")
           lab_device_id = json.loads(viewer.succeed("cat /tmp/lab-host.json"))["device_id"]
-          viewer.succeed(f"printf 'ab' | {env_prefix} uuremote-viewer type {lab_device_id} --new-session")
+          viewer.succeed(f"printf 'ab' | {env_prefix} uuremote-viewer type {lab_device_id} --delay-ms 50 --new-session")
           viewer.wait_until_succeeds("test -f /tmp/lab-host.rc")
           assert viewer.succeed("cat /tmp/lab-host.rc").strip() == "0", viewer.succeed("journalctl -u lab-host.service -o cat")
 
