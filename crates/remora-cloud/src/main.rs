@@ -3,9 +3,12 @@ use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use std::sync::Arc;
+
 use clap::{Parser, Subcommand};
 use listenfd::ListenFd;
-use remora_cloud::{CloudRole, Listen, OwnerPassword, PeerAddress, Settings};
+use remora_cloud::bus::unix::{UnixBus, bind_hub};
+use remora_cloud::{Bus, CloudRole, Listen, LocalBus, OwnerPassword, PeerAddress, Settings};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
 
@@ -20,6 +23,12 @@ struct Args {
     /// roles or `roles` in the settings file.
     #[arg(long, value_delimiter = ',', value_enum)]
     roles: Option<Vec<CloudRole>>,
+    /// Bind an internal Unix-socket bus hub at PATH for role-split instances.
+    #[arg(long, value_name = "PATH", conflicts_with = "bus_connect")]
+    bus_listen: Option<PathBuf>,
+    /// Connect to an internal Unix-socket bus hub at PATH.
+    #[arg(long, value_name = "PATH", conflicts_with = "bus_listen")]
+    bus_connect: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -35,9 +44,15 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let result = match (args.command, args.config) {
         (Some(Command::HashPassword), _) => hash_password(),
-        (None, Some(config)) => {
-            passed_socket().and_then(|socket| serve(config, args.roles, socket))
-        }
+        (None, Some(config)) => passed_socket().and_then(|socket| {
+            serve(
+                config,
+                args.roles,
+                args.bus_listen,
+                args.bus_connect,
+                socket,
+            )
+        }),
         (None, None) => unreachable!("clap requires --config without a subcommand"),
     };
     match result {
@@ -127,6 +142,8 @@ fn bind_unix(path: &Path) -> Result<tokio::net::UnixListener, Box<dyn Error>> {
 async fn serve(
     config: PathBuf,
     roles: Option<Vec<CloudRole>>,
+    bus_listen: Option<PathBuf>,
+    bus_connect: Option<PathBuf>,
     socket: Option<PassedSocket>,
 ) -> Result<(), Box<dyn Error>> {
     let mut settings = Settings::load(&config)?;
@@ -161,7 +178,23 @@ async fn serve(
         }
     }
 
-    let router = remora_cloud::router(config);
+    let (bus, unix_bus): (Arc<dyn Bus>, Option<Arc<UnixBus>>) = match (bus_listen, bus_connect) {
+        (Some(path), None) => {
+            let b = bind_hub(&path)?;
+            (b.clone(), Some(b))
+        }
+        (None, Some(path)) => {
+            let b = UnixBus::connect(&path).await?;
+            (b.clone(), Some(b))
+        }
+        (None, None) => (Arc::new(LocalBus::new()), None),
+        (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
+    };
+
+    let router = remora_cloud::router_with_bus(config, bus);
+    if let Some(unix_bus) = unix_bus {
+        unix_bus.sync().await;
+    }
     let shutdown = shutdown_signal();
     if !has_http {
         tracing::info!("running background roles without HTTP listener");

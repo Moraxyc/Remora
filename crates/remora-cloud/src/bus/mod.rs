@@ -3,6 +3,7 @@
 //! All bus message types stay internal to `remora-cloud` and never enter `remora-proto`.
 
 pub mod local;
+pub mod unix;
 
 use std::collections::HashSet;
 use std::fmt;
