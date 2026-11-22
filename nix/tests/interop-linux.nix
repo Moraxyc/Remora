@@ -19,6 +19,93 @@ let
     xwayland disable
     exec sh -c 'systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE && systemctl --user start test-wayland-session.target'
   '';
+
+  assistDriver = pkgs.writeText "assist-driver.py" ''
+    import fcntl, json, os, pty, re, select, subprocess, termios, time
+
+    os.environ["UU_BASE_URL"] = "http://server:8680"
+    os.environ["UU_SIGN_KEY"] = "${signKeyValue}"
+    os.environ["UU_CONFIG"] = "/tmp/assist-config.json"
+    os.environ["UU_ASSIST_UI"] = "tty"
+    os.environ["UU_ASSIST_ALLOW"] = "1"
+    os.environ["UU_LANG"] = "zh"
+    os.environ["UU_DESKTOP_BACKEND"] = "wayland"
+    os.environ["WAYLAND_DISPLAY"] = os.environ.get("WAYLAND_DISPLAY", "wayland-1")
+
+    master, slave = pty.openpty()
+
+    def preexec():
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    proc = subprocess.Popen(
+        ["uuremote-server", "assist"],
+        stdin=slave,
+        stdout=slave,
+        stderr=subprocess.PIPE,
+        preexec_fn=preexec,
+        close_fds=True,
+    )
+    os.close(slave)
+
+    buf = ""
+    connect_id = None
+    connect_code = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        r, _, _ = select.select([master], [], [], 0.2)
+        if master in r:
+            try:
+                chunk = os.read(master, 4096).decode("utf-8", errors="replace")
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            m_id = re.search(r"设备 ID:\s*([0-9 ]+)", buf)
+            m_code = re.search(r"临时验证码:\s*([A-Za-z0-9]+)", buf)
+            if m_id and m_code:
+                connect_id = m_id.group(1).replace(" ", "")
+                connect_code = m_code.group(1).strip()
+                break
+        if proc.poll() is not None:
+            break
+
+    if not connect_id or not connect_code:
+        rc = proc.poll()
+        if rc is None:
+            proc.kill()
+            rc = proc.wait(timeout=5)
+        err = proc.stderr.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"uuremote-server assist failed (rc={rc}); tty={buf!r}; stderr={err!r}"
+        )
+
+    fd = os.open("/tmp/assist-ready.json.tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"connect_id": connect_id, "code": connect_code}, f)
+    os.rename("/tmp/assist-ready.json.tmp", "/tmp/assist-ready.json")
+
+    while not os.path.exists("/tmp/assist-stop"):
+        r, _, _ = select.select([master], [], [], 0.2)
+        if master in r:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                break
+        if proc.poll() is not None:
+            break
+
+    try:
+        os.write(master, b"off\n")
+    except OSError:
+        pass
+    rc = proc.wait(timeout=15)
+    os.close(master)
+    if rc != 0:
+        err = proc.stderr.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"uuremote-server assist exited {rc}: {err!r}")
+  '';
 in
 {
   name = "remora-interop-linux";
@@ -87,7 +174,10 @@ in
         Before = [ "graphical-session.target" ];
       };
 
-      environment.systemPackages = [ pkgs.sway-unwrapped ];
+      environment.systemPackages = [
+        pkgs.python3
+        pkgs.sway-unwrapped
+      ];
     };
 
     viewer = {
@@ -221,9 +311,45 @@ in
           devices_after = [json.loads(line) for line in raw_after.splitlines() if line.strip()]
           assert not any(d["device"] == host_device_id for d in devices_after), devices_after
 
+      with subtest("remora-lab assists uuremote-server guest mode over TURN"):
+          host.succeed(as_alice("systemctl --user stop uuremote-native.service"))
+          host.succeed(
+              "rm -f /tmp/assist-config.json /tmp/assist-ready.json /tmp/assist-stop /tmp/assist-driver.rc && "
+              + as_alice(
+                  'systemd-run --user --unit=uu-assist-test --quiet '
+                  'sh -c "python3 ${assistDriver}; echo \\$? > /tmp/assist-driver.rc"'
+              )
+          )
+          host.wait_until_succeeds("test -f /tmp/assist-ready.json || test -f /tmp/assist-driver.rc")
+          if host.succeed("test -f /tmp/assist-driver.rc && echo failed || echo ok").strip() == "failed":
+              raise RuntimeError(
+                  "uu-assist-test exited prematurely: "
+                  + host.succeed(as_alice("journalctl --user -u uu-assist-test.service -o cat"))
+              )
+          assist_info = json.loads(host.succeed("cat /tmp/assist-ready.json"))
+          assist_id = assist_info["connect_id"]
+          assist_code = assist_info["code"]
+
+          viewer.succeed(
+              "remora-lab assist-join "
+              "--url http://server:8680 "
+              "--sign-key ${signKeyValue} "
+              f"--connect-id {assist_id} "
+              "--force-relay "
+              "--expect-frames 1 "
+              "--timeout-secs 30 "
+              f"<<'EOF'\n{assist_code}\nEOF"
+          )
+
+          host.succeed("touch /tmp/assist-stop")
+          host.wait_until_succeeds("test -f /tmp/assist-driver.rc")
+          assert host.succeed("cat /tmp/assist-driver.rc").strip() == "0", host.succeed(
+              as_alice("journalctl --user -u uu-assist-test.service -o cat")
+          )
+
       with subtest("no secret reaches the server log"):
           journal = server.succeed("journalctl -u remora.service -o cat")
-          for secret in ["vm-turn-secret", "${signKeyValue}"]:
+          for secret in ["vm-turn-secret", "${signKeyValue}", assist_code]:
               assert secret not in journal, "a secret was logged"
     '';
 }
