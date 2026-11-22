@@ -285,6 +285,9 @@ fn is_secret_key(key: &str) -> bool {
             | "x-nrd-auth"
             | "x-param-sign"
             | "iceservers"
+            | "connect_code"
+            | "sign"
+            | "backup_sign"
     )
 }
 

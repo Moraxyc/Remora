@@ -25,9 +25,15 @@ mod sdk {
     use rand::RngCore;
     use rand::SeedableRng;
     use remora_proto::control::{
-        ApiError, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse, DeviceListResponse,
-        DevicePreferencesResponse, LoginByQrcodeRequest, LoginResponse, QrCodeStatus,
-        QrLoginGenResponse, QrLoginStatusRequest, RoomJoinRequest, SignKey, UserInfoResponse,
+        ApiError, AssistDeviceRecordPage, AssistFavoritesRequest, AssistRoomConfig,
+        CancelRemoteAssistRequest, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse,
+        DeviceListResponse, DevicePreferencesResponse, DeviceShareInfoResponse,
+        GuestCreateResponse, JoinShareByCodeRequest, JoinShareByConfirmationRequest,
+        JoinShareByConfirmationResult, LoginByQrcodeRequest, LoginResponse, QrCodeStatus,
+        QrLoginGenResponse, QrLoginStatusRequest, ReleaseUpdateResponse, RoomJoinRequest,
+        SavedShareKind, ShareConfirmationRequest, ShareControlModeRequest,
+        ShareControlModeResponse, SignKey, UploadControlModeRequest, UploadShareSignRequest,
+        UserInfoResponse,
     };
     use remora_proto::machine::Timestamp;
     use remora_proto::machine::signaling::{SignalingEvent, SignalingMachine};
@@ -53,6 +59,7 @@ mod sdk {
     #[non_exhaustive]
     pub enum RoomRole {
         Host,
+        GuestHost,
         Viewer,
     }
 
@@ -62,6 +69,7 @@ mod sdk {
     pub enum EndpointError {
         MissingBaseUrl,
         MissingUserToken,
+        MissingGuestCredentials,
         InvalidBaseUrl(url::ParseError),
         Http(HttpError),
         Socket(SocketError),
@@ -78,6 +86,7 @@ mod sdk {
             match self {
                 Self::MissingBaseUrl => f.write_str("cloud base URL is required"),
                 Self::MissingUserToken => f.write_str("user is not logged in"),
+                Self::MissingGuestCredentials => f.write_str("guest identity has not been created"),
                 Self::InvalidBaseUrl(err) => write!(f, "invalid cloud base URL: {err}"),
                 Self::Http(err) => err.fmt(f),
                 Self::Socket(err) => err.fmt(f),
@@ -99,6 +108,7 @@ mod sdk {
                 Self::Socket(err) => Some(err),
                 Self::MissingBaseUrl
                 | Self::MissingUserToken
+                | Self::MissingGuestCredentials
                 | Self::QrExpired
                 | Self::NoSignalingServer
                 | Self::SignalingClosed
@@ -254,6 +264,8 @@ mod sdk {
                     state: RwLock::new(EndpointState {
                         device_id: self.device_id,
                         user_token: self.user_token,
+                        guest_id: None,
+                        guest_token: None,
                     }),
                 }),
             })
@@ -263,6 +275,8 @@ mod sdk {
     struct EndpointState {
         device_id: Option<String>,
         user_token: Option<String>,
+        guest_id: Option<String>,
+        guest_token: Option<String>,
     }
 
     struct EndpointInner {
@@ -334,6 +348,20 @@ mod sdk {
 
         pub async fn set_user_token(&self, token: impl Into<String>) {
             self.inner.state.write().await.user_token = Some(token.into());
+        }
+
+        pub async fn guest_id(&self) -> Option<String> {
+            self.inner.state.read().await.guest_id.clone()
+        }
+
+        pub async fn set_guest_credentials(
+            &self,
+            guest_id: impl Into<String>,
+            guest_token: impl Into<String>,
+        ) {
+            let mut state = self.inner.state.write().await;
+            state.guest_id = Some(guest_id.into());
+            state.guest_token = Some(guest_token.into());
         }
 
         /// Initiates a QR login challenge, returning a session handle whose URL can be displayed
@@ -426,9 +454,7 @@ mod sdk {
         }
 
         /// Fetches this installation's remote-assistance share ID and display alias.
-        pub async fn device_share_info(
-            &self,
-        ) -> Result<remora_proto::control::DeviceShareInfoResponse, EndpointError> {
+        pub async fn device_share_info(&self) -> Result<DeviceShareInfoResponse, EndpointError> {
             let device_id = match self.device_id().await {
                 Some(id) => id,
                 None => self.register_device().await?.device_id,
@@ -441,10 +467,346 @@ mod sdk {
                 .await?)
         }
 
-        /// Queries release update metadata for this client.
-        pub async fn release_fetch_update(
+        /// Rotates this installation's remote-assistance share ID.
+        pub async fn device_share_info_refresh(
             &self,
-        ) -> Result<remora_proto::control::ReleaseUpdateResponse, EndpointError> {
+        ) -> Result<DeviceShareInfoResponse, EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            Ok(self
+                .inner
+                .http
+                .device_share_info_refresh(&token, &device_id)
+                .await?)
+        }
+
+        /// Cancels active remote-assistance sharing on this installation.
+        pub async fn device_share_cancel(&self) -> Result<(), EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            self.inner
+                .http
+                .device_share_cancel(&token, &device_id)
+                .await?;
+            Ok(())
+        }
+
+        /// Removes a shared device from the signed-in user's device list.
+        pub async fn device_share_unbind(
+            &self,
+            target_id: impl AsRef<str>,
+        ) -> Result<(), EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            self.inner
+                .http
+                .device_share_unbind(&token, target_id.as_ref(), caller_device_id.as_deref())
+                .await?;
+            Ok(())
+        }
+
+        /// Lists saved assisted devices (`GET /api/v1/device/share/saved` or `/saved/{kind}`).
+        pub async fn device_share_saved(
+            &self,
+            kind: Option<SavedShareKind>,
+            cursor: Option<&str>,
+            limit: Option<usize>,
+        ) -> Result<AssistDeviceRecordPage, EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .device_share_saved(&token, kind, cursor, limit, caller_device_id.as_deref())
+                .await?)
+        }
+
+        /// Upserts favorite assisted devices (`POST /api/v1/device/share/saved/favorites`).
+        pub async fn device_share_save_favorites(
+            &self,
+            req: &AssistFavoritesRequest,
+        ) -> Result<(), EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            self.inner
+                .http
+                .device_share_saved_favorites_post(&token, caller_device_id.as_deref(), req)
+                .await?;
+            Ok(())
+        }
+
+        /// Deletes a saved assisted device record.
+        pub async fn device_share_delete_saved(
+            &self,
+            kind: SavedShareKind,
+            publisher_device_id: impl AsRef<str>,
+        ) -> Result<(), EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            self.inner
+                .http
+                .device_share_saved_delete(
+                    &token,
+                    kind,
+                    publisher_device_id.as_ref(),
+                    caller_device_id.as_deref(),
+                )
+                .await?;
+            Ok(())
+        }
+
+        /// Creates a guest identity for this installation (`POST /api/v1/guest/create`) and
+        /// stores the resulting guest credentials on the [`Endpoint`].
+        pub async fn create_guest(&self) -> Result<GuestCreateResponse, EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let guest = self.inner.http.guest_create(&device_id).await?;
+            self.set_guest_credentials(guest.guest_id.clone(), guest.token.clone())
+                .await;
+            Ok(guest)
+        }
+
+        /// Creates a guest host signaling room (`POST /api/v1/guest/room/create`) and connects.
+        pub async fn register_guest_host(&self) -> Result<RoomHandle, EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            let created = self
+                .inner
+                .http
+                .guest_room_create(&guest_token, &device_id, Some(&guest_id))
+                .await?;
+            let ws_url = created
+                .signaling_list
+                .first()
+                .filter(|u| !u.is_empty())
+                .cloned()
+                .unwrap_or(created.signaling_server);
+            if ws_url.is_empty() {
+                return Err(EndpointError::NoSignalingServer);
+            }
+
+            let socket = SignalingSocket::connect(
+                &ws_url,
+                &created.token,
+                self.inner.profile,
+                self.inner.tls_config.clone(),
+                #[cfg(feature = "record")]
+                self.inner.recorder.clone(),
+            )
+            .await?;
+
+            Ok(spawn_room_handle(
+                self.clone(),
+                RoomRole::GuestHost,
+                device_id,
+                false,
+                true,
+                socket,
+            ))
+        }
+
+        /// Publishes the guest host's share ID (`POST /api/v1/guest/share/info`).
+        pub async fn guest_share_info(&self) -> Result<DeviceShareInfoResponse, EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .guest_share_info(&guest_token, &device_id, Some(&guest_id))
+                .await?)
+        }
+
+        /// Cancels the guest host's active share (`POST /api/v1/guest/share/cancel`).
+        pub async fn guest_share_cancel(&self) -> Result<(), EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            self.inner
+                .http
+                .guest_share_cancel(&guest_token, &device_id, Some(&guest_id))
+                .await?;
+            Ok(())
+        }
+
+        /// Uploads a guest host's verification mode.
+        pub async fn guest_upload_control_mode(
+            &self,
+            req: &UploadControlModeRequest,
+        ) -> Result<(), EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            self.inner
+                .http
+                .guest_upload_control_mode(&guest_token, &device_id, Some(&guest_id), req)
+                .await?;
+            Ok(())
+        }
+
+        /// Uploads a guest host's salted verification code digest.
+        pub async fn guest_upload_sign(
+            &self,
+            req: &UploadShareSignRequest,
+        ) -> Result<(), EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            self.inner
+                .http
+                .guest_upload_sign(&guest_token, &device_id, Some(&guest_id), req)
+                .await?;
+            Ok(())
+        }
+
+        /// Approves or denies a confirmation prompt on a guest host.
+        pub async fn guest_confirmation(
+            &self,
+            req: &ShareConfirmationRequest,
+        ) -> Result<(), EndpointError> {
+            let (device_id, guest_id, guest_token) = self.require_guest_auth().await?;
+            self.inner
+                .http
+                .guest_confirmation(&guest_token, &device_id, Some(&guest_id), req)
+                .await?;
+            Ok(())
+        }
+
+        /// Queries a remote-assistance target's verification mode.
+        pub async fn room_share_control_mode(
+            &self,
+            req: &ShareControlModeRequest,
+        ) -> Result<ShareControlModeResponse, EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .room_share_control_mode(&token, caller_device_id.as_deref(), req)
+                .await?)
+        }
+
+        /// Uploads an account host's verification mode.
+        pub async fn room_share_upload_control_mode(
+            &self,
+            req: &UploadControlModeRequest,
+        ) -> Result<(), EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            self.inner
+                .http
+                .room_share_upload_control_mode(&token, &device_id, req)
+                .await?;
+            Ok(())
+        }
+
+        /// Uploads an account host's salted verification code digest.
+        pub async fn room_share_upload_sign(
+            &self,
+            req: &UploadShareSignRequest,
+        ) -> Result<(), EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            self.inner
+                .http
+                .room_share_upload_sign(&token, &device_id, req)
+                .await?;
+            Ok(())
+        }
+
+        /// Approves or denies a confirmation prompt on an account host.
+        pub async fn room_share_confirmation(
+            &self,
+            req: &ShareConfirmationRequest,
+        ) -> Result<(), EndpointError> {
+            let device_id = match self.device_id().await {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let token = self.require_token().await?;
+            self.inner
+                .http
+                .room_share_confirmation(&token, &device_id, req)
+                .await?;
+            Ok(())
+        }
+
+        /// Joins a remote-assistance session using the target's verification code.
+        pub async fn room_join_share_by_code(
+            &self,
+            req: &JoinShareByCodeRequest,
+        ) -> Result<AssistRoomConfig, EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .room_join_share_by_code(&token, caller_device_id.as_deref(), req)
+                .await?)
+        }
+
+        /// Starts or polls a confirmation-based remote-assistance join.
+        pub async fn room_join_share_by_confirmation(
+            &self,
+            req: &JoinShareByConfirmationRequest,
+        ) -> Result<JoinShareByConfirmationResult, EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            Ok(self
+                .inner
+                .http
+                .room_join_share_by_confirmation(&token, caller_device_id.as_deref(), req)
+                .await?)
+        }
+
+        /// Cancels a pending confirmation request.
+        pub async fn room_share_cancel_remote_assist(
+            &self,
+            req: &CancelRemoteAssistRequest,
+        ) -> Result<(), EndpointError> {
+            let (token, caller_device_id) = self.require_auth().await?;
+            self.inner
+                .http
+                .room_share_cancel_remote_assist(&token, caller_device_id.as_deref(), req)
+                .await?;
+            Ok(())
+        }
+
+        /// Connects to signaling for an already-authorized [`AssistRoomConfig`].
+        pub async fn connect_assist_room(
+            &self,
+            room: &AssistRoomConfig,
+        ) -> Result<RoomHandle, EndpointError> {
+            let ws_url = room
+                .signaling_list
+                .first()
+                .filter(|u| !u.is_empty())
+                .cloned()
+                .unwrap_or_else(|| room.signaling_server.clone());
+            if ws_url.is_empty() {
+                return Err(EndpointError::NoSignalingServer);
+            }
+
+            let socket = SignalingSocket::connect(
+                &ws_url,
+                &room.token,
+                self.inner.profile,
+                self.inner.tls_config.clone(),
+                #[cfg(feature = "record")]
+                self.inner.recorder.clone(),
+            )
+            .await?;
+
+            Ok(spawn_room_handle(
+                self.clone(),
+                RoomRole::Viewer,
+                room.publisher_device_id.clone(),
+                false,
+                false,
+                socket,
+            ))
+        }
+
+        /// Queries release update metadata for this client.
+        pub async fn release_fetch_update(&self) -> Result<ReleaseUpdateResponse, EndpointError> {
             let (token, device_id) = self.require_auth().await?;
             Ok(self
                 .inner
@@ -459,7 +821,7 @@ mod sdk {
             target_device_id: impl AsRef<str>,
             platform: Option<u8>,
             version_name: Option<&str>,
-        ) -> Result<remora_proto::control::ReleaseUpdateResponse, EndpointError> {
+        ) -> Result<ReleaseUpdateResponse, EndpointError> {
             let (token, device_id) = self.require_auth().await?;
             Ok(self
                 .inner
@@ -522,6 +884,7 @@ mod sdk {
                 RoomRole::Host,
                 device_id,
                 false,
+                true,
                 socket,
             ))
         }
@@ -582,8 +945,28 @@ mod sdk {
                 RoomRole::Viewer,
                 target_device_id,
                 force_join,
+                true,
                 socket,
             ))
+        }
+
+        async fn require_guest_auth(&self) -> Result<(String, String, String), EndpointError> {
+            let (device_id, guest_id, guest_token) = {
+                let state = self.inner.state.read().await;
+                (
+                    state.device_id.clone(),
+                    state.guest_id.clone(),
+                    state.guest_token.clone(),
+                )
+            };
+            let device_id = match device_id {
+                Some(id) => id,
+                None => self.register_device().await?.device_id,
+            };
+            let (Some(guest_id), Some(guest_token)) = (guest_id, guest_token) else {
+                return Err(EndpointError::MissingGuestCredentials);
+            };
+            Ok((device_id, guest_id, guest_token))
         }
 
         async fn require_token(&self) -> Result<String, EndpointError> {
@@ -611,6 +994,24 @@ mod sdk {
             match role {
                 RoomRole::Host => {
                     let created = self.inner.http.room_create(&token, device_id).await?;
+                    let ws_url = created
+                        .signaling_list
+                        .first()
+                        .filter(|u| !u.is_empty())
+                        .cloned()
+                        .unwrap_or(created.signaling_server);
+                    if ws_url.is_empty() {
+                        return Err(EndpointError::NoSignalingServer);
+                    }
+                    Ok((ws_url, created.token))
+                }
+                RoomRole::GuestHost => {
+                    let (_, guest_id, guest_token) = self.require_guest_auth().await?;
+                    let created = self
+                        .inner
+                        .http
+                        .guest_room_create(&guest_token, device_id, Some(&guest_id))
+                        .await?;
                     let ws_url = created
                         .signaling_list
                         .first()
@@ -932,6 +1333,7 @@ mod sdk {
         role: RoomRole,
         device_id: String,
         force_join: bool,
+        reconnectable: bool,
         initial_socket: SignalingSocket,
     ) -> RoomHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAP);
@@ -948,6 +1350,7 @@ mod sdk {
             role,
             device_id,
             force_join,
+            reconnectable,
             initial_socket,
             cmd_rx,
             ev_tx,
@@ -959,11 +1362,13 @@ mod sdk {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_room_loop(
         endpoint: Endpoint,
         role: RoomRole,
         device_id: String,
         force_join: bool,
+        reconnectable: bool,
         initial_socket: SignalingSocket,
         mut cmd_rx: mpsc::Receiver<RoomCommand>,
         ev_tx: mpsc::Sender<SignalingEvent>,
@@ -977,7 +1382,7 @@ mod sdk {
             let mut socket = match maybe_socket.take() {
                 Some(sock) => sock,
                 None => {
-                    if !endpoint.inner.auto_reconnect || ev_tx.is_closed() {
+                    if !reconnectable || !endpoint.inner.auto_reconnect || ev_tx.is_closed() {
                         return;
                     }
                     let delay = backoff.next_delay();
@@ -1076,7 +1481,7 @@ mod sdk {
                 |m, _now, ev| match ev {
                     SignalingEvent::Connected => {
                         connected_this_run = true;
-                        if role == RoomRole::Host {
+                        if matches!(role, RoomRole::Host | RoomRole::GuestHost) {
                             m.send_room_info();
                         }
                     }
@@ -1104,6 +1509,7 @@ mod sdk {
 
             if user_closed
                 || fatal_kick_or_auth
+                || !reconnectable
                 || !endpoint.inner.auto_reconnect
                 || ev_tx.is_closed()
             {

@@ -6,11 +6,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngCore;
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
-    ApiError, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse, DeviceListResponse,
-    DevicePreferencesResponse, DeviceShareInfoResponse, LoginByQrcodeRequest, LoginResponse,
-    MacControllableRequest, QrLoginGenResponse, QrLoginStatusRequest, QrLoginStatusResponse,
-    ReleaseUpdateResponse, RoomCreateResponse, RoomJoinRequest, RoomJoinResponse, UserInfoResponse,
-    parse_response,
+    ApiError, AssistDeviceRecordPage, AssistFavoritesRequest, AssistRoomConfig,
+    CancelRemoteAssistRequest, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse,
+    DeviceListResponse, DevicePreferencesResponse, DeviceShareInfoResponse, GuestCreateResponse,
+    JoinShareByCodeRequest, JoinShareByConfirmationRequest, JoinShareByConfirmationResult,
+    LoginByQrcodeRequest, LoginResponse, MacControllableRequest, QrLoginGenResponse,
+    QrLoginStatusRequest, QrLoginStatusResponse, ReleaseUpdateResponse, RoomCreateRequest,
+    RoomCreateResponse, RoomJoinRequest, RoomJoinResponse, SavedShareKind,
+    ShareConfirmationRequest, ShareControlModeRequest, ShareControlModeResponse,
+    UploadControlModeRequest, UploadShareSignRequest, UserInfoResponse,
+    parse_join_confirmation_response, parse_response,
 };
 use remora_proto::machine::auth::SignedHttpRequest;
 use remora_proto::profile::Profile;
@@ -267,6 +272,362 @@ impl ControlClient {
         .await
     }
 
+    /// Rotates the calling device's share ID (`POST /api/v1/device/share/info/refresh_id`).
+    pub async fn device_share_info_refresh(
+        &self,
+        user_token: &str,
+        device_id: &str,
+    ) -> Result<DeviceShareInfoResponse, HttpError> {
+        self.post_json::<(), _>(
+            "/api/v1/device/share/info/refresh_id",
+            Some(user_token),
+            Some(device_id),
+            None,
+        )
+        .await
+    }
+
+    /// Cancels active remote-assistance sharing on the calling device
+    /// (`POST /api/v1/device/share/cancel`).
+    pub async fn device_share_cancel(
+        &self,
+        user_token: &str,
+        device_id: &str,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json::<(), _>(
+            "/api/v1/device/share/cancel",
+            Some(user_token),
+            Some(device_id),
+            None,
+        )
+        .await
+    }
+
+    /// Removes a shared device from the caller's list (`POST /api/v1/device/share/{id}/unbind`).
+    pub async fn device_share_unbind(
+        &self,
+        user_token: &str,
+        target_id: &str,
+        caller_device_id: Option<&str>,
+    ) -> Result<EmptyData, HttpError> {
+        let path = format!("/api/v1/device/share/{target_id}/unbind");
+        self.post_json::<(), _>(&path, Some(user_token), caller_device_id, None)
+            .await
+    }
+
+    /// Lists saved assisted devices (`GET /api/v1/device/share/saved` or `/saved/{kind}`).
+    pub async fn device_share_saved(
+        &self,
+        user_token: &str,
+        kind: Option<SavedShareKind>,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        caller_device_id: Option<&str>,
+    ) -> Result<AssistDeviceRecordPage, HttpError> {
+        let base = match kind {
+            Some(k) => format!("/api/v1/device/share/saved/{}", k.as_str()),
+            None => "/api/v1/device/share/saved".to_owned(),
+        };
+        let query = {
+            let mut qs = url::form_urlencoded::Serializer::new(String::new());
+            if let Some(c) = cursor {
+                qs.append_pair("cursor", c);
+            }
+            if let Some(l) = limit {
+                qs.append_pair("limit", &l.to_string());
+            }
+            qs.finish()
+        };
+        let path = if query.is_empty() {
+            base
+        } else {
+            format!("{base}?{query}")
+        };
+        self.get(&path, Some(user_token), caller_device_id).await
+    }
+
+    /// Upserts favorite assisted devices (`POST /api/v1/device/share/saved/favorites`).
+    pub async fn device_share_saved_favorites_post(
+        &self,
+        user_token: &str,
+        caller_device_id: Option<&str>,
+        req: &AssistFavoritesRequest,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json(
+            "/api/v1/device/share/saved/favorites",
+            Some(user_token),
+            caller_device_id,
+            Some(req),
+        )
+        .await
+    }
+
+    /// Deletes a saved assisted device record
+    /// (`DELETE /api/v1/device/share/saved/{kind}/{publisher_device_id}`).
+    pub async fn device_share_saved_delete(
+        &self,
+        user_token: &str,
+        kind: SavedShareKind,
+        publisher_device_id: &str,
+        caller_device_id: Option<&str>,
+    ) -> Result<EmptyData, HttpError> {
+        let path = format!(
+            "/api/v1/device/share/saved/{}/{publisher_device_id}",
+            kind.as_str()
+        );
+        self.delete(&path, Some(user_token), caller_device_id).await
+    }
+
+    /// Creates a guest identity for an already-registered device (`POST /api/v1/guest/create`).
+    pub async fn guest_create(&self, device_id: &str) -> Result<GuestCreateResponse, HttpError> {
+        self.post_json::<(), _>("/api/v1/guest/create", None, Some(device_id), None)
+            .await
+    }
+
+    /// Creates or renews a signaling room for a guest host (`POST /api/v1/guest/room/create`).
+    pub async fn guest_room_create(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+    ) -> Result<RoomCreateResponse, HttpError> {
+        let body =
+            serde_json::to_vec(&RoomCreateRequest::default()).map_err(HttpError::Serialize)?;
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/room/create",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            body,
+        )
+        .await
+    }
+
+    /// Publishes a guest host's share ID once its room exists (`POST /api/v1/guest/share/info`).
+    pub async fn guest_share_info(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+    ) -> Result<DeviceShareInfoResponse, HttpError> {
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/share/info",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Cancels a guest host's share session (`POST /api/v1/guest/share/cancel`).
+    pub async fn guest_share_cancel(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+    ) -> Result<EmptyData, HttpError> {
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/share/cancel",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Uploads a guest host's verification mode (`POST /api/v1/guest/room/share/upload_control_mode`).
+    pub async fn guest_upload_control_mode(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+        req: &UploadControlModeRequest,
+    ) -> Result<EmptyData, HttpError> {
+        let body = serde_json::to_vec(req).map_err(HttpError::Serialize)?;
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/room/share/upload_control_mode",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            body,
+        )
+        .await
+    }
+
+    /// Uploads a guest host's salted verification code digest
+    /// (`POST /api/v1/guest/room/share/upload/sign`).
+    pub async fn guest_upload_sign(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+        req: &UploadShareSignRequest,
+    ) -> Result<EmptyData, HttpError> {
+        let body = serde_json::to_vec(req).map_err(HttpError::Serialize)?;
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/room/share/upload/sign",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            body,
+        )
+        .await
+    }
+
+    /// Approves or denies a confirmation prompt on a guest host
+    /// (`POST /api/v1/guest/room/share/confirmation`).
+    pub async fn guest_confirmation(
+        &self,
+        guest_token: &str,
+        device_id: &str,
+        guest_id: Option<&str>,
+        req: &ShareConfirmationRequest,
+    ) -> Result<EmptyData, HttpError> {
+        let body = serde_json::to_vec(req).map_err(HttpError::Serialize)?;
+        let extra = guest_id_param(guest_id);
+        self.send_signed_with_extra(
+            Method::POST,
+            "/api/v1/guest/room/share/confirmation",
+            Some(guest_token),
+            Some(device_id),
+            &extra,
+            body,
+        )
+        .await
+    }
+
+    /// Queries a remote-assistance target's verification mode (`POST /api/v2/room/share/control_mode`).
+    pub async fn room_share_control_mode(
+        &self,
+        user_token: &str,
+        caller_device_id: Option<&str>,
+        req: &ShareControlModeRequest,
+    ) -> Result<ShareControlModeResponse, HttpError> {
+        self.post_json(
+            "/api/v2/room/share/control_mode",
+            Some(user_token),
+            caller_device_id,
+            Some(req),
+        )
+        .await
+    }
+
+    /// Uploads an account host's verification mode (`POST /api/v2/room/share/upload_control_mode`).
+    pub async fn room_share_upload_control_mode(
+        &self,
+        user_token: &str,
+        device_id: &str,
+        req: &UploadControlModeRequest,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json(
+            "/api/v2/room/share/upload_control_mode",
+            Some(user_token),
+            Some(device_id),
+            Some(req),
+        )
+        .await
+    }
+
+    /// Uploads an account host's salted code digest (`POST /api/v2/room/share/upload_sign`).
+    pub async fn room_share_upload_sign(
+        &self,
+        user_token: &str,
+        device_id: &str,
+        req: &UploadShareSignRequest,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json(
+            "/api/v2/room/share/upload_sign",
+            Some(user_token),
+            Some(device_id),
+            Some(req),
+        )
+        .await
+    }
+
+    /// Approves or denies a confirmation prompt on an account host
+    /// (`POST /api/v2/room/share/confirmation`).
+    pub async fn room_share_confirmation(
+        &self,
+        user_token: &str,
+        device_id: &str,
+        req: &ShareConfirmationRequest,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json(
+            "/api/v2/room/share/confirmation",
+            Some(user_token),
+            Some(device_id),
+            Some(req),
+        )
+        .await
+    }
+
+    /// Joins a remote-assistance session using the target's verification code
+    /// (`POST /api/v2/room/join/share/by_code`).
+    pub async fn room_join_share_by_code(
+        &self,
+        user_token: &str,
+        caller_device_id: Option<&str>,
+        req: &JoinShareByCodeRequest,
+    ) -> Result<AssistRoomConfig, HttpError> {
+        self.post_json(
+            "/api/v2/room/join/share/by_code",
+            Some(user_token),
+            caller_device_id,
+            Some(req),
+        )
+        .await
+    }
+
+    /// Starts or polls a confirmation-based remote-assistance join
+    /// (`POST /api/v2/room/join/share/by_confirmation`).
+    pub async fn room_join_share_by_confirmation(
+        &self,
+        user_token: &str,
+        caller_device_id: Option<&str>,
+        req: &JoinShareByConfirmationRequest,
+    ) -> Result<JoinShareByConfirmationResult, HttpError> {
+        let body = serde_json::to_vec(req).map_err(HttpError::Serialize)?;
+        let (status, bytes) = self
+            .send_signed_raw(
+                Method::POST,
+                "/api/v2/room/join/share/by_confirmation",
+                Some(user_token),
+                caller_device_id,
+                &[],
+                body,
+            )
+            .await?;
+        parse_join_confirmation_response(status, &bytes).map_err(HttpError::Api)
+    }
+
+    /// Cancels a pending confirmation request (`POST /api/v2/room/share/cancel_remote_assist`).
+    pub async fn room_share_cancel_remote_assist(
+        &self,
+        user_token: &str,
+        caller_device_id: Option<&str>,
+        req: &CancelRemoteAssistRequest,
+    ) -> Result<EmptyData, HttpError> {
+        self.post_json(
+            "/api/v2/room/share/cancel_remote_assist",
+            Some(user_token),
+            caller_device_id,
+            Some(req),
+        )
+        .await
+    }
+
     /// Queries release update metadata for the calling client (`GET /api/v1/release/fetch/update`).
     pub async fn release_fetch_update(
         &self,
@@ -390,7 +751,17 @@ impl ControlClient {
         user_token: Option<&str>,
         device_id: Option<&str>,
     ) -> Result<Resp, HttpError> {
-        self.send_signed(Method::GET, path, user_token, device_id, Vec::new())
+        self.send_signed_with_extra(Method::GET, path, user_token, device_id, &[], Vec::new())
+            .await
+    }
+
+    async fn delete<Resp: DeserializeOwned>(
+        &self,
+        path: &str,
+        user_token: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<Resp, HttpError> {
+        self.send_signed_with_extra(Method::DELETE, path, user_token, device_id, &[], Vec::new())
             .await
     }
 
@@ -405,25 +776,47 @@ impl ControlClient {
             Some(payload) => serde_json::to_vec(payload).map_err(HttpError::Serialize)?,
             None => Vec::new(),
         };
-        self.send_signed(Method::POST, path, user_token, device_id, bytes)
+        self.send_signed_with_extra(Method::POST, path, user_token, device_id, &[], bytes)
             .await
     }
 
-    async fn send_signed<Resp: DeserializeOwned>(
+    async fn send_signed_with_extra<Resp: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
         user_token: Option<&str>,
         device_id: Option<&str>,
+        extra_params: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Result<Resp, HttpError> {
+        let (status, bytes) = self
+            .send_signed_raw(method, path, user_token, device_id, extra_params, body)
+            .await?;
+        parse_response(status, &bytes).map_err(HttpError::Api)
+    }
+
+    async fn send_signed_raw(
+        &self,
+        method: Method,
+        path: &str,
+        user_token: Option<&str>,
+        device_id: Option<&str>,
+        extra_params: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<(u16, Vec<u8>), HttpError> {
         let url = self.join_url(path)?;
         let signed_path = match url.query() {
             Some(q) => format!("{}?{q}", url.path()),
             None => url.path().to_owned(),
         };
-        let headers =
-            self.build_signed_headers(method.as_str(), &signed_path, user_token, device_id, &body)?;
+        let headers = self.build_signed_headers(
+            method.as_str(),
+            &signed_path,
+            user_token,
+            device_id,
+            extra_params,
+            &body,
+        )?;
 
         #[cfg(feature = "record")]
         if let Some(rec) = &self.recorder {
@@ -445,7 +838,7 @@ impl ControlClient {
             rec.record_http_response(method.as_str(), &signed_path, status, &bytes);
         }
 
-        parse_response(status, &bytes).map_err(HttpError::Api)
+        Ok((status, bytes))
     }
 
     fn join_url(&self, path: &str) -> Result<Url, HttpError> {
@@ -458,6 +851,7 @@ impl ControlClient {
         path: &str,
         user_token: Option<&str>,
         device_id: Option<&str>,
+        extra_params: &[(&str, &str)],
         body: &[u8],
     ) -> Result<HeaderMap, HttpError> {
         let ts = SystemTime::now()
@@ -490,6 +884,11 @@ impl ControlClient {
         {
             param_pairs.push((format!("{PARAM_PREFIX}device-id"), dev.to_owned()));
         }
+        for (suffix, value) in extra_params {
+            if !value.is_empty() {
+                param_pairs.push((format!("{PARAM_PREFIX}{suffix}"), (*value).to_owned()));
+            }
+        }
 
         let signature = sign(
             &self.sign_key,
@@ -517,6 +916,10 @@ impl ControlClient {
         }
         Ok(headers)
     }
+}
+
+fn guest_id_param(guest_id: Option<&str>) -> [(&'static str, &str); 1] {
+    [("guest-id", guest_id.unwrap_or(""))]
 }
 
 #[cfg(test)]
@@ -904,5 +1307,190 @@ mod tests {
         let err = client.user_info(&login.token, None).await.unwrap_err();
         assert!(matches!(err, HttpError::Api(ApiError::TokenExpired)));
         assert!(!seen_paths.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn guest_and_share_requests_sign_headers_and_parse_confirmation() {
+        let sign_key = SignKey::new("test-sign-key");
+        let key_clone = sign_key.clone();
+        let poll_count = Arc::new(Mutex::new(0u8));
+        let poll_clone = Arc::clone(&poll_count);
+
+        let url = spawn_fake_http(Arc::new(move |method, path, headers, body| {
+            let hdr_iter = headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+            assert_eq!(
+                verify_request(&key_clone, method, path, hdr_iter, body),
+                Ok(())
+            );
+            match (method, path) {
+                ("POST", "/api/v1/guest/create") => {
+                    assert_eq!(
+                        headers.get("x-param-device-id").map(String::as_str),
+                        Some("dev-host")
+                    );
+                    (
+                        200,
+                        json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": { "guest_id": "guest-1", "token": "guest-jwt" }
+                        })
+                        .to_string(),
+                    )
+                }
+                ("POST", "/api/v1/guest/room/create") => {
+                    assert_eq!(
+                        headers.get("authorization").map(String::as_str),
+                        Some("Bearer guest-jwt")
+                    );
+                    assert_eq!(
+                        headers.get("x-param-guest-id").map(String::as_str),
+                        Some("guest-1")
+                    );
+                    (
+                        200,
+                        json!({
+                            "code": 0,
+                            "msg": "ok",
+                            "data": {
+                                "signaling_server": "ws://127.0.0.1:9999",
+                                "signaling_list": ["ws://127.0.0.1:9999"],
+                                "token": "guest-room-tok",
+                                "ws_connect_timeout_ms": 16000
+                            }
+                        })
+                        .to_string(),
+                    )
+                }
+                ("POST", "/api/v1/guest/share/info") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": { "connect_id": "243829726", "connect_code": "", "alias": "Host" }
+                    })
+                    .to_string(),
+                ),
+                ("POST", "/api/v2/room/join/share/by_confirmation") => {
+                    let mut count = poll_clone.lock().unwrap();
+                    *count += 1;
+                    if *count == 1 {
+                        (
+                            400,
+                            json!({
+                                "code": 1136,
+                                "msg": "waiting",
+                                "data": { "control_id": "ctrl-1" }
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        (
+                            200,
+                            json!({
+                                "code": 0,
+                                "msg": "ok",
+                                "data": {
+                                    "signaling_server": "ws://127.0.0.1:9999",
+                                    "signaling_list": ["ws://127.0.0.1:9999"],
+                                    "token": "assist-room-tok",
+                                    "ws_connect_timeout_ms": 16000,
+                                    "streamer_retry_delta_ms": 1000,
+                                    "max_reconnect_delta": 300,
+                                    "share_id": "243829726",
+                                    "publisher_platform": 1,
+                                    "publisher_device_id": "dev-host"
+                                }
+                            })
+                            .to_string(),
+                        )
+                    }
+                }
+                ("GET", "/api/v1/device/share/saved/favorites?limit=10") => (
+                    200,
+                    json!({
+                        "code": 0,
+                        "msg": "ok",
+                        "data": { "saved": [], "next": null }
+                    })
+                    .to_string(),
+                ),
+                ("DELETE", "/api/v1/device/share/saved/recent/dev-host") => (
+                    200,
+                    json!({ "code": 0, "msg": "ok", "data": {} }).to_string(),
+                ),
+                _ => (404, json!({"code": 1001, "msg": "not found"}).to_string()),
+            }
+        }))
+        .await;
+
+        let profile = profile::by_id("windows-4.48.2").unwrap();
+        let client = ControlClient::new(url, profile, sign_key).unwrap();
+
+        let guest = client.guest_create("dev-host").await.unwrap();
+        let room = client
+            .guest_room_create(&guest.token, "dev-host", Some(&guest.guest_id))
+            .await
+            .unwrap();
+        assert_eq!(room.token, "guest-room-tok");
+
+        let info = client
+            .guest_share_info(&guest.token, "dev-host", Some(&guest.guest_id))
+            .await
+            .unwrap();
+        assert_eq!(info.connect_id, "243829726");
+
+        let pending = client
+            .room_join_share_by_confirmation(
+                "user-tok",
+                None,
+                &JoinShareByConfirmationRequest {
+                    connect_id: info.connect_id.clone(),
+                    control_id: None,
+                    force_join: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            pending,
+            JoinShareByConfirmationResult::Pending {
+                control_id: "ctrl-1".into()
+            }
+        );
+
+        let approved = client
+            .room_join_share_by_confirmation(
+                "user-tok",
+                None,
+                &JoinShareByConfirmationRequest {
+                    connect_id: info.connect_id,
+                    control_id: Some("ctrl-1".into()),
+                    force_join: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            approved,
+            JoinShareByConfirmationResult::Approved(cfg) if cfg.token == "assist-room-tok"
+        ));
+
+        let favs = client
+            .device_share_saved(
+                "user-tok",
+                Some(SavedShareKind::Favorites),
+                None,
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(favs.saved.is_empty());
+
+        client
+            .device_share_saved_delete("user-tok", SavedShareKind::Recent, "dev-host", None)
+            .await
+            .unwrap();
     }
 }

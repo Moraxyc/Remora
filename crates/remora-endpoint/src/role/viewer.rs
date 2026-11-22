@@ -115,6 +115,27 @@ impl ViewerSession {
         } else {
             endpoint.connect(target_device_id).await?
         };
+        Self::connect_with_room(endpoint, room, platform, config).await
+    }
+
+    /// Connects to an already-authorized remote-assistance [`remora_proto::control::AssistRoomConfig`],
+    /// negotiates `control`, and starts the WebRTC peer session.
+    pub async fn connect_assist(
+        endpoint: &Endpoint,
+        assist_room: &remora_proto::control::AssistRoomConfig,
+        platform: Box<dyn Platform>,
+        config: ViewerConfig,
+    ) -> Result<Self, EndpointError> {
+        let room = endpoint.connect_assist_room(assist_room).await?;
+        Self::connect_with_room(endpoint, room, platform, config).await
+    }
+
+    async fn connect_with_room(
+        endpoint: &Endpoint,
+        room: crate::RoomHandle,
+        platform: Box<dyn Platform>,
+        config: ViewerConfig,
+    ) -> Result<Self, EndpointError> {
         let (room_sender, mut room_events) = room.split();
 
         let connect_deadline = tokio::time::sleep(config.connect_timeout);
