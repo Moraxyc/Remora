@@ -32,11 +32,17 @@
 | `422` | `1001` | `invalid request`：JSON 解析失败、缺少必填字段或请求体超过 1 MiB。 |
 | `403` | `1002` | `invalid signature`：缺少 `x-param-sign` 或 HMAC 摘要不匹配。 |
 | `422` | `1120` | `login expired`：缺少 User Token、签名无效或对应 `sid` 会话已注销；客户端收到后应清除本地令牌并重新发起扫码登录。 |
+| `400` | `1130` | 无法发起远程协助（不能对同账号设备发起协助，或对方未开启/未应答协助）。 |
+| `400` | `1131` | 分享设备 ID 或远程协助验证码错误。 |
+| `400` | `1134` | 对方已拒绝或取消本次确认式远程协助。 |
+| `400` | `1136` | 等待对方在桌面确认远程协助请求（响应 `data` 附带 `control_id` 供轮询）。 |
+| `400` | `1137` | 不能将同账号设备加入分享收藏列表。 |
 | `400` | `1190` | `QR code expired`：二维码 ID 未知、已超过 180 秒有效期、已被拒绝或已兑换过。 |
 | `429` | `1429` | `too many requests`：触发 GCRA 速率限制。 |
 | `400` | `2001` | `device is offline`：目标被控端当前未连入信令房间。 |
 | `400` | `2002` | `被控端正在被远控中，无法发起连接`：已有其他设备持有桌面会话且请求中 `force_join` 为 `false`。 |
 | `400` | `2003` | `no such device`：设备不存在或归属于其他用户。 |
+| `400` | `2004` | `guest room required`：访客被控端尚未调用 `guest/room/create` 就查询 `guest/share/info`。 |
 | `500` | `1000` | `internal error`：服务端内部或 SQLite 存储错误。 |
 
 ## 3. 客户端 REST 接口（`/api/v1/*`）
@@ -50,10 +56,10 @@
 | `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选，其余硬件字段被忽略） | 返回完整 `Entry`（包含 `device_id`）。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称及 `X-Param-VN`，平台记为 `1`（Windows）。 |
 | `POST /api/v1/device/macos/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选） | 与 `windows/init` 行为一致，平台记为 `4`（macOS）。 |
 | `POST /api/v1/device/mac_controllable` | User Token + `X-Param-Device-Id` | `{"controllable": true\|false}` | `{}`。更新调用方设备（未绑定或归属于当前用户）是否允许被远程控制。 |
-| `GET /api/v1/device/list` | User Token（可选 `X-Param-Device-Id`） | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）、`participants_info`、可选 `wallpaper_url`、`version_name`、`support_wol`、`controllable`、`publisher_availability_status`、`controlled_support` 与 `update_started_at`。 |
+| `GET /api/v1/device/list` | User Token（可选 `X-Param-Device-Id`） | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": [Entry]}`（含当前仍活跃的曾协助设备）。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）、`participants_info`、可选 `wallpaper_url`、`version_name`、`support_wol`、`controllable`、`publisher_availability_status`、`controlled_support` 与 `update_started_at`。 |
 | `GET /api/v1/device/groups/of/my` | User Token（可选 `X-Param-Device-Id`） | 空 | 按形态分组返回名下设备：`{"current_device_id": string \| null, "mobile_devices": [Entry], "desktop_devices": [Entry], "tv_devices": [Entry]}`。 |
 | `GET /api/v1/device/{device_id}/preferences` | User Token | 空 | 返回指定已绑定设备的工具栏排序配置 `{"device_preferences": {"device_id", "tools": {"sequence": [...]}}}`。 |
-| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | 空 | 返回调用方设备的远程协助 9 位确定性识别码 `connect_id`、`connect_code`（`""`）与显示名称 `alias`。 |
+| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | 空 | 返回调用方设备的远程协助 9 位识别码 `connect_id`、`connect_code`（`""`）与显示名称 `alias`。 |
 | `GET /api/v1/app/list/of/device/{device_id}` | User Token | 空 | 返回指定已绑定设备上报的应用列表 `{"device_app_list": [...]}`。 |
 | `POST /api/v1/app/list/of/current_device` | User Token + `X-Param-Device-Id` | `{"device_app_list": [...]}` | 持久化当前已绑定被控端上报的应用列表并回显载荷。 |
 | `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`。解除设备绑定，删除该被控端关联的登录会话、局域网信息、壁纸、上传文件与应用列表，并向在线被控端发送踢出信令。 |
@@ -86,6 +92,26 @@
 | `POST /api/v1/user/logout` | User Token | `{}` | `{}`。从 SQLite `sessions` 表删除当前令牌的 `sid`。 |
 | `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | 将该设备绑定至当前用户、记录 `X-Param-VN` 并关联当前会话，返回 `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false}`。 |
 | `POST /api/v1/room/join/by_device/{device_id}` | User Token（可选 `X-Param-Device-Id`） | `{"force_join": false}` | 校验设备归属、被控端在线状态与桌面占用冲突，返回 `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false, "report_token": "", "report_url": "", "publisher_platform": <u8>}`。 |
+
+### 访客与远程协助分享接口
+
+Remora 支持未登录的访客被控端（`Guest Token` + `X-Param-Guest-Id`）与已登录被控端以 9 位 `connect_id` 发起远程协助；服务端不在数据库中保存明文验证码，而是通过 `bmsg_push` 实时协调验证模式、加盐摘要校验（`SHA-256(salt || connect_code)`）与桌面确认弹窗。
+
+| 方法与路径 | 鉴权 | 说明 |
+|---|---|---|
+| `POST /api/v1/guest/create` | 匿名（限流 + `X-Param-Device-Id`） | 为已注册设备签发 `{"guest_id", "token"}` 访客令牌。 |
+| `POST /api/v1/guest/room/create` | Guest Token | 创建或续期访客被控端的信令房间，返回 `RoomCreate` 结构与访客 Host Room JWT。 |
+| `POST /api/v1/guest/share/info` | Guest Token | 要求先创建访客房间（否则返回 `400` / `2004`），激活并返回 `{"connect_id", "connect_code": "", "alias"}`。 |
+| `POST /api/v1/guest/share/cancel`、`POST /api/v1/device/share/cancel` | Guest Token / User Token | 停用当前设备的分享状态并仅踢出受协助（`shared`）控制端会话，不影响设备所有者自身连接。 |
+| `POST /api/v1/device/share/info/refresh_id`（及 `/refresh`） | User Token + `X-Param-Device-Id` | 轮换已绑定设备的 9 位 `connect_id`。 |
+| `POST /api/v2/room/share/control_mode` | User Token | 向目标在线被控端推送 `bmsg_push` (`get_control_mode`) 查询 `allow_control`、`control_mode`（`by_password` / `by_confirmation` / `password_confirmation`）与 `need_password`；macOS 端省略上报时在 800 ms 宽限后按 `controllable` 回落。 |
+| `POST /api/v1/guest/room/share/upload_control_mode`、`POST /api/v2/room/share/upload_control_mode` | Guest Token / User Token | 被控端应答 `get_control_mode` 挑战，上报当前协助开关与验证模式。 |
+| `POST /api/v1/guest/room/share/upload/sign`、`POST /api/v2/room/share/upload_sign` | Guest Token / User Token | 被控端应答 `remote_control` 挑战，上报 `SHA-256(salt || code)` 摘要与 `can_remote_control`。 |
+| `POST /api/v1/guest/room/share/confirmation`、`POST /api/v2/room/share/confirmation` | Guest Token / User Token | 被控端提交桌面确认结果（允许或拒绝）。 |
+| `POST /api/v1/room/join/share/by_code`、`POST /api/v2/room/join/share/by_code` | User Token（限流） | 向目标被控端发送带随机 `salt` 的 `remote_control` 推送并在服务端校验摘要，通过后返回 `AssistRoomConfig` 与受协助 Viewer Room JWT。 |
+| `POST /api/v2/room/join/share/by_confirmation` | User Token（限流） | 发起或轮询确认式远程协助；等待期间返回 `400` / `1136`（携带 `control_id`），拒绝返回 `400` / `1134`，同意后返回 `AssistRoomConfig`。 |
+| `POST /api/v2/room/share/cancel_remote_assist` | User Token | 控制端取消等待中的确认请求并向被控端推送 `remote_control_by_confirmation_cancel`。 |
+| `GET /api/v1/device/share/saved{,/favorites,/recent}`、`POST /api/v1/device/share/saved/favorites`、`DELETE /api/v1/device/share/saved/{kind}/{publisher_device_id}`、`POST /api/v1/device/share/{id}/unbind` | User Token | 管理控制端的最近协助记录、收藏列表与已分享设备解绑。 |
 
 ### 客户端兼容与更新存根接口
 
@@ -140,6 +166,7 @@ Engine.IO 建立后，客户端发送 `"40"` 加入 Socket.IO 默认命名空间
 | Cloud → Host | `be-controlled`（含 1 个二进制附件） | JSON 参数包含 `ice_id`、`client_id`（控制端连接 ID）、`app_control_id`、`iceServers`、`force_relay`、`app_data` 占位符、可选 `streamer_data`，以及由 `ConnectOptions.client_type` 映射的 `controller_platform`（`1` Windows、`2` Android、`3` iOS、`4` macOS）；二进制帧原样转发 `ConnectOptions`。 |
 | Host ↔ Viewer | `soac`、`forward_setting` | 转发 SDP Offer/Answer、ICE 候选与会话设置。被控端通过顶层 `client_id` 指定目标控制端；控制端通过 `data.ice_id` 指定目标会话。服务端校验会话归属后，将 JSON 中的 `client_id` 改写为发送方的真实连接 ID 再投递给对端。 |
 | Cloud → Host | `bmsg_push`（`wake_on_lan`） | `{"type":"wake_on_lan","data":{"target_device":{"mac":"aa:bb:cc:dd:ee:ff","ip":"192.168.1.20","subnet_mask":"255.255.255.0"}}}`，发给 `POST /api/web/devices/{id}/wake` 选中的协助唤醒被控端，由其在所在局域网内发送魔术包。 |
+| Cloud → Host | `bmsg_push`（远程协助挑战） | 包括 `get_control_mode`（`{"control_id"}`）、`remote_control`（`{"control_id","salt"}`）、`remote_control_by_confirmation`（`{"control_id","device_name","user_id"}`）与 `remote_control_by_confirmation_cancel`（`{"control_id"}`），用于协调远程协助校验与桌面确认。 |
 | Cloud → Host | `released` | 控制端断开连接或被其他控制端通过 `force_join` 抢占时发送：`{"ice_id": "...", "client_id": "<viewer_id>"}`。 |
 | Cloud → Host | `left`（无 `ice_id`） | 被控端被新连接顶替或设备被解绑时发送 `{}`，随后服务端关闭该 WebSocket。 |
 | Cloud → Viewer | `left`（带 `ice_id`） | 被控端断线超过 30 秒宽限期、被踢出或当前控制端被 `force_join` 抢占时发送：`{"ice_id": "...", "client_id": "<host_id>"}`。 |

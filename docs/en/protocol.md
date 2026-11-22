@@ -32,11 +32,17 @@ Clients treat HTTP `200` with `code == 0` as success. Errors return the followin
 | `422` | `1001` | `invalid request`: Malformed JSON, missing required fields, or body larger than 1 MiB. |
 | `403` | `1002` | `invalid signature`: Missing `x-param-sign` header or HMAC mismatch. |
 | `422` | `1120` | `login expired`: Missing, malformed, or revoked User Token; clients clear stored credentials and prompt for login. |
+| `400` | `1130` | Cannot initiate remote assistance (same-account device or host has not enabled/answered assistance). |
+| `400` | `1131` | Incorrect share `connect_id` or verification code. |
+| `400` | `1134` | Confirmation-based remote assistance was denied or cancelled by the host. |
+| `400` | `1136` | Waiting for confirmation on the host desktop (`data` carries `control_id` for polling). |
+| `400` | `1137` | Cannot add a same-account device to share favorites. |
 | `400` | `1190` | `QR code expired`: Unknown, expired (180 s), denied, or already redeemed QR login. |
 | `429` | `1429` | `too many requests`: GCRA rate limit exceeded. |
 | `400` | `2001` | `device is offline`: Target host is not connected to a signaling room. |
 | `400` | `2002` | `被控端正在被远控中，无法发起连接`: Another viewer device holds the desktop session and `force_join` is `false`. |
 | `400` | `2003` | `no such device`: Device ID does not exist or belongs to another user. |
+| `400` | `2004` | `guest room required`: Guest host called `guest/share/info` before `guest/room/create`. |
 | `500` | `1000` | `internal error`: Internal server or SQLite failure. |
 
 ## 3. UU Client REST API (`/api/v1/*`)
@@ -50,10 +56,10 @@ Authenticated endpoints read the user token from `Authorization: Bearer <User JW
 | `POST /api/v1/device/windows/init` | None (rate-limited) | `{"client_id": "...", "name": "...", "controllable": true}` (`name` and `controllable` optional; hardware fields ignored) | Returns a full `Entry` (including `device_id`). Idempotent by `client_id`: re-registering returns the existing `device_id`, updates `name` and `X-Param-VN`, and sets platform `1` (Windows). |
 | `POST /api/v1/device/macos/init` | None (rate-limited) | `{"client_id": "...", "name": "...", "controllable": true}` (`name` and `controllable` optional) | Same behavior as `windows/init`, registering platform `4` (macOS). |
 | `POST /api/v1/device/mac_controllable` | User Token + `X-Param-Device-Id` | `{"controllable": true\|false}` | `{}`. Updates whether the calling unbound or owned device allows incoming remote control. |
-| `GET /api/v1/device/list` | User Token (optional `X-Param-Device-Id`) | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": []}`. Each `Entry` carries `device_id`, optional `alias`, `platform`, `status` (`"CONNECTED"` or `"DISCONNECTED"`), `participants_info`, optional `wallpaper_url`, `version_name`, `support_wol`, `controllable`, `publisher_availability_status`, `controlled_support`, and `update_started_at`. |
+| `GET /api/v1/device/list` | User Token (optional `X-Param-Device-Id`) | Empty | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": [Entry]}` (includes active previously assisted devices). Each `Entry` carries `device_id`, optional `alias`, `platform`, `status` (`"CONNECTED"` or `"DISCONNECTED"`), `participants_info`, optional `wallpaper_url`, `version_name`, `support_wol`, `controllable`, `publisher_availability_status`, `controlled_support`, and `update_started_at`. |
 | `GET /api/v1/device/groups/of/my` | User Token (optional `X-Param-Device-Id`) | Empty | Returns owned devices grouped by form factor: `{"current_device_id": string \| null, "mobile_devices": [Entry], "desktop_devices": [Entry], "tv_devices": [Entry]}`. |
 | `GET /api/v1/device/{device_id}/preferences` | User Token | Empty | Returns toolbar sequence preferences for a bound device: `{"device_preferences": {"device_id", "tools": {"sequence": [...]}}}`. |
-| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | Empty | Returns the calling device's deterministic 9-digit remote-assistance `connect_id`, `connect_code` (`""`), and display `alias`. |
+| `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | Empty | Returns the calling device's 9-digit remote-assistance `connect_id`, `connect_code` (`""`), and display `alias`. |
 | `GET /api/v1/app/list/of/device/{device_id}` | User Token | Empty | Returns the registered application list `{"device_app_list": [...]}` for a bound device. |
 | `POST /api/v1/app/list/of/current_device` | User Token + `X-Param-Device-Id` | `{"device_app_list": [...]}` | Persists and echoes the calling bound host's reported application list in SQLite `device_apps`. |
 | `POST /api/v1/device/{device_id}/unbind` | User Token | `{}` | `{}`. Unbinds the device, deletes its host login sessions, LAN report, wallpaper, uploaded files, and `device_apps`, and kicks any connected host. |
@@ -86,6 +92,26 @@ Hosts publish an image of their desktop wallpaper for device cards. Images are s
 | `POST /api/v1/user/logout` | User Token | `{}` | `{}`. Deletes the token's `sid` row from SQLite `sessions`. |
 | `POST /api/v1/room/create` | User Token + `X-Param-Device-Id` | `{}` | Binds the device to the calling user, stores `X-Param-VN`, and links the session, returning `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Host Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false}`. |
 | `POST /api/v1/room/join/by_device/{device_id}` | User Token (optional `X-Param-Device-Id`) | `{"force_join": false}` | Verifies device ownership, host online state, and desktop exclusivity, returning `{"signaling_server": "wss://...", "signaling_list": [...], "sni_required_signaling_list": [...], "token": "<Viewer Room JWT>", "ws_connect_timeout_ms": 16000, "max_reconnect_delta": 300, "streamer_retry_delta_ms": 1000, "international_connect": false, "report_token": "", "report_url": "", "publisher_platform": <u8>}`. |
+
+### Guest and Remote Assistance Sharing
+
+Remora supports both unauthenticated guest hosts (`Guest Token` + `X-Param-Guest-Id`) and signed-in hosts sharing a 9-digit `connect_id`. Rather than storing plaintext verification codes in SQLite, the cloud coordinates live `bmsg_push` challenges for control mode, salted digest verification (`SHA-256(salt || connect_code)`), and desktop confirmation prompts.
+
+| Endpoint | Auth | Behavior |
+|---|---|---|
+| `POST /api/v1/guest/create` | None (rate-limited + `X-Param-Device-Id`) | Issues a `{"guest_id", "token"}` guest credential for an already-registered device. |
+| `POST /api/v1/guest/room/create` | Guest Token | Creates or renews the guest host's signaling room and returns a guest Host Room JWT. |
+| `POST /api/v1/guest/share/info` | Guest Token | Requires a prior `guest/room/create` (else `400` / `2004`); activates sharing and returns `{"connect_id", "connect_code": "", "alias"}`. |
+| `POST /api/v1/guest/share/cancel`, `POST /api/v1/device/share/cancel` | Guest Token / User Token | Disables sharing on the device and disconnects only `shared` viewer sessions while keeping owner sessions intact. |
+| `POST /api/v1/device/share/info/refresh_id` (and `/refresh`) | User Token + `X-Param-Device-Id` | Rotates the bound device's 9-digit `connect_id`. |
+| `POST /api/v2/room/share/control_mode` | User Token | Pushes `bmsg_push` (`get_control_mode`) to the online host and returns `allow_control`, `control_mode` (`by_password` / `by_confirmation` / `password_confirmation`), and `need_password`; macOS targets fall back after 800 ms using `controllable`. |
+| `POST /api/v1/guest/room/share/upload_control_mode`, `POST /api/v2/room/share/upload_control_mode` | Guest Token / User Token | Answers a `get_control_mode` push with the host's assist state and verification mode. |
+| `POST /api/v1/guest/room/share/upload/sign`, `POST /api/v2/room/share/upload_sign` | Guest Token / User Token | Answers a `remote_control` push with `SHA-256(salt || code)` and `can_remote_control`. |
+| `POST /api/v1/guest/room/share/confirmation`, `POST /api/v2/room/share/confirmation` | Guest Token / User Token | Submits the host desktop's allow/deny decision for a confirmation prompt. |
+| `POST /api/v1/room/join/share/by_code`, `POST /api/v2/room/join/share/by_code` | User Token (rate-limited) | Sends a `remote_control` challenge with a random `salt` to the host, verifies the digest server-side, and returns `AssistRoomConfig` with a shared Viewer Room JWT. |
+| `POST /api/v2/room/join/share/by_confirmation` | User Token (rate-limited) | Starts or polls a confirmation prompt; returns `400` / `1136` (with `control_id`) while pending, `400` / `1134` when denied, or `AssistRoomConfig` once approved. |
+| `POST /api/v2/room/share/cancel_remote_assist` | User Token | Cancels a pending confirmation request and pushes `remote_control_by_confirmation_cancel` to the host. |
+| `GET /api/v1/device/share/saved{,/favorites,/recent}`, `POST /api/v1/device/share/saved/favorites`, `DELETE /api/v1/device/share/saved/{kind}/{publisher_device_id}`, `POST /api/v1/device/share/{id}/unbind` | User Token | Manages recent/favorite assisted devices and removes shared devices from the controller's list. |
 
 ### Client Compatibility and Update Endpoints
 
@@ -140,6 +166,7 @@ After receiving the Open frame, the client sends `"40"` to connect to the defaul
 | Cloud → Host | `be-controlled` (1 binary frame) | The JSON payload carries `ice_id`, `client_id` (viewer's connection ID), `app_control_id`, `iceServers`, `force_relay`, `app_data` placeholder, optional `streamer_data`, and `controller_platform` mapped from `ConnectOptions.client_type` (`1` Windows, `2` Android, `3` iOS, `4` macOS). The binary frame forwards the raw `ConnectOptions` bytes. |
 | Host ↔ Viewer | `soac`, `forward_setting` | Relays SDP offers/answers, ICE candidates, and session settings. The host addresses a viewer via top-level `client_id`; the viewer addresses the host via `data.ice_id`. After verifying session ownership, the server overwrites `client_id` in the JSON payload with the sender's verified connection ID before forwarding. |
 | Cloud → Host | `bmsg_push` (`wake_on_lan`) | `{"type":"wake_on_lan","data":{"target_device":{"mac":"aa:bb:cc:dd:ee:ff","ip":"192.168.1.20","subnet_mask":"255.255.255.0"}}}`, sent to the helper host chosen by `POST /api/web/devices/{id}/wake`. The host sends a magic packet on its LAN. |
+| Cloud → Host | `bmsg_push` (remote assistance) | `get_control_mode` (`{"control_id"}`), `remote_control` (`{"control_id","salt"}`), `remote_control_by_confirmation` (`{"control_id","device_name","user_id"}`), and `remote_control_by_confirmation_cancel` (`{"control_id"}`) coordinate live assist verification and confirmation prompts. |
 | Cloud → Host | `released` | Sent when a viewer disconnects or is displaced by `force_join`: `{"ice_id": "...", "client_id": "<viewer_id>"}`. |
 | Cloud → Host | `left` (without `ice_id`) | Sent as `{}` before closing the WebSocket when a host is replaced by a newer connection or unbound. |
 | Cloud → Viewer | `left` (with `ice_id`) | Sent when a host fails to reconnect within the 30-second grace period, is kicked, or the viewer is displaced by `force_join`: `{"ice_id": "...", "client_id": "<host_id>"}`. |
