@@ -127,7 +127,24 @@ wallpaper_raw_post = true
         assert_eq!(tv350.platform, Platform::AndroidTv);
         assert!(!tv350.quirks.kcp_quic_optional);
         assert!(!tv350.quirks.entitlements);
-        assert_eq!(all().len(), 15);
+        assert_eq!(all().len(), 16);
+    }
+
+    #[test]
+    fn embeds_captured_ios_profile() {
+        let profile = by_id("ios-4.48.1").expect("ios-4.48.1 embedded");
+        assert_eq!(profile.source, ProfileSource::Captured);
+        assert_eq!(profile.platform, Platform::Ios);
+        assert_eq!(profile.init_endpoint, "/api/v1/device/ios/init");
+        assert_eq!(
+            profile.detect,
+            DetectRule {
+                plat: "3".into(),
+                version: "4.48.1".into(),
+                build: Some(203),
+            }
+        );
+        assert!(profile.quirks.response_sign_user_info);
     }
 
     #[test]

@@ -130,6 +130,17 @@ mod tests {
     }
 
     #[test]
+    fn detects_ios_4_48_1_profile() {
+        let headers = [
+            ("x-param-plat", "3"),
+            ("x-param-vn", "4.48.1"),
+            ("x-param-vc", "203"),
+        ];
+        let detected = detect_from_headers(headers).expect("ios-4.48.1 should match");
+        assert_eq!(detected.id, "ios-4.48.1");
+    }
+
+    #[test]
     fn detects_windows_4_48_2_profile() {
         let matched = detect_from_headers([
             ("X-Param-PLAT", "1"),
