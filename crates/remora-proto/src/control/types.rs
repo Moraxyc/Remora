@@ -631,6 +631,58 @@ impl fmt::Debug for AssistRoomConfig {
     }
 }
 
+/// Outcome of `POST /api/v2/room/join/share/by_confirmation`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum JoinShareByConfirmationResult {
+    Approved(Box<AssistRoomConfig>),
+    Pending { control_id: String },
+}
+
+/// Parses `POST /api/v2/room/join/share/by_confirmation`, returning `Pending { control_id }`
+/// when the cloud responds with code `1136` (`ShareConfirmationRequired`).
+pub fn parse_join_confirmation_response(
+    http_status: u16,
+    body: &[u8],
+) -> Result<JoinShareByConfirmationResult, ApiError> {
+    let envelope: Envelope =
+        serde_json::from_slice(body).map_err(|_| ApiError::Malformed { http_status })?;
+    match (http_status, envelope.code) {
+        (200, 0) => AssistRoomConfig::deserialize(envelope.data)
+            .map(|cfg| JoinShareByConfirmationResult::Approved(Box::new(cfg)))
+            .map_err(|_| ApiError::Malformed { http_status }),
+        (_, 1120) => Err(ApiError::TokenExpired),
+        (_, 1190) => Err(ApiError::QrCodeExpired),
+        (_, 1136) => {
+            let control_id = envelope
+                .data
+                .get("control_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or(ApiError::Malformed { http_status })?
+                .to_owned();
+            Ok(JoinShareByConfirmationResult::Pending { control_id })
+        }
+        (_, code) => Err(ApiError::Rejected { http_status, code }),
+    }
+}
+
+/// Category for `/api/v1/device/share/saved/{kind}` endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SavedShareKind {
+    Favorites,
+    Recent,
+}
+
+impl SavedShareKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Favorites => "favorites",
+            Self::Recent => "recent",
+        }
+    }
+}
+
 /// One saved/recent/favorite assisted device entry returned by `/api/v1/device/share/saved*`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistDeviceRecord {
@@ -780,5 +832,43 @@ mod tests {
         let dbg = format!("{room:?}");
         assert!(!dbg.contains("secret-room-jwt"));
         assert!(!dbg.contains("secret-report"));
+    }
+
+    #[test]
+    fn parses_join_confirmation_outcomes() {
+        let pending = br#"{"code":1136,"msg":"waiting","data":{"control_id":"ctrl-9"}}"#;
+        assert_eq!(
+            parse_join_confirmation_response(400, pending),
+            Ok(JoinShareByConfirmationResult::Pending {
+                control_id: "ctrl-9".into()
+            })
+        );
+
+        let denied = br#"{"code":1134,"msg":"denied","data":{}}"#;
+        assert_eq!(
+            parse_join_confirmation_response(400, denied),
+            Err(ApiError::Rejected {
+                http_status: 400,
+                code: 1134
+            })
+        );
+
+        let approved = br#"{
+            "code":0,
+            "msg":"ok",
+            "data":{
+                "signaling_server":"wss://remora.test/socket.io/",
+                "signaling_list":["wss://remora.test/socket.io/"],
+                "token":"room-jwt",
+                "ws_connect_timeout_ms":16000,
+                "streamer_retry_delta_ms":1000,
+                "max_reconnect_delta":300,
+                "publisher_platform":1
+            }
+        }"#;
+        assert!(matches!(
+            parse_join_confirmation_response(200, approved),
+            Ok(JoinShareByConfirmationResult::Approved(cfg)) if cfg.token == "room-jwt"
+        ));
     }
 }
