@@ -714,7 +714,16 @@ async fn device_list(
             "support_wol": false,
             "controllable": d.controllable,
             "publisher_availability_status": if matches!(d.platform, 1 | 4 | 5) {
-                Value::String(if online { "ready" } else { "offline" }.to_owned())
+                Value::String(
+                    if !online {
+                        "offline"
+                    } else if !d.controllable {
+                        "control_off"
+                    } else {
+                        "ready"
+                    }
+                    .to_owned(),
+                )
             } else {
                 Value::Null
             },
@@ -802,7 +811,16 @@ async fn device_groups(
             "support_wol": false,
             "controllable": d.controllable,
             "publisher_availability_status": if matches!(d.platform, 1 | 4 | 5) {
-                Value::String(if online { "ready" } else { "offline" }.to_owned())
+                Value::String(
+                    if !online {
+                        "offline"
+                    } else if !d.controllable {
+                        "control_off"
+                    } else {
+                        "ready"
+                    }
+                    .to_owned(),
+                )
             } else {
                 Value::Null
             },
@@ -1152,6 +1170,7 @@ async fn guest_room_create(
             "signaling_server": state.ws_url,
             "signaling_list": [state.ws_url],
             "sni_required_signaling_list": [],
+            "streamer_config": "{}",
             "token": ticket,
             "ws_connect_timeout_ms": 16_000,
             "max_reconnect_delta": 300,
@@ -1945,7 +1964,7 @@ fn build_fake_assist_room(
         "publisher_platform": dev.platform,
         "publisher_device_id": dev.device_id,
         "international_connect": false,
-        "device_binding": "",
+        "device_binding": if dev.owner.is_some() { "user_device" } else { "" },
         "streamer_config": "{}",
     })
 }
@@ -2008,6 +2027,7 @@ async fn room_share_control_mode(
             json_envelope(
                 StatusCode::OK,
                 serde_json::to_value(ok_envelope(json!({
+                    "can_remote_control": reply.allow_control,
                     "allow_control": reply.allow_control,
                     "control_mode": reply.control_mode,
                     "need_password": need_password,
@@ -2027,6 +2047,7 @@ async fn room_share_control_mode(
                 json_envelope(
                     StatusCode::OK,
                     serde_json::to_value(ok_envelope(json!({
+                        "can_remote_control": dev.controllable,
                         "allow_control": dev.controllable,
                         "control_mode": ShareControlMode::ByPassword,
                         "need_password": dev.controllable,
@@ -2561,6 +2582,7 @@ async fn room_create(
             "signaling_server": state.ws_url,
             "signaling_list": [state.ws_url],
             "sni_required_signaling_list": [],
+            "streamer_config": "{}",
             "token": ticket,
             "ws_connect_timeout_ms": 16_000,
             "max_reconnect_delta": 300,
@@ -2648,6 +2670,7 @@ async fn room_join(
             "signaling_server": state.ws_url,
             "signaling_list": [state.ws_url],
             "sni_required_signaling_list": [],
+            "streamer_config": "{}",
             "token": ticket,
             "ws_connect_timeout_ms": 16_000,
             "max_reconnect_delta": 300,
@@ -2655,6 +2678,7 @@ async fn room_join(
             "international_connect": false,
             "report_token": "",
             "report_url": "",
+            "report_server_address": "",
             "publisher_platform": platform
         })))
         .unwrap(),

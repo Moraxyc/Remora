@@ -141,6 +141,7 @@ steps:
             http_status: 200
             code: 0
             json_eq:
+              can_remote_control: true
               allow_control: true
               control_mode: by_password
               need_password: true

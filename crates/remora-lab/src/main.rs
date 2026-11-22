@@ -611,9 +611,9 @@ async fn run_assist_join(
         })
         .await
         .map_err(|e| LabError::Scenario(format!("assist-join control_mode failed: {e}")))?;
-    if !mode.allow_control {
+    if !mode.is_allowed() {
         return Err(LabError::Scenario(
-            "assist host reported allow_control=false".into(),
+            "assist host reported can_remote_control=false".into(),
         ));
     }
 
