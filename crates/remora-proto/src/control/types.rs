@@ -492,13 +492,27 @@ pub struct ShareControlModeRequest {
 /// Response `data` from `POST /api/v2/room/share/control_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShareControlModeResponse {
-    pub allow_control: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_remote_control: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_control: Option<bool>,
     pub control_mode: ShareControlMode,
+    #[serde(default)]
     pub need_password: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_id: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl ShareControlModeResponse {
+    /// Whether remote assistance is permitted by the target host, checking the official
+    /// `can_remote_control` field first and falling back to `allow_control`.
+    pub fn is_allowed(&self) -> bool {
+        self.can_remote_control
+            .or(self.allow_control)
+            .unwrap_or(false)
+    }
 }
 
 /// Request body for `POST /api/v1/guest/room/share/upload_control_mode` and
@@ -870,5 +884,18 @@ mod tests {
             parse_join_confirmation_response(200, approved),
             Ok(JoinShareByConfirmationResult::Approved(cfg)) if cfg.token == "room-jwt"
         ));
+
+        let official_cm = br#"{"code":0,"msg":"ok","data":{"can_remote_control":true,"control_mode":"by_password"}}"#;
+        let parsed_cm: ShareControlModeResponse =
+            crate::control::parse_response(200, official_cm).unwrap();
+        assert!(parsed_cm.is_allowed());
+        assert_eq!(parsed_cm.can_remote_control, Some(true));
+        assert_eq!(parsed_cm.allow_control, None);
+        assert_eq!(parsed_cm.control_mode, ShareControlMode::ByPassword);
+
+        let legacy_cm = br#"{"code":0,"msg":"ok","data":{"allow_control":true,"control_mode":"by_password","need_password":true}}"#;
+        let parsed_legacy: ShareControlModeResponse =
+            crate::control::parse_response(200, legacy_cm).unwrap();
+        assert!(parsed_legacy.is_allowed());
     }
 }
