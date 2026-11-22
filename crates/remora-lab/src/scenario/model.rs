@@ -192,6 +192,79 @@ pub enum StepAction {
         #[serde(default)]
         device_id: Option<String>,
     },
+    DeviceShareInfoRefresh {
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    DeviceShareCancel {
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    DeviceShareSaved {
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    GuestCreate {
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    GuestRoomCreate,
+    GuestShareInfo,
+    GuestShareCancel,
+    GuestUploadControlMode {
+        control_id: String,
+        allow_control: bool,
+        control_mode: String,
+    },
+    GuestUploadSign {
+        control_id: String,
+        can_remote_control: bool,
+        #[serde(default)]
+        code: Option<String>,
+        #[serde(default)]
+        salt: Option<String>,
+        #[serde(default)]
+        sign: Option<String>,
+    },
+    GuestConfirmation {
+        control_id: String,
+        allow: bool,
+    },
+    RoomShareControlMode {
+        connect_id: String,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    RoomJoinShareByCode {
+        connect_id: String,
+        connect_code: String,
+        #[serde(default)]
+        force_join: bool,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    RoomJoinShareByConfirmation {
+        connect_id: String,
+        #[serde(default)]
+        control_id: Option<String>,
+        #[serde(default)]
+        force_join: bool,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    RoomShareCancelRemoteAssist {
+        connect_id: String,
+        #[serde(default)]
+        control_id: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+    },
     ReleaseFetchUpdate {
         #[serde(default)]
         target: Option<String>,

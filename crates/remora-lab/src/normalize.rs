@@ -85,7 +85,11 @@ impl SymbolTable {
             Value::Object(map) => {
                 let mut out = serde_json::Map::with_capacity(map.len());
                 for (k, v) in map {
-                    if k == "controlled_time" && v.is_u64() {
+                    if matches!(
+                        k.as_str(),
+                        "controlled_time" | "last_connected_at" | "favorited_at"
+                    ) && v.is_u64()
+                    {
                         out.insert(k.clone(), Value::from(0));
                     } else {
                         out.insert(k.clone(), self.normalize_value(Some(k.as_str()), v));
@@ -102,8 +106,13 @@ impl SymbolTable {
             return String::new();
         }
         match key_hint {
-            Some("device_id" | "current_device_id") => self.intern("device", raw),
-            Some("connect_id") => self.intern("connect_id", raw),
+            Some("device_id" | "current_device_id" | "publisher_device_id") => {
+                self.intern("device", raw)
+            }
+            Some("connect_id" | "share_id") => self.intern("connect_id", raw),
+            Some("guest_id") => self.intern("guest", raw),
+            Some("control_id") => self.intern("control", raw),
+            Some("salt") => self.intern("salt", raw),
             Some("client_id") => self.intern("client", raw),
             Some("ice_id") => self.intern("ice", raw),
             Some("token") => {

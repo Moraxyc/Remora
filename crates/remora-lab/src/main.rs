@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -6,8 +7,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::time::Duration;
 
 use remora_endpoint::Endpoint;
-use remora_endpoint::role::{HostConfig, HostSession};
-use remora_proto::control::SignKey;
+use remora_endpoint::role::{HostConfig, HostSession, ViewerConfig, ViewerSession};
+use remora_proto::control::{JoinShareByCodeRequest, ShareControlModeRequest, SignKey};
 use remora_proto::profile;
 
 use remora_lab::error::LabError;
@@ -147,6 +148,30 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         expect_inputs: usize,
         /// Minimum video frames sent to the connecting viewer.
+        #[arg(long, default_value_t = 1)]
+        expect_frames: u64,
+        /// Maximum seconds to wait before failing.
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+    },
+    /// Connect to a remote-assistance host by connect ID (reading the code from stdin).
+    AssistJoin {
+        /// Remora base URL (e.g. http://server:8680).
+        #[arg(long)]
+        url: String,
+        /// Request signing key.
+        #[arg(long, default_value = "remora-lab-sign-key")]
+        sign_key: String,
+        /// Disable request signing.
+        #[arg(long)]
+        no_sign_key: bool,
+        /// 9-digit remote-assistance share ID.
+        #[arg(long)]
+        connect_id: String,
+        /// Force TURN relay on the viewer peer.
+        #[arg(long)]
+        force_relay: bool,
+        /// Minimum video frames expected from the assisting host.
         #[arg(long, default_value_t = 1)]
         expect_frames: u64,
         /// Maximum seconds to wait before failing.
@@ -363,6 +388,26 @@ async fn dispatch(cmd: Command) -> Result<bool, LabError> {
             )
             .await
         }
+        Command::AssistJoin {
+            url,
+            sign_key,
+            no_sign_key,
+            connect_id,
+            force_relay,
+            expect_frames,
+            timeout_secs,
+        } => {
+            let effective_key = (!no_sign_key).then_some(sign_key.as_str());
+            run_assist_join(
+                &url,
+                effective_key,
+                &connect_id,
+                force_relay,
+                expect_frames,
+                Duration::from_secs(timeout_secs),
+            )
+            .await
+        }
         Command::Record => {
             record::run_placeholder()?;
             Ok(true)
@@ -515,5 +560,102 @@ async fn run_serve_host(
         .http()
         .device_unbind(&login.token, &device_id, Some(&device_id))
         .await;
+    Ok(ok)
+}
+
+async fn run_assist_join(
+    base_url: &str,
+    sign_key: Option<&str>,
+    connect_id: &str,
+    force_relay: bool,
+    expect_frames: u64,
+    timeout: Duration,
+) -> Result<bool, LabError> {
+    let mut code = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut code)
+        .map_err(|e| LabError::Scenario(format!("failed to read assist code from stdin: {e}")))?;
+    let code = code.trim().to_owned();
+    if code.is_empty() {
+        return Err(LabError::Scenario(
+            "empty remote-assistance verification code on stdin".into(),
+        ));
+    }
+
+    let prof = profile::by_id("windows-4.48.2")
+        .ok_or_else(|| LabError::Scenario("missing windows-4.48.2 profile".into()))?;
+    let mut builder = Endpoint::builder(prof)
+        .base_url(base_url)
+        .device_name("remora-lab-assist-viewer")
+        .auto_reconnect(false);
+    if let Some(key) = sign_key {
+        builder = builder.sign_key(SignKey::new(key));
+    }
+    let endpoint = builder
+        .build()
+        .map_err(|e| LabError::Scenario(format!("build endpoint: {e}")))?;
+    endpoint
+        .register_device()
+        .await
+        .map_err(|e| LabError::Scenario(format!("assist-join register_device failed: {e}")))?;
+    endpoint
+        .login()
+        .await
+        .map_err(|e| LabError::Scenario(format!("assist-join login failed: {e}")))?;
+
+    let mode = endpoint
+        .room_share_control_mode(&ShareControlModeRequest {
+            connect_id: connect_id.to_owned(),
+            control_id: None,
+        })
+        .await
+        .map_err(|e| LabError::Scenario(format!("assist-join control_mode failed: {e}")))?;
+    if !mode.allow_control {
+        return Err(LabError::Scenario(
+            "assist host reported allow_control=false".into(),
+        ));
+    }
+
+    let assist_room = endpoint
+        .room_join_share_by_code(&JoinShareByCodeRequest {
+            connect_id: connect_id.to_owned(),
+            connect_code: code,
+            force_join: false,
+        })
+        .await
+        .map_err(|e| LabError::Scenario(format!("assist-join by_code failed: {e}")))?;
+
+    let cfg = ViewerConfig {
+        force_relay,
+        connect_timeout: timeout,
+        ..Default::default()
+    };
+    let session = ViewerSession::connect_assist(
+        &endpoint,
+        &assist_room,
+        Box::new(HeadlessPlatform::new()),
+        cfg,
+    )
+    .await
+    .map_err(|e| LabError::Scenario(format!("assist-join session connect failed: {e}")))?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let ok = loop {
+        let st = session.stats();
+        if st.peer_ready && st.video_frames_received >= expect_frames {
+            break true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!(
+                "assist-join timed out: connected={} control_open={} peer_ready={} frames={}",
+                st.connected, st.control_open, st.peer_ready, st.video_frames_received
+            );
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    session.close().await;
     Ok(ok)
 }

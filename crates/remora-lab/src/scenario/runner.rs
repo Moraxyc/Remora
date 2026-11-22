@@ -20,8 +20,11 @@ use remora_endpoint::role::{
 };
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
-    ApiError, DeviceInitRequest, LoginByQrcodeRequest, QrCodeStatus, QrLoginStatusRequest,
-    RoomJoinRequest,
+    ApiError, CancelRemoteAssistRequest, DeviceInitRequest, JoinShareByCodeRequest,
+    JoinShareByConfirmationRequest, JoinShareByConfirmationResult, LoginByQrcodeRequest,
+    QrCodeStatus, QrLoginStatusRequest, RoomJoinRequest, SavedShareKind, ShareConfirmationRequest,
+    ShareControlMode, ShareControlModeRequest, UploadControlModeRequest, UploadShareSignRequest,
+    share_code_digest,
 };
 use remora_proto::machine::Timestamp;
 use remora_proto::machine::signaling::{SignalingEvent, SignalingMachine};
@@ -171,6 +174,8 @@ struct ActorState {
     recorder: Arc<TraceRecorder>,
     device_id: Option<String>,
     user_token: Option<String>,
+    guest_id: Option<String>,
+    guest_token: Option<String>,
     qr_ticket: Option<String>,
     qr_jump_url: Option<String>,
     room_token: Option<String>,
@@ -223,12 +228,22 @@ impl SharedEnv {
             out = out.replace(&format!("${{vars.{k}}}"), v);
         }
         for (name, actor_mutex) in &self.actors {
+            let prefix = format!("${{{name}.");
+            if !out.contains(&prefix) {
+                continue;
+            }
             let actor = actor_mutex.lock().await;
             if let Some(id) = &actor.device_id {
                 out = out.replace(&format!("${{{name}.device_id}}"), id);
             }
             if let Some(tok) = &actor.user_token {
                 out = out.replace(&format!("${{{name}.user_token}}"), tok);
+            }
+            if let Some(gid) = &actor.guest_id {
+                out = out.replace(&format!("${{{name}.guest_id}}"), gid);
+            }
+            if let Some(tok) = &actor.guest_token {
+                out = out.replace(&format!("${{{name}.guest_token}}"), tok);
             }
             if let Some(tok) = &actor.room_token {
                 out = out.replace(&format!("${{{name}.room_token}}"), tok);
@@ -345,6 +360,8 @@ pub async fn run_scenario(
                 recorder,
                 device_id: None,
                 user_token: None,
+                guest_id: None,
+                guest_token: None,
                 qr_ticket: None,
                 qr_jump_url: None,
                 room_token: None,
@@ -826,6 +843,420 @@ async fn execute_action_step(
                 Err(err) => StepOutcome::from_http_err(err)?,
             };
             ("device_share_info", out)
+        }
+        StepAction::DeviceShareInfoRefresh { token, device_id } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let dev = explicit_dev
+                .or_else(|| actor.device_id.clone())
+                .unwrap_or_default();
+            let out = match actor.http.device_share_info_refresh(&tok, &dev).await {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_share_info_refresh", out)
+        }
+        StepAction::DeviceShareCancel { token, device_id } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let dev = explicit_dev
+                .or_else(|| actor.device_id.clone())
+                .unwrap_or_default();
+            let out = match actor.http.device_share_cancel(&tok, &dev).await {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_share_cancel", out)
+        }
+        StepAction::DeviceShareSaved { kind, token } => {
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let parsed_kind = match kind.as_deref() {
+                Some("favorites") => Some(SavedShareKind::Favorites),
+                Some("recent") => Some(SavedShareKind::Recent),
+                Some(other) => {
+                    return Err(LabError::Scenario(format!(
+                        "unknown saved share kind `{other}`"
+                    )));
+                }
+                None => None,
+            };
+            let actor = actor_mutex.lock().await;
+            let tok = explicit_tok
+                .or_else(|| actor.user_token.clone())
+                .unwrap_or_default();
+            let out = match actor
+                .http
+                .device_share_saved(&tok, parsed_kind, None, None, actor.device_id.as_deref())
+                .await
+            {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("device_share_saved", out)
+        }
+        StepAction::GuestCreate { device_id } => {
+            let explicit_dev = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => None,
+            };
+            let mut actor = actor_mutex.lock().await;
+            let dev = explicit_dev
+                .or_else(|| actor.device_id.clone())
+                .unwrap_or_default();
+            let out = match actor.http.guest_create(&dev).await {
+                Ok(resp) => {
+                    env.record_secret("guest_token", &resp.token);
+                    actor.guest_id = Some(resp.guest_id.clone());
+                    actor.guest_token = Some(resp.token.clone());
+                    StepOutcome::http_ok(serde_json::to_value(resp)?)
+                }
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_create", out)
+        }
+        StepAction::GuestRoomCreate => {
+            let mut actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let out = match actor.http.guest_room_create(&tok, &dev, Some(&gid)).await {
+                Ok(resp) => {
+                    env.record_secret("room_token", &resp.token);
+                    let ws_url = resp
+                        .signaling_list
+                        .first()
+                        .filter(|u| !u.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| resp.signaling_server.clone());
+                    actor.room_token = Some(resp.token.clone());
+                    actor.ws_url = Some(ws_url);
+                    StepOutcome::http_ok(serde_json::to_value(resp)?)
+                }
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_room_create", out)
+        }
+        StepAction::GuestShareInfo => {
+            let actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let out = match actor.http.guest_share_info(&tok, &dev, Some(&gid)).await {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_share_info", out)
+        }
+        StepAction::GuestShareCancel => {
+            let actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let out = match actor.http.guest_share_cancel(&tok, &dev, Some(&gid)).await {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_share_cancel", out)
+        }
+        StepAction::GuestUploadControlMode {
+            control_id,
+            allow_control,
+            control_mode,
+        } => {
+            let cid = env.resolve_template(control_id).await;
+            let mode = match control_mode.as_str() {
+                "by_password" => ShareControlMode::ByPassword,
+                "by_confirmation" => ShareControlMode::ByConfirmation,
+                "password_confirmation" => ShareControlMode::PasswordConfirmation,
+                other => ShareControlMode::Other(other.to_owned()),
+            };
+            let actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let req = UploadControlModeRequest {
+                control_id: cid,
+                allow_control: *allow_control,
+                control_mode: mode,
+            };
+            let out = match actor
+                .http
+                .guest_upload_control_mode(&tok, &dev, Some(&gid), &req)
+                .await
+            {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_upload_control_mode", out)
+        }
+        StepAction::GuestUploadSign {
+            control_id,
+            can_remote_control,
+            code,
+            salt,
+            sign: explicit_sign,
+        } => {
+            let cid = env.resolve_template(control_id).await;
+            let resolved_code = match code {
+                Some(c) => Some(env.resolve_template(c).await),
+                None => None,
+            };
+            let resolved_salt = match salt {
+                Some(s) => Some(env.resolve_template(s).await),
+                None => None,
+            };
+            let resolved_sign = match explicit_sign {
+                Some(s) => Some(env.resolve_template(s).await),
+                None => None,
+            };
+            let computed_sign = match (resolved_sign, resolved_salt, resolved_code) {
+                (Some(s), _, _) => s,
+                (None, Some(sa), Some(co)) => {
+                    env.record_secret("assist_code", &co);
+                    share_code_digest(&sa, &co)
+                }
+                _ => String::new(),
+            };
+            let actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let req = UploadShareSignRequest {
+                control_id: cid,
+                can_remote_control: *can_remote_control,
+                sign: computed_sign,
+                backup_sign: String::new(),
+            };
+            let out = match actor
+                .http
+                .guest_upload_sign(&tok, &dev, Some(&gid), &req)
+                .await
+            {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_upload_sign", out)
+        }
+        StepAction::GuestConfirmation { control_id, allow } => {
+            let cid = env.resolve_template(control_id).await;
+            let actor = actor_mutex.lock().await;
+            let dev = actor.device_id.clone().unwrap_or_default();
+            let gid = actor.guest_id.clone().unwrap_or_default();
+            let tok = actor.guest_token.clone().unwrap_or_default();
+            let req = ShareConfirmationRequest {
+                control_id: cid,
+                allow: *allow,
+            };
+            let out = match actor
+                .http
+                .guest_confirmation(&tok, &dev, Some(&gid), &req)
+                .await
+            {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("guest_confirmation", out)
+        }
+        StepAction::RoomShareControlMode { connect_id, token } => {
+            let cid = env.resolve_template(connect_id).await;
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let (http, tok, dev_id) = {
+                let actor = actor_mutex.lock().await;
+                (
+                    actor.http.clone(),
+                    explicit_tok
+                        .or_else(|| actor.user_token.clone())
+                        .unwrap_or_default(),
+                    actor.device_id.clone(),
+                )
+            };
+            let req = ShareControlModeRequest {
+                connect_id: cid,
+                control_id: None,
+            };
+            let out = match http
+                .room_share_control_mode(&tok, dev_id.as_deref(), &req)
+                .await
+            {
+                Ok(resp) => StepOutcome::http_ok(serde_json::to_value(resp)?),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("room_share_control_mode", out)
+        }
+        StepAction::RoomJoinShareByCode {
+            connect_id,
+            connect_code,
+            force_join,
+            token,
+        } => {
+            let cid = env.resolve_template(connect_id).await;
+            let code = env.resolve_template(connect_code).await;
+            env.record_secret("assist_code", &code);
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let (http, tok, dev_id) = {
+                let actor = actor_mutex.lock().await;
+                (
+                    actor.http.clone(),
+                    explicit_tok
+                        .or_else(|| actor.user_token.clone())
+                        .unwrap_or_default(),
+                    actor.device_id.clone(),
+                )
+            };
+            let req = JoinShareByCodeRequest {
+                connect_id: cid,
+                connect_code: code,
+                force_join: *force_join,
+            };
+            let out = match http
+                .room_join_share_by_code(&tok, dev_id.as_deref(), &req)
+                .await
+            {
+                Ok(resp) => {
+                    env.record_secret("room_token", &resp.token);
+                    let ws_url = resp
+                        .signaling_list
+                        .first()
+                        .filter(|u| !u.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| resp.signaling_server.clone());
+                    let mut actor = actor_mutex.lock().await;
+                    actor.room_token = Some(resp.token.clone());
+                    actor.ws_url = Some(ws_url);
+                    StepOutcome::http_ok(serde_json::to_value(resp)?)
+                }
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("room_join_share_by_code", out)
+        }
+        StepAction::RoomJoinShareByConfirmation {
+            connect_id,
+            control_id,
+            force_join,
+            token,
+        } => {
+            let cid = env.resolve_template(connect_id).await;
+            let ctrl_id = match control_id {
+                Some(c) => Some(env.resolve_template(c).await),
+                None => None,
+            };
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let (http, tok, dev_id) = {
+                let actor = actor_mutex.lock().await;
+                (
+                    actor.http.clone(),
+                    explicit_tok
+                        .or_else(|| actor.user_token.clone())
+                        .unwrap_or_default(),
+                    actor.device_id.clone(),
+                )
+            };
+            let req = JoinShareByConfirmationRequest {
+                connect_id: cid,
+                control_id: ctrl_id,
+                force_join: *force_join,
+            };
+            let out = match http
+                .room_join_share_by_confirmation(&tok, dev_id.as_deref(), &req)
+                .await
+            {
+                Ok(JoinShareByConfirmationResult::Approved(resp)) => {
+                    env.record_secret("room_token", &resp.token);
+                    let ws_url = resp
+                        .signaling_list
+                        .first()
+                        .filter(|u| !u.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| resp.signaling_server.clone());
+                    let mut actor = actor_mutex.lock().await;
+                    actor.room_token = Some(resp.token.clone());
+                    actor.ws_url = Some(ws_url);
+                    StepOutcome::http_ok(serde_json::to_value(resp)?)
+                }
+                Ok(JoinShareByConfirmationResult::Pending { control_id }) => StepOutcome {
+                    http_status: Some(400),
+                    code: Some(1136),
+                    ack_status: None,
+                    event_name: None,
+                    payload: json!({ "control_id": control_id }),
+                },
+                Ok(other) => {
+                    return Err(LabError::Scenario(format!(
+                        "unexpected confirmation join outcome: {other:?}"
+                    )));
+                }
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("room_join_share_by_confirmation", out)
+        }
+        StepAction::RoomShareCancelRemoteAssist {
+            connect_id,
+            control_id,
+            token,
+        } => {
+            let cid = env.resolve_template(connect_id).await;
+            let ctrl_id = match control_id {
+                Some(c) => Some(env.resolve_template(c).await),
+                None => None,
+            };
+            let explicit_tok = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => None,
+            };
+            let (http, tok, dev_id) = {
+                let actor = actor_mutex.lock().await;
+                (
+                    actor.http.clone(),
+                    explicit_tok
+                        .or_else(|| actor.user_token.clone())
+                        .unwrap_or_default(),
+                    actor.device_id.clone(),
+                )
+            };
+            let req = CancelRemoteAssistRequest {
+                connect_id: cid,
+                control_id: ctrl_id,
+            };
+            let out = match http
+                .room_share_cancel_remote_assist(&tok, dev_id.as_deref(), &req)
+                .await
+            {
+                Ok(_) => StepOutcome::http_ok(json!({})),
+                Err(err) => StepOutcome::from_http_err(err)?,
+            };
+            ("room_share_cancel_remote_assist", out)
         }
         StepAction::ReleaseFetchUpdate {
             target,

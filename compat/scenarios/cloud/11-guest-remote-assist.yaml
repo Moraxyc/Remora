@@ -1,0 +1,390 @@
+name: 11-guest-remote-assist
+description: Guest identity, share lifecycle, control mode, salted code verification, and confirmation prompts
+profile: windows-4.48.2
+
+actors:
+  guest_host:
+    kind: host
+    client_id: lab-11-guest-host
+    device_name: assist-guest
+  account_host:
+    kind: host
+    client_id: lab-11-account-host
+    device_name: assist-account
+  viewer:
+    kind: viewer
+    client_id: lab-11-assist-viewer
+    device_name: assist-viewer
+
+steps:
+  - actor: guest_host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: guest_host
+    action: guest_create
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - guest_id
+        - token
+
+  # 2004: guest/share/info before guest/room/create
+  - actor: guest_host
+    action: guest_share_info
+    expect:
+      http_status: 400
+      code: 2004
+
+  - actor: guest_host
+    action: guest_room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: guest_host
+    action: ws_connect
+    auto_room_info: true
+    expect:
+      event_name: connected
+
+  # Consume the initial online/ready bmsg_push before live challenge pushes.
+  - actor: guest_host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      event_name: bmsg_push
+      json_eq:
+        data.publisher_availability_status: ready
+
+  - actor: guest_host
+    action: guest_share_info
+    save:
+      connect_id: connect_id
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        alias: assist-guest
+      json_exists:
+        - connect_id
+
+  - actor: viewer
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  # Same-account device cannot be assisted by the same owner (code 1130).
+  - actor: account_host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: account_host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: account_host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: account_host
+    action: device_share_info
+    save:
+      own_connect_id: connect_id
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: room_share_control_mode
+    connect_id: "${vars.own_connect_id}"
+    expect:
+      http_status: 400
+      code: 1130
+
+  - actor: account_host
+    action: device_share_info_refresh
+    expect:
+      http_status: 200
+      code: 0
+      json_exists:
+        - connect_id
+
+  - actor: account_host
+    action: device_share_cancel
+    expect:
+      http_status: 200
+      code: 0
+
+  # Live control_mode challenge over bmsg_push.
+  - parallel:
+      - - actor: viewer
+          action: room_share_control_mode
+          connect_id: "${vars.connect_id}"
+          expect:
+            http_status: 200
+            code: 0
+            json_eq:
+              allow_control: true
+              control_mode: by_password
+              need_password: true
+      - - actor: guest_host
+          action: wait_event
+          event: bmsg_push
+          save:
+            mode_ctrl_id: data.control_id
+          expect:
+            event_name: bmsg_push
+            json_eq:
+              type: get_control_mode
+        - actor: guest_host
+          action: guest_upload_control_mode
+          control_id: "${vars.mode_ctrl_id}"
+          allow_control: true
+          control_mode: by_password
+          expect:
+            http_status: 200
+            code: 0
+
+  # Wrong verification code returns 1131.
+  - parallel:
+      - - actor: viewer
+          action: room_join_share_by_code
+          connect_id: "${vars.connect_id}"
+          connect_code: WRONG999
+          expect:
+            http_status: 400
+            code: 1131
+      - - actor: guest_host
+          action: wait_event
+          event: bmsg_push
+          save:
+            bad_sign_id: data.control_id
+            bad_salt: data.salt
+          expect:
+            event_name: bmsg_push
+            json_eq:
+              type: remote_control
+        - actor: guest_host
+          action: guest_upload_sign
+          control_id: "${vars.bad_sign_id}"
+          can_remote_control: true
+          code: REALCODE8
+          salt: "${vars.bad_salt}"
+          expect:
+            http_status: 200
+            code: 0
+
+  # Correct verification code issues a shared viewer room token.
+  - parallel:
+      - - actor: viewer
+          action: room_join_share_by_code
+          connect_id: "${vars.connect_id}"
+          connect_code: REALCODE8
+          expect:
+            http_status: 200
+            code: 0
+            json_eq:
+              share_id: "${vars.connect_id}"
+              publisher_device_id: "${guest_host.device_id}"
+            json_exists:
+              - token
+      - - actor: guest_host
+          action: wait_event
+          event: bmsg_push
+          save:
+            good_sign_id: data.control_id
+            good_salt: data.salt
+          expect:
+            event_name: bmsg_push
+            json_eq:
+              type: remote_control
+        - actor: guest_host
+          action: guest_upload_sign
+          control_id: "${vars.good_sign_id}"
+          can_remote_control: true
+          code: REALCODE8
+          salt: "${vars.good_salt}"
+          expect:
+            http_status: 200
+            code: 0
+
+  - actor: viewer
+    action: ws_connect
+    expect:
+      event_name: connected
+
+  - parallel:
+      - - actor: viewer
+          action: send_control
+          app_control_id: assist-ctrl-1
+          capture_type: 1
+          expect:
+            ack_status: success
+      - - actor: guest_host
+          action: wait_event
+          event: be-controlled
+          expect:
+            event_name: be-controlled
+
+  - actor: viewer
+    action: device_share_saved
+    kind: recent
+    expect:
+      http_status: 200
+      code: 0
+      json_contains:
+        saved:
+          connect_id: "${vars.connect_id}"
+          publisher_device_id: "${guest_host.device_id}"
+
+  # Cancelling the share kicks the shared viewer off its session.
+  - parallel:
+      - - actor: guest_host
+          action: guest_share_cancel
+          expect:
+            http_status: 200
+            code: 0
+      - - actor: viewer
+          action: wait_event
+          event: left
+          expect:
+            event_name: left
+            json_exists:
+              - ice_id
+
+  - actor: viewer
+    action: ws_disconnect
+
+  # Re-enable share and exercise confirmation approve / deny / cancel.
+  - actor: guest_host
+    action: guest_share_info
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: room_join_share_by_confirmation
+    connect_id: "${vars.connect_id}"
+    save:
+      conf_id: control_id
+    expect:
+      http_status: 400
+      code: 1136
+
+  - actor: guest_host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      event_name: bmsg_push
+      json_eq:
+        type: remote_control_by_confirmation
+        data.control_id: "${vars.conf_id}"
+
+  - actor: guest_host
+    action: guest_confirmation
+    control_id: "${vars.conf_id}"
+    allow: true
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: room_join_share_by_confirmation
+    connect_id: "${vars.connect_id}"
+    control_id: "${vars.conf_id}"
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        share_id: "${vars.connect_id}"
+      json_exists:
+        - token
+
+  - actor: viewer
+    action: room_join_share_by_confirmation
+    connect_id: "${vars.connect_id}"
+    save:
+      conf_deny_id: control_id
+    expect:
+      http_status: 400
+      code: 1136
+
+  - actor: guest_host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      event_name: bmsg_push
+      json_eq:
+        type: remote_control_by_confirmation
+
+  - actor: guest_host
+    action: guest_confirmation
+    control_id: "${vars.conf_deny_id}"
+    allow: false
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: room_join_share_by_confirmation
+    connect_id: "${vars.connect_id}"
+    control_id: "${vars.conf_deny_id}"
+    expect:
+      http_status: 400
+      code: 1134
+
+  - actor: viewer
+    action: room_join_share_by_confirmation
+    connect_id: "${vars.connect_id}"
+    save:
+      conf_cancel_id: control_id
+    expect:
+      http_status: 400
+      code: 1136
+
+  - actor: guest_host
+    action: wait_event
+    event: bmsg_push
+    expect:
+      event_name: bmsg_push
+      json_eq:
+        type: remote_control_by_confirmation
+
+  - parallel:
+      - - actor: viewer
+          action: room_share_cancel_remote_assist
+          connect_id: "${vars.connect_id}"
+          control_id: "${vars.conf_cancel_id}"
+          expect:
+            http_status: 200
+            code: 0
+      - - actor: guest_host
+          action: wait_event
+          event: bmsg_push
+          expect:
+            event_name: bmsg_push
+            json_eq:
+              type: remote_control_by_confirmation_cancel
+              data.control_id: "${vars.conf_cancel_id}"
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

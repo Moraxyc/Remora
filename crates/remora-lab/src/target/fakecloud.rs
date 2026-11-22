@@ -10,9 +10,14 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use futures_util::SinkExt;
-use remora_proto::control::SignKey;
+use remora_proto::control::{
+    AssistDeviceRecord, AssistFavoritesRequest, CancelRemoteAssistRequest, JoinShareByCodeRequest,
+    JoinShareByConfirmationRequest, ShareConfirmationRequest, ShareControlMode,
+    ShareControlModeRequest, SignKey, UploadControlModeRequest, UploadShareSignRequest,
+    verify_share_code_digest,
+};
 use remora_proto::error::ErrorCode;
 use remora_proto::server::{EmptyData, error_envelope, ok_envelope, verify_request};
 use remora_proto::signal::{
@@ -22,7 +27,7 @@ use remora_proto::signal::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::error::LabError;
@@ -52,12 +57,50 @@ struct RoomTicket {
     device_id: String,
     role: FakeRole,
     force_join: bool,
+    shared: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 enum FakeRole {
     Host,
     Viewer,
+}
+
+#[derive(Clone)]
+struct GuestRecord {
+    guest_id: String,
+    device_id: String,
+    room_created: bool,
+}
+
+#[derive(Clone)]
+struct ShareRecord {
+    connect_id: String,
+    active: bool,
+}
+
+#[derive(Clone)]
+struct SavedShareRecord {
+    publisher_device_id: String,
+    connect_id: String,
+    platform: u8,
+    remark: String,
+    is_favorite: bool,
+    last_connected_at: u64,
+    favorited_at: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FakeConfirmStatus {
+    Pending,
+    Approved,
+    Denied,
+}
+
+struct FakeConfirmation {
+    device_id: String,
+    connect_id: String,
+    status: FakeConfirmStatus,
 }
 
 #[derive(Default)]
@@ -73,7 +116,15 @@ struct CloudState {
     room_tickets: HashMap<String, RoomTicket>,
     hosts_ws: HashMap<String, mpsc::Sender<Vec<WsOut>>>,
     viewers_ws: HashMap<String, mpsc::Sender<Vec<WsOut>>>,
-    sessions: HashMap<String, (String, String)>, // ice_id -> (device_id, viewer_conn_id)
+    sessions: HashMap<String, (String, String, bool)>, // ice_id -> (device_id, viewer_conn_id, shared)
+    guests: HashMap<String, GuestRecord>,
+    guest_tokens: HashMap<String, String>, // token -> guest_id
+    shares_by_device: HashMap<String, ShareRecord>,
+    connect_id_to_device: HashMap<String, String>,
+    saved_shares: Vec<SavedShareRecord>,
+    control_mode_waiters: HashMap<String, oneshot::Sender<UploadControlModeRequest>>,
+    sign_waiters: HashMap<String, oneshot::Sender<UploadShareSignRequest>>,
+    confirmations: HashMap<String, FakeConfirmation>,
     http_calls: Vec<RecordedHttpCall>,
 }
 
@@ -145,6 +196,80 @@ impl FakeCloudInstance {
                 get(device_preferences),
             )
             .route("/api/v1/device/share/info", get(device_share_info))
+            .route(
+                "/api/v1/device/share/info/refresh_id",
+                post(device_share_info_refresh),
+            )
+            .route(
+                "/api/v1/device/share/info/refresh",
+                post(device_share_info_refresh),
+            )
+            .route("/api/v1/device/share/cancel", post(device_share_cancel))
+            .route(
+                "/api/v1/device/share/{id}/unbind",
+                post(device_share_unbind),
+            )
+            .route("/api/v1/device/share/saved", get(device_share_saved))
+            .route(
+                "/api/v1/device/share/saved/favorites",
+                get(device_share_saved_favorites_get).post(device_share_saved_favorites_post),
+            )
+            .route(
+                "/api/v1/device/share/saved/{kind}",
+                get(device_share_saved_kind),
+            )
+            .route(
+                "/api/v1/device/share/saved/{kind}/{publisher_device_id}",
+                delete(device_share_saved_delete),
+            )
+            .route("/api/v1/guest/create", post(guest_create))
+            .route("/api/v1/guest/room/create", post(guest_room_create))
+            .route("/api/v1/guest/share/info", post(guest_share_info))
+            .route("/api/v1/guest/share/cancel", post(guest_share_cancel))
+            .route(
+                "/api/v1/guest/room/share/upload_control_mode",
+                post(guest_upload_control_mode),
+            )
+            .route(
+                "/api/v1/guest/room/share/upload/sign",
+                post(guest_upload_sign),
+            )
+            .route(
+                "/api/v1/guest/room/share/confirmation",
+                post(guest_confirmation),
+            )
+            .route(
+                "/api/v2/room/share/control_mode",
+                post(room_share_control_mode),
+            )
+            .route(
+                "/api/v2/room/share/upload_control_mode",
+                post(room_share_upload_control_mode),
+            )
+            .route(
+                "/api/v2/room/share/upload_sign",
+                post(room_share_upload_sign),
+            )
+            .route(
+                "/api/v2/room/share/confirmation",
+                post(room_share_confirmation),
+            )
+            .route(
+                "/api/v1/room/join/share/by_code",
+                post(room_join_share_by_code),
+            )
+            .route(
+                "/api/v2/room/join/share/by_code",
+                post(room_join_share_by_code),
+            )
+            .route(
+                "/api/v2/room/join/share/by_confirmation",
+                post(room_join_share_by_confirmation),
+            )
+            .route(
+                "/api/v2/room/share/cancel_remote_assist",
+                post(room_share_cancel_remote_assist),
+            )
             .route("/api/v1/device/{device_id}/unbind", post(device_unbind))
             .route("/api/v1/member/entitlements", get(member_entitlements))
             .route("/api/v1/release/fetch/update", get(release_fetch_update))
@@ -611,12 +736,29 @@ async fn device_list(
         .map(to_entry)
         .collect();
     owned.sort_by(|a, b| a["device_id"].as_str().cmp(&b["device_id"].as_str()));
+    let mut others_shared = Vec::new();
+    let mut saved = guard.saved_shares.clone();
+    saved.sort_by(|a, b| a.publisher_device_id.cmp(&b.publisher_device_id));
+    for rec in saved {
+        if let Some(dev) = guard.devices_by_id.get(&rec.publisher_device_id) {
+            if dev.owner.as_deref() == Some("1") {
+                continue;
+            }
+            if guard
+                .shares_by_device
+                .get(&rec.publisher_device_id)
+                .is_some_and(|s| s.active)
+            {
+                others_shared.push(to_entry(dev));
+            }
+        }
+    }
     json_envelope(
         StatusCode::OK,
         serde_json::to_value(ok_envelope(json!({
             "current_device": current_device,
             "my_binded_devices": owned,
-            "others_shared_devices": []
+            "others_shared_devices": others_shared
         })))
         .unwrap(),
     )
@@ -837,7 +979,7 @@ async fn device_share_info(
     if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
         return resp;
     }
-    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
     if bearer_valid(&guard, &headers).is_none() {
         return token_invalid_resp();
     }
@@ -845,6 +987,7 @@ async fn device_share_info(
         .get("x-param-device-id")
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
     else {
         return json_envelope(
             StatusCode::BAD_REQUEST,
@@ -852,26 +995,1334 @@ async fn device_share_info(
                 .unwrap(),
         );
     };
-    let Some(dev) = guard.devices_by_id.get(device_id) else {
+    let Some(dev) = guard.devices_by_id.get(&device_id).cloned() else {
         return json_envelope(
             StatusCode::BAD_REQUEST,
             serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
                 .unwrap(),
         );
     };
+    let connect_id = ensure_fake_share(&mut guard, &dev.device_id, true);
     let alias = if dev.name.is_empty() {
-        dev.device_id.clone()
+        dev.device_id
     } else {
-        dev.name.clone()
+        dev.name
     };
     json_envelope(
         StatusCode::OK,
         serde_json::to_value(ok_envelope(json!({
-            "connect_id": connect_id_for(&dev.device_id),
+            "connect_id": connect_id,
             "connect_code": "",
             "alias": alias,
         })))
         .unwrap(),
+    )
+}
+
+fn ensure_fake_share(guard: &mut CloudState, device_id: &str, active: bool) -> String {
+    if let Some(existing) = guard.shares_by_device.get_mut(device_id) {
+        if active {
+            existing.active = true;
+        }
+        return existing.connect_id.clone();
+    }
+    let cid = connect_id_for(device_id);
+    guard.shares_by_device.insert(
+        device_id.to_owned(),
+        ShareRecord {
+            connect_id: cid.clone(),
+            active,
+        },
+    );
+    guard
+        .connect_id_to_device
+        .insert(cid.clone(), device_id.to_owned());
+    cid
+}
+
+fn guest_from_headers(guard: &CloudState, headers: &HeaderMap) -> Option<GuestRecord> {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))?;
+    let guest_id = guard.guest_tokens.get(token)?;
+    if let Some(hdr_guest) = headers
+        .get("x-param-guest-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        && hdr_guest != guest_id
+    {
+        return None;
+    }
+    guard.guests.get(guest_id).cloned()
+}
+
+fn fake_error(status: StatusCode, code: ErrorCode, msg: &str) -> Response {
+    json_envelope(
+        status,
+        serde_json::to_value(error_envelope(code, msg)).unwrap(),
+    )
+}
+
+async fn guest_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(device_id) = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    if !guard.devices_by_id.contains_key(&device_id) {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    }
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let guest_id = format!("fake-guest-{seq}");
+    let token = format!("fake-guest-jwt-{seq}");
+    guard.guests.insert(
+        guest_id.clone(),
+        GuestRecord {
+            guest_id: guest_id.clone(),
+            device_id,
+            room_created: false,
+        },
+    );
+    guard.guest_tokens.insert(token.clone(), guest_id.clone());
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "guest_id": guest_id,
+            "token": token,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn guest_room_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(guest) = guest_from_headers(&guard, &headers) else {
+        return token_invalid_resp();
+    };
+    if let Some(rec) = guard.guests.get_mut(&guest.guest_id) {
+        rec.room_created = true;
+    }
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let ticket = format!("fake-guest-room-{seq}");
+    guard.room_tickets.insert(
+        ticket.clone(),
+        RoomTicket {
+            device_id: guest.device_id,
+            role: FakeRole::Host,
+            force_join: false,
+            shared: false,
+        },
+    );
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "signaling_server": state.ws_url,
+            "signaling_list": [state.ws_url],
+            "sni_required_signaling_list": [],
+            "token": ticket,
+            "ws_connect_timeout_ms": 16_000,
+            "max_reconnect_delta": 300,
+            "streamer_retry_delta_ms": 1_000,
+            "international_connect": false,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn guest_share_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(guest) = guest_from_headers(&guard, &headers) else {
+        return token_invalid_resp();
+    };
+    if !guest.room_created {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::GuestRoomRequired,
+            "guest room required",
+        );
+    }
+    let Some(dev) = guard.devices_by_id.get(&guest.device_id).cloned() else {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::UnknownDevice,
+            "no such device",
+        );
+    };
+    let connect_id = ensure_fake_share(&mut guard, &dev.device_id, true);
+    let alias = if dev.name.is_empty() {
+        dev.device_id
+    } else {
+        dev.name
+    };
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "connect_id": connect_id,
+            "connect_code": "",
+            "alias": alias,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn kick_shared_for_device(state: &AppState, device_id: &str) {
+    struct KickTarget {
+        ice_id: String,
+        viewer_tx: mpsc::Sender<Vec<WsOut>>,
+        host_tx: Option<mpsc::Sender<Vec<WsOut>>>,
+    }
+    let to_kick: Vec<KickTarget> = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        let host_tx = guard.hosts_ws.get(device_id).cloned();
+        let mut removed = Vec::new();
+        guard.sessions.retain(|ice_id, (dev, viewer_id, shared)| {
+            if dev == device_id && *shared {
+                removed.push((ice_id.clone(), viewer_id.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        removed
+            .into_iter()
+            .filter_map(|(ice_id, viewer_id)| {
+                guard
+                    .viewers_ws
+                    .get(&viewer_id)
+                    .cloned()
+                    .map(|viewer_tx| KickTarget {
+                        ice_id,
+                        viewer_tx,
+                        host_tx: host_tx.clone(),
+                    })
+            })
+            .collect()
+    };
+    for KickTarget {
+        ice_id,
+        viewer_tx,
+        host_tx,
+    } in to_kick
+    {
+        let left = encode_event(
+            "left",
+            &[json!({ "ice_id": ice_id, "client_id": "fake-host" })],
+            None,
+        );
+        let _ = viewer_tx.send(vec![WsOut::Text(left)]).await;
+        if let Some(h_tx) = host_tx {
+            let released = encode_event(
+                "released",
+                &[json!({ "ice_id": ice_id, "client_id": "fake-viewer" })],
+                None,
+            );
+            let _ = h_tx.send(vec![WsOut::Text(released)]).await;
+        }
+    }
+}
+
+async fn guest_share_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let device_id = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        let Some(guest) = guest_from_headers(&guard, &headers) else {
+            return token_invalid_resp();
+        };
+        if let Some(share) = guard.shares_by_device.get_mut(&guest.device_id) {
+            share.active = false;
+        }
+        guard
+            .confirmations
+            .retain(|_, c| c.device_id != guest.device_id);
+        guest.device_id
+    };
+    kick_shared_for_device(&state, &device_id).await;
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn guest_upload_control_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<UploadControlModeRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if guest_from_headers(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if let Some(tx) = guard.control_mode_waiters.remove(&req.control_id) {
+        let _ = tx.send(req);
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn guest_upload_sign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<UploadShareSignRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if guest_from_headers(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if let Some(tx) = guard.sign_waiters.remove(&req.control_id) {
+        let _ = tx.send(req);
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn guest_confirmation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<ShareConfirmationRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(guest) = guest_from_headers(&guard, &headers) else {
+        return token_invalid_resp();
+    };
+    if let Some(conf) = guard.confirmations.get_mut(&req.control_id)
+        && conf.device_id == guest.device_id
+    {
+        conf.status = if req.allow {
+            FakeConfirmStatus::Approved
+        } else {
+            FakeConfirmStatus::Denied
+        };
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn device_share_info_refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let Some(device_id) = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::UnknownDevice,
+            "no such device",
+        );
+    };
+    let Some(dev) = guard.devices_by_id.get(&device_id).cloned() else {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::UnknownDevice,
+            "no such device",
+        );
+    };
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let new_cid = format!("{:09}", 100_000_000 + ((seq * 7919) % 900_000_000));
+    if let Some(old) = guard.shares_by_device.insert(
+        device_id.clone(),
+        ShareRecord {
+            connect_id: new_cid.clone(),
+            active: true,
+        },
+    ) {
+        guard.connect_id_to_device.remove(&old.connect_id);
+    }
+    guard
+        .connect_id_to_device
+        .insert(new_cid.clone(), device_id);
+    let alias = if dev.name.is_empty() {
+        dev.device_id
+    } else {
+        dev.name
+    };
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "connect_id": new_cid,
+            "connect_code": "",
+            "alias": alias,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn device_share_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let device_id = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        if bearer_valid(&guard, &headers).is_none() {
+            return token_invalid_resp();
+        }
+        let Some(device_id) = headers
+            .get("x-param-device-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        else {
+            return fake_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::UnknownDevice,
+                "no such device",
+            );
+        };
+        if let Some(share) = guard.shares_by_device.get_mut(&device_id) {
+            share.active = false;
+        }
+        guard.confirmations.retain(|_, c| c.device_id != device_id);
+        device_id
+    };
+    kick_shared_for_device(&state, &device_id).await;
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn device_share_unbind(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let before = guard.saved_shares.len();
+    guard
+        .saved_shares
+        .retain(|r| r.publisher_device_id != id && r.connect_id != id);
+    if guard.saved_shares.len() == before {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::UnknownDevice,
+            "no such device",
+        );
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct SavedQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn saved_page_response(
+    guard: &CloudState,
+    filter_fav: Option<bool>,
+    query: SavedQuery,
+) -> Response {
+    let offset = query
+        .cursor
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let mut items: Vec<AssistDeviceRecord> = guard
+        .saved_shares
+        .iter()
+        .filter(|r| match filter_fav {
+            Some(true) => r.is_favorite,
+            Some(false) => r.last_connected_at > 0,
+            None => true,
+        })
+        .map(|r| AssistDeviceRecord {
+            publisher_device_id: r.publisher_device_id.clone(),
+            connect_id: r.connect_id.clone(),
+            platform: r.platform,
+            remark: r.remark.clone(),
+            is_favorite: r.is_favorite,
+            last_connected_at: r.last_connected_at,
+            favorited_at: r.favorited_at,
+            extra: Default::default(),
+        })
+        .collect();
+    items.sort_by(|a, b| a.publisher_device_id.cmp(&b.publisher_device_id));
+    let total = items.len();
+    let end = (offset + limit).min(total);
+    let slice = if offset < total {
+        items[offset..end].to_vec()
+    } else {
+        Vec::new()
+    };
+    let next = (end < total).then(|| end.to_string());
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({ "saved": slice, "next": next }))).unwrap(),
+    )
+}
+
+async fn device_share_saved(
+    State(state): State<AppState>,
+    Query(query): Query<SavedQuery>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    saved_page_response(&guard, None, query)
+}
+
+async fn device_share_saved_favorites_get(
+    State(state): State<AppState>,
+    Query(query): Query<SavedQuery>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    saved_page_response(&guard, Some(true), query)
+}
+
+async fn device_share_saved_kind(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    Query(query): Query<SavedQuery>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let filter_fav = match kind.as_str() {
+        "favorites" => Some(true),
+        "recent" => Some(false),
+        _ => {
+            return fake_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::InvalidRequest,
+                "invalid request",
+            );
+        }
+    };
+    saved_page_response(&guard, filter_fav, query)
+}
+
+async fn device_share_saved_favorites_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<AssistFavoritesRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    for fav in req.favorites {
+        let Some(dev_id) = guard.connect_id_to_device.get(&fav.connect_id).cloned() else {
+            if !req.skip_invalid {
+                return fake_error(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::IncorrectShareCode,
+                    "invalid code",
+                );
+            }
+            continue;
+        };
+        let Some(dev) = guard.devices_by_id.get(&dev_id).cloned() else {
+            continue;
+        };
+        if dev.owner.as_deref() == Some("1") {
+            return fake_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::SameAccountShareFavorite,
+                "same account",
+            );
+        }
+        if let Some(existing) = guard
+            .saved_shares
+            .iter_mut()
+            .find(|r| r.publisher_device_id == dev_id)
+        {
+            existing.is_favorite = true;
+            existing.remark = fav.remark;
+            existing.favorited_at = fav.favorited_at.max(1);
+        } else {
+            guard.saved_shares.push(SavedShareRecord {
+                publisher_device_id: dev_id,
+                connect_id: fav.connect_id,
+                platform: dev.platform,
+                remark: fav.remark,
+                is_favorite: true,
+                last_connected_at: 0,
+                favorited_at: fav.favorited_at.max(1),
+            });
+        }
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn device_share_saved_delete(
+    State(state): State<AppState>,
+    Path((kind, publisher_device_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::DELETE, pq, &headers, &[]) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    match kind.as_str() {
+        "favorites" => {
+            for r in &mut guard.saved_shares {
+                if r.publisher_device_id == publisher_device_id {
+                    r.is_favorite = false;
+                }
+            }
+        }
+        "recent" => {
+            for r in &mut guard.saved_shares {
+                if r.publisher_device_id == publisher_device_id {
+                    r.last_connected_at = 0;
+                }
+            }
+        }
+        _ => {
+            return fake_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::InvalidRequest,
+                "invalid request",
+            );
+        }
+    }
+    guard
+        .saved_shares
+        .retain(|r| r.is_favorite || r.last_connected_at > 0);
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn room_share_upload_control_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<UploadControlModeRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if let Some(tx) = guard.control_mode_waiters.remove(&req.control_id) {
+        let _ = tx.send(req);
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn room_share_upload_sign(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<UploadShareSignRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if let Some(tx) = guard.sign_waiters.remove(&req.control_id) {
+        let _ = tx.send(req);
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+async fn room_share_confirmation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<ShareConfirmationRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    if let Some(conf) = guard.confirmations.get_mut(&req.control_id) {
+        conf.status = if req.allow {
+            FakeConfirmStatus::Approved
+        } else {
+            FakeConfirmStatus::Denied
+        };
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
+}
+
+fn resolve_fake_share_target(
+    guard: &CloudState,
+    connect_id: &str,
+) -> Result<(DeviceRecord, mpsc::Sender<Vec<WsOut>>), Box<Response>> {
+    let Some(dev_id) = guard.connect_id_to_device.get(connect_id) else {
+        return Err(Box::new(fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::IncorrectShareCode,
+            "incorrect code",
+        )));
+    };
+    let Some(dev) = guard.devices_by_id.get(dev_id).cloned() else {
+        return Err(Box::new(fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::IncorrectShareCode,
+            "incorrect code",
+        )));
+    };
+    if dev.owner.as_deref() == Some("1") {
+        return Err(Box::new(fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::CannotInitiateRemoteConnection,
+            "same account",
+        )));
+    }
+    if !guard.shares_by_device.get(dev_id).is_some_and(|s| s.active) {
+        return Err(Box::new(fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::CannotInitiateRemoteConnection,
+            "assist disabled",
+        )));
+    }
+    let Some(host_tx) = guard.hosts_ws.get(dev_id).cloned() else {
+        return Err(Box::new(fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::DeviceOffline,
+            "device offline",
+        )));
+    };
+    Ok((dev, host_tx))
+}
+
+fn build_fake_assist_room(
+    state: &AppState,
+    guard: &mut CloudState,
+    dev: &DeviceRecord,
+    connect_id: &str,
+    force_join: bool,
+) -> Value {
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let ticket = format!("fake-assist-viewer-{seq}");
+    guard.room_tickets.insert(
+        ticket.clone(),
+        RoomTicket {
+            device_id: dev.device_id.clone(),
+            role: FakeRole::Viewer,
+            force_join,
+            shared: true,
+        },
+    );
+    if let Some(existing) = guard
+        .saved_shares
+        .iter_mut()
+        .find(|r| r.publisher_device_id == dev.device_id)
+    {
+        existing.connect_id = connect_id.to_owned();
+        existing.last_connected_at = seq;
+    } else {
+        guard.saved_shares.push(SavedShareRecord {
+            publisher_device_id: dev.device_id.clone(),
+            connect_id: connect_id.to_owned(),
+            platform: dev.platform,
+            remark: dev.name.clone(),
+            is_favorite: false,
+            last_connected_at: seq,
+            favorited_at: 0,
+        });
+    }
+    json!({
+        "signaling_server": state.ws_url,
+        "signaling_list": [state.ws_url],
+        "sni_required_signaling_list": [],
+        "token": ticket,
+        "ws_connect_timeout_ms": 16_000,
+        "streamer_retry_delta_ms": 1_000,
+        "max_reconnect_delta": 300,
+        "report_token": "",
+        "report_url": "",
+        "report_server_address": "",
+        "share_id": connect_id,
+        "device_name": dev.name,
+        "publisher_version_name": dev.version_name,
+        "publisher_platform": dev.platform,
+        "publisher_device_id": dev.device_id,
+        "international_connect": false,
+        "device_binding": "",
+        "streamer_config": "{}",
+    })
+}
+
+async fn room_share_control_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<ShareControlModeRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let (dev, host_tx, control_id, rx) = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        if bearer_valid(&guard, &headers).is_none() {
+            return token_invalid_resp();
+        }
+        let (dev, host_tx) = match resolve_fake_share_target(&guard, &req.connect_id) {
+            Ok(ok) => ok,
+            Err(resp) => return *resp,
+        };
+        let seq = guard.next_id;
+        guard.next_id += 1;
+        let control_id = format!("fake-ctrl-mode-{seq}");
+        let (tx, rx) = oneshot::channel();
+        guard.control_mode_waiters.insert(control_id.clone(), tx);
+        (dev, host_tx, control_id, rx)
+    };
+
+    let push = encode_event(
+        "bmsg_push",
+        &[json!({ "type": "get_control_mode", "data": { "control_id": control_id } })],
+        None,
+    );
+    if host_tx.send(vec![WsOut::Text(push)]).await.is_err() {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::DeviceOffline,
+            "device offline",
+        );
+    }
+
+    let timeout = if dev.platform == 4 {
+        std::time::Duration::from_millis(800)
+    } else {
+        std::time::Duration::from_secs(8)
+    };
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(reply)) => {
+            let need_password = reply.allow_control && reply.control_mode.needs_password();
+            json_envelope(
+                StatusCode::OK,
+                serde_json::to_value(ok_envelope(json!({
+                    "allow_control": reply.allow_control,
+                    "control_mode": reply.control_mode,
+                    "need_password": need_password,
+                    "control_id": reply.control_id,
+                })))
+                .unwrap(),
+            )
+        }
+        _ => {
+            state
+                .inner
+                .lock()
+                .expect("fakecloud lock poisoned")
+                .control_mode_waiters
+                .remove(&control_id);
+            if dev.platform == 4 {
+                json_envelope(
+                    StatusCode::OK,
+                    serde_json::to_value(ok_envelope(json!({
+                        "allow_control": dev.controllable,
+                        "control_mode": ShareControlMode::ByPassword,
+                        "need_password": dev.controllable,
+                        "control_id": control_id,
+                    })))
+                    .unwrap(),
+                )
+            } else {
+                fake_error(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::CannotInitiateRemoteConnection,
+                    "assist disabled",
+                )
+            }
+        }
+    }
+}
+
+async fn room_join_share_by_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<JoinShareByCodeRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    if req.connect_id.trim().is_empty() || req.connect_code.trim().is_empty() {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::IncorrectShareCode,
+            "incorrect code",
+        );
+    }
+    let (dev, host_tx, control_id, salt, rx) = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        if bearer_valid(&guard, &headers).is_none() {
+            return token_invalid_resp();
+        }
+        let (dev, host_tx) = match resolve_fake_share_target(&guard, &req.connect_id) {
+            Ok(ok) => ok,
+            Err(resp) => return *resp,
+        };
+        if !req.force_join && guard.sessions.values().any(|(d, _, _)| d == &dev.device_id) {
+            return fake_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BeingControlled,
+                "being controlled",
+            );
+        }
+        let seq = guard.next_id;
+        guard.next_id += 1;
+        let control_id = format!("fake-sign-{seq}");
+        let salt = format!("fake-salt-{seq}");
+        let (tx, rx) = oneshot::channel();
+        guard.sign_waiters.insert(control_id.clone(), tx);
+        (dev, host_tx, control_id, salt, rx)
+    };
+
+    let push = encode_event(
+        "bmsg_push",
+        &[json!({ "type": "remote_control", "data": { "control_id": control_id, "salt": salt } })],
+        None,
+    );
+    if host_tx.send(vec![WsOut::Text(push)]).await.is_err() {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::DeviceOffline,
+            "device offline",
+        );
+    }
+
+    let reply = match tokio::time::timeout(std::time::Duration::from_secs(8), rx).await {
+        Ok(Ok(reply)) => reply,
+        _ => {
+            state
+                .inner
+                .lock()
+                .expect("fakecloud lock poisoned")
+                .sign_waiters
+                .remove(&control_id);
+            return fake_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::CannotInitiateRemoteConnection,
+                "assist disabled",
+            );
+        }
+    };
+    if !reply.can_remote_control {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::CannotInitiateRemoteConnection,
+            "assist disabled",
+        );
+    }
+    let primary_ok = verify_share_code_digest(&salt, &req.connect_code, &reply.sign);
+    let backup_ok = !reply.backup_sign.is_empty()
+        && verify_share_code_digest(&salt, &req.connect_code, &reply.backup_sign);
+    if !primary_ok && !backup_ok {
+        return fake_error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::IncorrectShareCode,
+            "incorrect code",
+        );
+    }
+
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let room = build_fake_assist_room(&state, &mut guard, &dev, &req.connect_id, req.force_join);
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(room)).unwrap(),
+    )
+}
+
+async fn room_join_share_by_confirmation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<JoinShareByConfirmationRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    enum ConfirmStep {
+        Respond(Response),
+        PushAndPending {
+            host_tx: mpsc::Sender<Vec<WsOut>>,
+            control_id: String,
+        },
+    }
+    let step = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        if bearer_valid(&guard, &headers).is_none() {
+            return token_invalid_resp();
+        }
+        let (dev, host_tx) = match resolve_fake_share_target(&guard, &req.connect_id) {
+            Ok(ok) => ok,
+            Err(resp) => return *resp,
+        };
+        if !req.force_join && guard.sessions.values().any(|(d, _, _)| d == &dev.device_id) {
+            return fake_error(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::BeingControlled,
+                "being controlled",
+            );
+        }
+        if let Some(cid) = req.control_id.as_deref().filter(|s| !s.is_empty())
+            && let Some(conf) = guard.confirmations.get(cid)
+            && conf.connect_id == req.connect_id
+        {
+            match conf.status {
+                FakeConfirmStatus::Pending => ConfirmStep::Respond(json_envelope(
+                    StatusCode::BAD_REQUEST,
+                    json!({
+                        "code": ErrorCode::ShareConfirmationRequired.code(),
+                        "msg": "waiting",
+                        "data": { "control_id": cid },
+                    }),
+                )),
+                FakeConfirmStatus::Denied => {
+                    guard.confirmations.remove(cid);
+                    ConfirmStep::Respond(fake_error(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::ShareConfirmationDenied,
+                        "denied",
+                    ))
+                }
+                FakeConfirmStatus::Approved => {
+                    guard.confirmations.remove(cid);
+                    let room = build_fake_assist_room(
+                        &state,
+                        &mut guard,
+                        &dev,
+                        &req.connect_id,
+                        req.force_join,
+                    );
+                    ConfirmStep::Respond(json_envelope(
+                        StatusCode::OK,
+                        serde_json::to_value(ok_envelope(room)).unwrap(),
+                    ))
+                }
+            }
+        } else {
+            let seq = guard.next_id;
+            guard.next_id += 1;
+            let control_id = format!("fake-confirm-{seq}");
+            guard.confirmations.insert(
+                control_id.clone(),
+                FakeConfirmation {
+                    device_id: dev.device_id,
+                    connect_id: req.connect_id.clone(),
+                    status: FakeConfirmStatus::Pending,
+                },
+            );
+            ConfirmStep::PushAndPending {
+                host_tx,
+                control_id,
+            }
+        }
+    };
+
+    match step {
+        ConfirmStep::Respond(resp) => resp,
+        ConfirmStep::PushAndPending {
+            host_tx,
+            control_id,
+        } => {
+            let push = encode_event(
+                "bmsg_push",
+                &[json!({
+                    "type": "remote_control_by_confirmation",
+                    "data": { "control_id": control_id, "device_name": "viewer", "user_id": "1" },
+                })],
+                None,
+            );
+            let _ = host_tx.send(vec![WsOut::Text(push)]).await;
+            json_envelope(
+                StatusCode::BAD_REQUEST,
+                json!({
+                    "code": ErrorCode::ShareConfirmationRequired.code(),
+                    "msg": "waiting",
+                    "data": { "control_id": control_id },
+                }),
+            )
+        }
+    }
+}
+
+async fn room_share_cancel_remote_assist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let Ok(req) = serde_json::from_slice::<CancelRemoteAssistRequest>(&body) else {
+        return fake_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "invalid request",
+        );
+    };
+    let to_notify: Vec<(mpsc::Sender<Vec<WsOut>>, String)> = {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        if bearer_valid(&guard, &headers).is_none() {
+            return token_invalid_resp();
+        }
+        let mut cancelled = Vec::new();
+        guard.confirmations.retain(|cid, conf| {
+            let matches = conf.connect_id == req.connect_id
+                && req.control_id.as_deref().is_none_or(|want| want == cid);
+            if matches {
+                cancelled.push((conf.device_id.clone(), cid.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        cancelled
+            .into_iter()
+            .filter_map(|(dev_id, cid)| guard.hosts_ws.get(&dev_id).cloned().map(|tx| (tx, cid)))
+            .collect()
+    };
+    for (tx, cid) in to_notify {
+        let push = encode_event(
+            "bmsg_push",
+            &[json!({
+                "type": "remote_control_by_confirmation_cancel",
+                "data": { "control_id": cid },
+            })],
+            None,
+        );
+        let _ = tx.send(vec![WsOut::Text(push)]).await;
+    }
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
     )
 }
 
@@ -1001,8 +2452,14 @@ async fn device_unbind(
                 guard.user_tokens.remove(&tok);
             }
         }
+        if let Some(share) = guard.shares_by_device.remove(&device_id) {
+            guard.connect_id_to_device.remove(&share.connect_id);
+        }
+        guard
+            .saved_shares
+            .retain(|r| r.publisher_device_id != device_id);
         let mut removed_sessions = Vec::new();
-        guard.sessions.retain(|ice_id, (dev_id, viewer_id)| {
+        guard.sessions.retain(|ice_id, (dev_id, viewer_id, _)| {
             if dev_id == &device_id {
                 removed_sessions.push((ice_id.clone(), viewer_id.clone()));
                 false
@@ -1095,6 +2552,7 @@ async fn room_create(
             device_id,
             role: FakeRole::Host,
             force_join: false,
+            shared: false,
         },
     );
     json_envelope(
@@ -1162,7 +2620,7 @@ async fn room_join(
                 .unwrap(),
         );
     }
-    if !force_join && guard.sessions.values().any(|(d, _)| d == &device_id) {
+    if !force_join && guard.sessions.values().any(|(d, _, _)| d == &device_id) {
         return json_envelope(
             StatusCode::BAD_REQUEST,
             serde_json::to_value(error_envelope(
@@ -1181,6 +2639,7 @@ async fn room_join(
             device_id,
             role: FakeRole::Viewer,
             force_join,
+            shared: false,
         },
     );
     json_envelope(
@@ -1324,7 +2783,7 @@ async fn cleanup_ws(state: &AppState, ticket: &RoomTicket, conn_id: &str) {
             FakeRole::Viewer => {
                 guard.viewers_ws.remove(conn_id);
                 let mut released = Vec::new();
-                guard.sessions.retain(|ice_id, (dev, viewer)| {
+                guard.sessions.retain(|ice_id, (dev, viewer, _)| {
                     if viewer == conn_id && dev == &ticket.device_id {
                         released.push(ice_id.clone());
                         false
@@ -1407,7 +2866,10 @@ async fn handle_ws_event(
                 let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
                 if let Some(host_tx) = guard.hosts_ws.get(&ticket.device_id).cloned() {
                     if !ticket.force_join
-                        && guard.sessions.values().any(|(d, _)| d == &ticket.device_id)
+                        && guard
+                            .sessions
+                            .values()
+                            .any(|(d, _, _)| d == &ticket.device_id)
                     {
                         ControlStep::Ack(vec![
                             json!("failure"),
@@ -1416,7 +2878,7 @@ async fn handle_ws_event(
                     } else {
                         let mut evicted = Vec::new();
                         if ticket.force_join {
-                            guard.sessions.retain(|ice_id, (dev_id, viewer_id)| {
+                            guard.sessions.retain(|ice_id, (dev_id, viewer_id, _)| {
                                 if dev_id == &ticket.device_id {
                                     evicted.push((ice_id.clone(), viewer_id.clone()));
                                     false
@@ -1442,7 +2904,7 @@ async fn handle_ws_event(
                         let ice_id = format!("fake-ice-{seq}");
                         guard.sessions.insert(
                             ice_id.clone(),
-                            (ticket.device_id.clone(), conn_id.to_owned()),
+                            (ticket.device_id.clone(), conn_id.to_owned(), ticket.shared),
                         );
                         let bc = json!({
                             "ice_id": ice_id,

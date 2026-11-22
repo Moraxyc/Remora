@@ -20,6 +20,9 @@ fn is_secret_key(key: &str) -> bool {
             | "sign_key"
             | "turn_secret"
             | "iceservers"
+            | "connect_code"
+            | "sign"
+            | "backup_sign"
     )
 }
 
