@@ -56,7 +56,7 @@
 | `POST /api/v1/device/windows/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选，其余硬件字段被忽略） | 返回完整 `Entry`（包含 `device_id`）。按客户端安装标识 `client_id` 幂等注册：重复调用返回既有 `device_id` 并更新名称及 `X-Param-VN`，平台记为 `1`（Windows）。 |
 | `POST /api/v1/device/macos/init` | 匿名（限流） | `{"client_id": "...", "name": "...", "controllable": true}`（`name`、`controllable` 可选） | 与 `windows/init` 行为一致，平台记为 `4`（macOS）。 |
 | `POST /api/v1/device/mac_controllable` | User Token + `X-Param-Device-Id` | `{"controllable": true\|false}` | `{}`。更新调用方设备（未绑定或归属于当前用户）是否允许被远程控制。 |
-| `GET /api/v1/device/list` | User Token（可选 `X-Param-Device-Id`） | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": [Entry]}`（含当前仍活跃的曾协助设备）。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）、`participants_info`、可选 `wallpaper_url`、`version_name`、`support_wol`、`controllable`、`publisher_availability_status`、`controlled_support` 与 `update_started_at`。 |
+| `GET /api/v1/device/list` | User Token（可选 `X-Param-Device-Id`） | 空 | `{"current_device": Entry \| null, "my_binded_devices": [Entry], "others_shared_devices": [Entry]}`（含当前仍活跃的曾协助设备）。每个 `Entry` 包含 `device_id`、可选 `alias`、`platform`、`status`（`"CONNECTED"` 或 `"DISCONNECTED"`）、`participants_info`、可选 `wallpaper_url`、`version_name`、`support_wol`、`controllable`、`publisher_availability_status`（桌面端为 `"ready"` / `"control_off"` / `"offline"`）、`controlled_support` 与 `update_started_at`。 |
 | `GET /api/v1/device/groups/of/my` | User Token（可选 `X-Param-Device-Id`） | 空 | 按形态分组返回名下设备：`{"current_device_id": string \| null, "mobile_devices": [Entry], "desktop_devices": [Entry], "tv_devices": [Entry]}`。 |
 | `GET /api/v1/device/{device_id}/preferences` | User Token | 空 | 返回指定已绑定设备的工具栏排序配置 `{"device_preferences": {"device_id", "tools": {"sequence": [...]}}}`。 |
 | `GET /api/v1/device/share/info` | User Token + `X-Param-Device-Id` | 空 | 返回调用方设备的远程协助 9 位识别码 `connect_id`、`connect_code`（`""`）与显示名称 `alias`。 |
@@ -104,7 +104,7 @@ Remora 支持未登录的访客被控端（`Guest Token` + `X-Param-Guest-Id`）
 | `POST /api/v1/guest/share/info` | Guest Token | 要求先创建访客房间（否则返回 `400` / `2004`），激活并返回 `{"connect_id", "connect_code": "", "alias"}`。 |
 | `POST /api/v1/guest/share/cancel`、`POST /api/v1/device/share/cancel` | Guest Token / User Token | 停用当前设备的分享状态并仅踢出受协助（`shared`）控制端会话，不影响设备所有者自身连接。 |
 | `POST /api/v1/device/share/info/refresh_id`（及 `/refresh`） | User Token + `X-Param-Device-Id` | 轮换已绑定设备的 9 位 `connect_id`。 |
-| `POST /api/v2/room/share/control_mode` | User Token | 向目标在线被控端推送 `bmsg_push` (`get_control_mode`) 查询 `allow_control`、`control_mode`（`by_password` / `by_confirmation` / `password_confirmation`）与 `need_password`；macOS 端省略上报时在 800 ms 宽限后按 `controllable` 回落。 |
+| `POST /api/v2/room/share/control_mode` | User Token | 向目标在线被控端推送 `bmsg_push` (`get_control_mode`) 查询 `can_remote_control`（并附带 `allow_control`）、`control_mode`（`by_password` / `by_confirmation` / `password_confirmation`）与 `need_password`；macOS 端省略上报时在 800 ms 宽限后按 `controllable` 回落。 |
 | `POST /api/v1/guest/room/share/upload_control_mode`、`POST /api/v2/room/share/upload_control_mode` | Guest Token / User Token | 被控端应答 `get_control_mode` 挑战，上报当前协助开关与验证模式。 |
 | `POST /api/v1/guest/room/share/upload/sign`、`POST /api/v2/room/share/upload_sign` | Guest Token / User Token | 被控端应答 `remote_control` 挑战，上报 `SHA-256(salt || code)` 摘要与 `can_remote_control`。 |
 | `POST /api/v1/guest/room/share/confirmation`、`POST /api/v2/room/share/confirmation` | Guest Token / User Token | 被控端提交桌面确认结果（允许或拒绝）。 |
