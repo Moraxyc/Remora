@@ -418,7 +418,13 @@ fn entry(
     public_url: &PublicUrl,
 ) -> Entry {
     let publisher_availability_status = if is_desktop_platform(device.platform) {
-        Some(if online { "ready" } else { "offline" })
+        Some(if !online {
+            "offline"
+        } else if !device.controllable {
+            "control_off"
+        } else {
+            "ready"
+        })
     } else {
         None
     };

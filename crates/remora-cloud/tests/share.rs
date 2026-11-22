@@ -501,7 +501,8 @@ async fn guest_ordering_and_assist_code_flow_work_end_to_end() {
     .await
     .unwrap();
     let cm_resp = cm_task.await.unwrap().unwrap();
-    assert!(cm_resp.allow_control);
+    assert!(cm_resp.is_allowed());
+    assert_eq!(cm_resp.can_remote_control, Some(true));
     assert_eq!(cm_resp.control_mode, ShareControlMode::ByPassword);
     assert!(cm_resp.need_password);
 
@@ -684,6 +685,7 @@ async fn account_share_confirmation_refresh_and_saved_devices_work() {
     .await
     .unwrap();
     assert_eq!(room_cfg.publisher_device_id, host_device);
+    assert_eq!(room_cfg.device_binding, "user_device");
 
     // User 2 sees the device in others_shared_devices and saved/recent, can favorite and unbind.
     let list: DeviceListResponse = common::get(&app, "/api/v1/device/list", Some(&user2_token))

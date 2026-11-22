@@ -658,4 +658,24 @@ async fn device_list_reports_active_desktop_participants() {
     assert_eq!(parts[0]["alias"], "MacBook");
     assert_eq!(parts[0]["platform"], 1);
     assert_eq!(parts[0]["user_join_type"], 1);
+
+    let _: Value = common::post_as(
+        &app,
+        "/api/v1/device/mac_controllable",
+        &token,
+        Some(&device_id),
+        &json!({ "controllable": false }).to_string(),
+    )
+    .await
+    .unwrap();
+    let list_off: Value = common::get_as(&app, "/api/v1/device/list", &token, &viewer_device)
+        .await
+        .unwrap();
+    let entry_off = list_off["my_binded_devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_id"] == device_id.as_str())
+        .unwrap();
+    assert_eq!(entry_off["publisher_availability_status"], "control_off");
 }

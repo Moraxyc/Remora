@@ -1209,7 +1209,11 @@ fn build_assist_room_config(
         publisher_platform: target.platform,
         publisher_device_id: target.device_id.clone(),
         international_connect: false,
-        device_binding: String::new(),
+        device_binding: if target.owner.is_some() {
+            "user_device".to_owned()
+        } else {
+            String::new()
+        },
         streamer_config: "{}".to_owned(),
         extra: Map::new(),
     }
@@ -1246,7 +1250,8 @@ pub async fn room_share_control_mode(
         Ok(Ok(reply)) => {
             let need_password = reply.allow_control && reply.control_mode.needs_password();
             Ok(api::Ok(ShareControlModeResponse {
-                allow_control: reply.allow_control,
+                can_remote_control: Some(reply.allow_control),
+                allow_control: Some(reply.allow_control),
                 control_mode: reply.control_mode,
                 need_password,
                 control_id: Some(reply.control_id),
@@ -1257,7 +1262,8 @@ pub async fn room_share_control_mode(
             service.challenges.remove_control_mode(&control_id);
             if target.platform == 4 {
                 Ok(api::Ok(ShareControlModeResponse {
-                    allow_control: target.controllable,
+                    can_remote_control: Some(target.controllable),
+                    allow_control: Some(target.controllable),
                     control_mode: ShareControlMode::ByPassword,
                     need_password: target.controllable,
                     control_id: Some(control_id),

@@ -198,6 +198,7 @@ pub struct CreateResponse {
     signaling_server: String,
     signaling_list: [String; 1],
     sni_required_signaling_list: Vec<String>,
+    streamer_config: &'static str,
     token: String,
     ws_connect_timeout_ms: u32,
     max_reconnect_delta: u32,
@@ -233,6 +234,7 @@ pub async fn create(
         signaling_list: [signaling_server.clone()],
         signaling_server,
         sni_required_signaling_list,
+        streamer_config: "{}",
         token,
         ws_connect_timeout_ms: WS_CONNECT_TIMEOUT_MS,
         max_reconnect_delta: MAX_RECONNECT_DELTA_SECS,
@@ -246,6 +248,7 @@ pub struct JoinResponse {
     signaling_server: String,
     signaling_list: [String; 1],
     sni_required_signaling_list: Vec<String>,
+    streamer_config: &'static str,
     token: String,
     ws_connect_timeout_ms: u32,
     max_reconnect_delta: u32,
@@ -254,6 +257,7 @@ pub struct JoinResponse {
     /// Where the official clients send connection reports. Remora collects none.
     report_token: &'static str,
     report_url: &'static str,
+    report_server_address: &'static str,
     /// The host's platform, which decides the viewer's keyboard mapping.
     publisher_platform: u8,
 }
@@ -306,6 +310,7 @@ pub async fn join_by_device(
         signaling_list: [signaling_server.clone()],
         signaling_server,
         sni_required_signaling_list,
+        streamer_config: "{}",
         token,
         ws_connect_timeout_ms: WS_CONNECT_TIMEOUT_MS,
         max_reconnect_delta: MAX_RECONNECT_DELTA_SECS,
@@ -313,6 +318,7 @@ pub async fn join_by_device(
         international_connect: false,
         report_token: "",
         report_url: "",
+        report_server_address: "",
         publisher_platform,
     }))
 }
