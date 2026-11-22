@@ -37,6 +37,7 @@ jobs:
           extra-conf: |
             build-dir = /nix/build
             accept-flake-config = true
+            fallback = true
 
       # Pushes every path the job built when it ends. Pull requests from forks get no token.
       - if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
