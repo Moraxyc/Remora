@@ -4,6 +4,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 async fn fetch(app: &Router, method: Method, path: &str) -> (StatusCode, HeaderMap, String) {
@@ -67,5 +68,80 @@ async fn unknown_api_paths_are_not_the_apps() {
     ] {
         let (status, _, _) = fetch(&app, method, path).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn ios_compat_routes_require_auth_and_return_wire_envelopes() {
+    let app = remora_cloud::router(common::config());
+    let token = common::log_in(&app).await;
+    for (method, path, status, code, msg, data) in [
+        (
+            Method::GET,
+            "/api/v1/release/fetch/update/force",
+            400,
+            1151,
+            "当前已是最新版本",
+            json!({}),
+        ),
+        (
+            Method::POST,
+            "/api/v1/event/uni/report",
+            200,
+            0,
+            "ok",
+            json!({}),
+        ),
+        (
+            Method::GET,
+            "/api/v1/cloud_pc/disks",
+            200,
+            0,
+            "ok",
+            json!({ "disks": {}, "bind_map": {}, "bindable_map": {} }),
+        ),
+        (
+            Method::POST,
+            "/api/v1/room/app_flag",
+            200,
+            0,
+            "ok",
+            json!({}),
+        ),
+        (
+            Method::GET,
+            "/api/v1/keymapping/official/list_with_version",
+            400,
+            1182,
+            "当前配置已是最新版本",
+            json!({}),
+        ),
+        (
+            Method::GET,
+            "/api/v1/keymapping/list",
+            200,
+            0,
+            "ok",
+            json!([]),
+        ),
+    ] {
+        let (unauthenticated, _, _) = fetch(&app, method.clone(), path).await;
+        assert_eq!(unauthenticated, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{path}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            json!({ "code": code, "msg": msg, "data": data }),
+            "{path}"
+        );
     }
 }

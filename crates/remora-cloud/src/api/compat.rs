@@ -1,4 +1,4 @@
-//! Client compatibility endpoints queried by official desktop apps on startup and session entry.
+//! Client compatibility endpoints queried on startup and session entry.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::api::auth::token::now;
 use crate::api::device::{CallerVersion, Devices};
 use crate::api::user::User;
-use crate::api::{self, ApiError, Body};
+use crate::api::{self, ApiError, Body, Empty};
 
 const VERSION_CODE_HEADER: &str = "x-param-vc";
 
@@ -148,6 +148,26 @@ pub async fn cloud_pc_ui_switch(_user: User) -> Result<api::Ok<UiSwitchResponse>
     Ok(api::Ok(UiSwitchResponse { switch: false }))
 }
 
+pub async fn cloud_pc_disks(_user: User) -> api::Ok<Value> {
+    api::Ok(json!({ "disks": {}, "bind_map": {}, "bindable_map": {} }))
+}
+
+pub async fn event_uni_report(_user: User) -> api::Ok<Empty> {
+    api::Ok(Empty {})
+}
+
+pub async fn room_app_flag(_user: User) -> api::Ok<Empty> {
+    api::Ok(Empty {})
+}
+
+pub async fn keymapping_official_list_with_version(_user: User) -> ApiError {
+    ApiError::CONFIG_UP_TO_DATE
+}
+
+pub async fn keymapping_list(_user: User) -> api::Ok<Value> {
+    api::Ok(json!([]))
+}
+
 #[derive(Serialize)]
 pub struct MessageSummaryResponse {
     no_read_num: u64,
@@ -226,6 +246,10 @@ pub async fn release_fetch_update(
         version_name.unwrap_or_default(),
         version_code.unwrap_or(0),
     )))
+}
+
+pub async fn release_fetch_update_force(_user: User) -> ApiError {
+    ApiError::CLIENT_UP_TO_DATE
 }
 
 /// `GET /api/v1/release/fetch/update/{device_id}`: reports a bound device is already up to date.

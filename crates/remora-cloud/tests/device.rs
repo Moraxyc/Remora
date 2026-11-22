@@ -157,6 +157,44 @@ async fn devices_and_logins_outlive_a_restart() {
 }
 
 #[tokio::test]
+async fn ios_init_registers_a_mobile_device() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use remora_proto::control::parse_response;
+    use tower::ServiceExt;
+
+    let app = remora_cloud::router(common::config());
+    let request = Request::post("/api/v1/device/ios/init")
+        .header("content-type", "application/json")
+        .header("x-param-plat", "3")
+        .header("x-param-vn", "4.48.1")
+        .header("x-param-vc", "203")
+        .body(Body::from(
+            json!({
+                "client_id": "ios-client",
+                "name": "iPhone",
+                "product": "iPhone16,1",
+                "idfv": "test-idfv",
+                "system_id": "test-system",
+                "screen_size": "393x852",
+                "resolution": "1179x2556",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let device: Value = parse_response(status, &bytes).unwrap();
+    assert!(!device["device_id"].as_str().unwrap().is_empty());
+    assert_eq!(device["alias"], "iPhone");
+    assert_eq!(device["platform"], 3);
+    assert_eq!(device["version_name"], "4.48.1");
+    assert_eq!(device["controlled_support"], false);
+}
+
+#[tokio::test]
 async fn macos_init_groups_controllable_preferences_and_apps() {
     use axum::body::Body;
     use axum::http::Request;

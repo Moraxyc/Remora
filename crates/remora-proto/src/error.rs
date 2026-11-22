@@ -28,6 +28,10 @@ pub enum ErrorCode {
     ShareConfirmationRequired,
     /// Cannot favorite a device owned by the same account (`1137`).
     SameAccountShareFavorite,
+    /// No client update available (`1151`).
+    ClientUpToDate,
+    /// No configuration update available (`1182`).
+    ConfigUpToDate,
     /// Rate limit exceeded (`1429`).
     TooManyRequests,
     /// Target host is not connected to signaling (`2001`).
@@ -56,6 +60,8 @@ impl ErrorCode {
             1134 => Self::ShareConfirmationDenied,
             1136 => Self::ShareConfirmationRequired,
             1137 => Self::SameAccountShareFavorite,
+            1151 => Self::ClientUpToDate,
+            1182 => Self::ConfigUpToDate,
             1190 => Self::QrCodeExpired,
             1429 => Self::TooManyRequests,
             2001 => Self::DeviceOffline,
@@ -79,6 +85,8 @@ impl ErrorCode {
             Self::ShareConfirmationDenied => 1134,
             Self::ShareConfirmationRequired => 1136,
             Self::SameAccountShareFavorite => 1137,
+            Self::ClientUpToDate => 1151,
+            Self::ConfigUpToDate => 1182,
             Self::QrCodeExpired => 1190,
             Self::TooManyRequests => 1429,
             Self::DeviceOffline => 2001,
@@ -123,6 +131,8 @@ impl fmt::Display for ErrorCode {
             Self::SameAccountShareFavorite => {
                 f.write_str("cannot favorite same-account device (1137)")
             }
+            Self::ClientUpToDate => f.write_str("client is up to date (1151)"),
+            Self::ConfigUpToDate => f.write_str("configuration is up to date (1182)"),
             Self::QrCodeExpired => f.write_str("qr code expired (1190)"),
             Self::TooManyRequests => f.write_str("too many requests (1429)"),
             Self::DeviceOffline => f.write_str("device offline (2001)"),
@@ -141,8 +151,8 @@ mod tests {
     #[test]
     fn roundtrips_known_and_unknown_codes() {
         for code in [
-            0, 1000, 1001, 1002, 1120, 1130, 1131, 1134, 1136, 1137, 1190, 1429, 2001, 2002, 2003,
-            2004,
+            0, 1000, 1001, 1002, 1120, 1130, 1131, 1134, 1136, 1137, 1151, 1182, 1190, 1429, 2001,
+            2002, 2003, 2004,
         ] {
             let parsed = ErrorCode::from_code(code);
             assert!(!matches!(parsed, ErrorCode::Unknown(_)));

@@ -184,6 +184,7 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 post(api::device::windows_init),
             )
             .route("/api/v1/device/macos/init", post(api::device::macos_init))
+            .route("/api/v1/device/ios/init", post(api::device::ios_init))
             .route(
                 "/api/v1/device/mac_controllable",
                 post(api::device::mac_controllable),
@@ -320,6 +321,11 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 "/api/v1/cloud_pc/ui_switch",
                 get(api::compat::cloud_pc_ui_switch),
             )
+            .route("/api/v1/cloud_pc/disks", get(api::compat::cloud_pc_disks))
+            .route(
+                "/api/v1/event/uni/report",
+                post(api::compat::event_uni_report),
+            )
             .route("/api/v1/message/summary", get(api::compat::message_summary))
             .route(
                 "/api/v1/campaign/strategies",
@@ -337,6 +343,16 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
                 "/api/v1/release/fetch/update/{device_id}",
                 get(api::compat::release_fetch_update_device),
             )
+            .route(
+                "/api/v1/release/fetch/update/force",
+                get(api::compat::release_fetch_update_force),
+            )
+            .route(
+                "/api/v1/keymapping/official/list_with_version",
+                get(api::compat::keymapping_official_list_with_version),
+            )
+            .route("/api/v1/keymapping/list", get(api::compat::keymapping_list))
+            .route("/api/v1/room/app_flag", post(api::compat::room_app_flag))
             .route("/api/v1/room/create", post(room::create))
             .route(
                 "/api/v1/room/join/by_device/{device_id}",

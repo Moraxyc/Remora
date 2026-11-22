@@ -203,6 +203,29 @@ async fn a_host_reports_its_lan() {
 }
 
 #[tokio::test]
+async fn empty_lan_reports_do_not_enable_wol() {
+    let app = remora_cloud::router(common::config());
+    let device = common::register(&app, "client-mobile").await;
+    let token = common::log_in(&app).await;
+
+    for body in [
+        lan("", "", ""),
+        json!({ "mac": "", "inner_ip": "", "subnet_mask": "" }),
+    ] {
+        let reported: Value =
+            common::post_as(&app, REPORT, &token, Some(&device), &body.to_string())
+                .await
+                .unwrap();
+        assert_eq!(reported, json!({ "support_wol": false }));
+    }
+
+    let list: Value = common::get_as(&app, "/api/v1/device/list", &token, &device)
+        .await
+        .unwrap();
+    assert_eq!(list["current_device"]["support_wol"], false);
+}
+
+#[tokio::test]
 async fn invalid_reports_are_refused() {
     let (app, _) = start().await;
     let host = Host::bind(&app, "client-host").await;
@@ -214,6 +237,7 @@ async fn invalid_reports_are_refused() {
         json!({ "mac": "aa:bb:cc:dd:ee:01", "ip": "192.168.1.20", "subnet_mask": "255.255.255.0" });
     for body in [
         without_inner_ip,
+        json!({ "mac": "", "inner_ip": "", "ip": "not-an-ip", "subnet_mask": "" }),
         lan("aa:bb:cc:dd:ee", "192.168.1.20", "255.255.255.0"),
         lan("aa:bb:cc:dd:ee:01", "fe80::1", "255.255.255.0"),
         lan("aa:bb:cc:dd:ee:01", "192.168.1.20", "255.0.255.0"),

@@ -65,6 +65,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CallerVersion {
 
 /// What `device/windows/init` registers as, in UU's platform numbering.
 const PLATFORM_WINDOWS: u8 = 1;
+const PLATFORM_IOS: u8 = 3;
 /// What `device/macos/init` registers as, in UU's platform numbering.
 const PLATFORM_MACOS: u8 = 4;
 
@@ -73,7 +74,7 @@ fn is_desktop_platform(platform: u8) -> bool {
 }
 
 fn is_mobile_platform(platform: u8) -> bool {
-    matches!(platform, 2 | 3)
+    matches!(platform, 2 | PLATFORM_IOS)
 }
 
 /// Registered devices. Each is registered by one installation (its `client_id`) and, once its
@@ -308,7 +309,7 @@ impl Devices {
     }
 }
 
-/// Body of `POST /api/v1/device/{windows,macos}/init`. Hardware summary fields are ignored.
+/// Body of `POST /api/v1/device/{windows,macos,ios}/init`. Hardware summary fields are ignored.
 #[derive(Deserialize)]
 pub struct InitRequest {
     client_id: String,
@@ -376,6 +377,15 @@ pub async fn macos_init(
     Body(request): Body<InitRequest>,
 ) -> Result<api::Ok<Entry>, ApiError> {
     init_for_platform(services, address, version_name, request, PLATFORM_MACOS).await
+}
+
+pub async fn ios_init(
+    State(services): State<DeviceInitService>,
+    ClientAddress(address): ClientAddress,
+    CallerVersion(version_name): CallerVersion,
+    Body(request): Body<InitRequest>,
+) -> Result<api::Ok<Entry>, ApiError> {
+    init_for_platform(services, address, version_name, request, PLATFORM_IOS).await
 }
 
 #[derive(Deserialize)]

@@ -185,7 +185,10 @@ pub struct ReportRequest {
 
 #[derive(Serialize)]
 pub struct ReportResponse {
-    turn_on_wol: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    support_wol: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_on_wol: Option<bool>,
 }
 
 /// `POST /api/v1/device/wake_on_lan/info`: the calling host's LAN identity, kept as its last
@@ -197,14 +200,23 @@ pub async fn report(
     State(reports): State<LanReports>,
     Body(request): Body<ReportRequest>,
 ) -> Result<api::Ok<ReportResponse>, ApiError> {
+    let ip = request.ip.as_deref().unwrap_or_default();
+    if request.mac.is_empty()
+        && request.inner_ip.is_empty()
+        && request.subnet_mask.is_empty()
+        && ip.is_empty()
+    {
+        return Ok(api::Ok(ReportResponse {
+            support_wol: Some(false),
+            turn_on_wol: None,
+        }));
+    }
+
     // `inner_ip` is the address on the LAN; `ip` may be the address the host is seen at from
     // outside, so it is only checked.
     let report = LanReport::parse(&request.mac, &request.inner_ip, &request.subnet_mask)
         .ok_or(ApiError::INVALID_REQUEST)?;
-    if request
-        .ip
-        .is_some_and(|ip| !ip.is_empty() && ip.parse::<Ipv4Addr>().is_err())
-    {
+    if !ip.is_empty() && ip.parse::<Ipv4Addr>().is_err() {
         return Err(ApiError::INVALID_REQUEST);
     }
     let device_id = caller.ok_or(ApiError::UNKNOWN_DEVICE)?;
@@ -213,7 +225,10 @@ pub async fn report(
     }
     reports.store(&device_id, &report)?;
     tracing::info!(user_id = %user.id, %device_id, "LAN report stored");
-    Ok(api::Ok(ReportResponse { turn_on_wol: true }))
+    Ok(api::Ok(ReportResponse {
+        support_wol: None,
+        turn_on_wol: Some(true),
+    }))
 }
 
 /// Why a device could not be woken.

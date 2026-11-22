@@ -58,6 +58,18 @@ impl ApiError {
         msg: "login expired",
     };
 
+    pub const CLIENT_UP_TO_DATE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::ClientUpToDate,
+        msg: "当前已是最新版本",
+    };
+
+    pub const CONFIG_UP_TO_DATE: Self = Self {
+        status: StatusCode::BAD_REQUEST,
+        code: ErrorCode::ConfigUpToDate,
+        msg: "当前配置已是最新版本",
+    };
+
     /// The QR login is unknown, expired or already used.
     pub const QR_EXPIRED: Self = Self {
         status: StatusCode::BAD_REQUEST,
