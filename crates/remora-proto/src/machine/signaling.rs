@@ -4,7 +4,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use serde_json::{Value, json};
 
 use super::{Machine, Timestamp};
@@ -87,7 +87,7 @@ impl fmt::Display for SignalingError {
 impl std::error::Error for SignalingError {}
 
 /// Sans-IO Socket.IO client signaling state machine.
-pub struct SignalingMachine<R: RngCore> {
+pub struct SignalingMachine<R: Rng> {
     state: SignalingState,
     handshake: Option<Handshake>,
     decoder: Decoder,
@@ -105,7 +105,7 @@ pub struct SignalingMachine<R: RngCore> {
     events: VecDeque<SignalingEvent>,
 }
 
-impl<R: RngCore> fmt::Debug for SignalingMachine<R> {
+impl<R: Rng> fmt::Debug for SignalingMachine<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignalingMachine")
             .field("state", &self.state)
@@ -114,7 +114,7 @@ impl<R: RngCore> fmt::Debug for SignalingMachine<R> {
     }
 }
 
-impl<R: RngCore> SignalingMachine<R> {
+impl<R: Rng> SignalingMachine<R> {
     pub fn new(mut rng: R) -> Self {
         let initial_ack = u64::from(rng.next_u32() % 1000) + 1;
         Self {
@@ -172,7 +172,7 @@ impl<R: RngCore> SignalingMachine<R> {
         id
     }
 
-    /// Generates a random 16-byte hex identifier using the injected [`RngCore`].
+    /// Generates a random 16-byte hex identifier using the injected [`Rng`].
     pub fn next_random_hex_id(&mut self) -> String {
         let mut bytes = [0u8; 16];
         self.rng.fill_bytes(&mut bytes);
@@ -335,7 +335,7 @@ impl<R: RngCore> SignalingMachine<R> {
     }
 }
 
-impl<R: RngCore> Machine for SignalingMachine<R> {
+impl<R: Rng> Machine for SignalingMachine<R> {
     type Transmit = SignalingTransmit;
     type Event = SignalingEvent;
     type Error = SignalingError;
@@ -395,23 +395,28 @@ impl<R: RngCore> Machine for SignalingMachine<R> {
 
 #[cfg(test)]
 mod tests {
+    use rand_core::{Infallible, TryRng};
+
     use super::*;
 
     struct DeterministicRng(u64);
 
-    impl RngCore for DeterministicRng {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
+    impl TryRng for DeterministicRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
         }
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            self.0
+            Ok(self.0)
         }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
             for chunk in dest.chunks_mut(8) {
-                let bytes = self.next_u64().to_le_bytes();
+                let bytes = self.try_next_u64()?.to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+            Ok(())
         }
     }
 

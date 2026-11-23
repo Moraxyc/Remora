@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::RngCore;
+use rand::Rng;
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
     ApiError, AssistDeviceRecordPage, AssistFavoritesRequest, AssistRoomConfig,

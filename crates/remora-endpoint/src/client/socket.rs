@@ -393,7 +393,9 @@ fn build_upgrade_request(
 
 #[cfg(test)]
 mod tests {
-    use rand::RngCore;
+    use std::convert::Infallible;
+
+    use rand::TryRng;
     use remora_proto::machine::Timestamp;
     use remora_proto::machine::signaling::{SignalingEvent, SignalingMachine, SignalingState};
     use remora_proto::profile;
@@ -409,19 +411,22 @@ mod tests {
 
     struct DeterministicRng(u64);
 
-    impl RngCore for DeterministicRng {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
+    impl TryRng for DeterministicRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
         }
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
             self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            self.0
+            Ok(self.0)
         }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
             for chunk in dest.chunks_mut(8) {
-                let bytes = self.next_u64().to_le_bytes();
+                let bytes = self.try_next_u64()?.to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+            Ok(())
         }
     }
 

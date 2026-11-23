@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::read::GzDecoder;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 use remora_proto::machine::peer::{
     IceServerSpec, PeerError, PeerEvent, PeerMachine, PeerRole, PeerTransmit,
@@ -557,7 +556,7 @@ impl PeerHandle {
         }
 
         let mut machine =
-            PeerMachine::new(StdRng::from_os_rng()).with_feature_flag(config.feature_flag);
+            PeerMachine::new(rand::make_rng::<StdRng>()).with_feature_flag(config.feature_flag);
         machine.start_session(
             Timestamp::ZERO,
             config.role,

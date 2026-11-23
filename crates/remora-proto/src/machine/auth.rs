@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::time::Duration;
 
-use rand_core::RngCore;
+use rand_core::Rng;
 
 use super::{Machine, Timestamp};
 use crate::control::{
@@ -141,8 +141,8 @@ impl fmt::Display for AuthError {
 impl std::error::Error for AuthError {}
 
 /// Sans-IO authentication state machine with injected [`SignKey`], Unix epoch anchor, and
-/// [`RngCore`].
-pub struct AuthMachine<R: RngCore> {
+/// [`Rng`].
+pub struct AuthMachine<R: Rng> {
     sign_key: SignKey,
     base_unix_secs: u64,
     plat: String,
@@ -159,7 +159,7 @@ pub struct AuthMachine<R: RngCore> {
     events: VecDeque<AuthEvent>,
 }
 
-impl<R: RngCore> fmt::Debug for AuthMachine<R> {
+impl<R: Rng> fmt::Debug for AuthMachine<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthMachine")
             .field("state", &self.state)
@@ -169,7 +169,7 @@ impl<R: RngCore> fmt::Debug for AuthMachine<R> {
     }
 }
 
-impl<R: RngCore> AuthMachine<R> {
+impl<R: Rng> AuthMachine<R> {
     pub fn new(
         sign_key: SignKey,
         base_unix_secs: u64,
@@ -360,7 +360,7 @@ fn split_http_response(bytes: &[u8]) -> (u16, &[u8]) {
     (200, bytes)
 }
 
-impl<R: RngCore> Machine for AuthMachine<R> {
+impl<R: Rng> Machine for AuthMachine<R> {
     type Transmit = AuthTransmit;
     type Event = AuthEvent;
     type Error = AuthError;
@@ -514,28 +514,33 @@ impl<R: RngCore> Machine for AuthMachine<R> {
 
 #[cfg(test)]
 mod tests {
+    use rand_core::{Infallible, TryRng};
+
     use super::*;
     use crate::server::verify_request;
 
     struct DeterministicRng(u64);
 
-    impl RngCore for DeterministicRng {
-        fn next_u32(&mut self) -> u32 {
-            self.next_u64() as u32
+    impl TryRng for DeterministicRng {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+            Ok(self.try_next_u64()? as u32)
         }
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Infallible> {
             let mut x = self.0;
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             self.0 = x;
-            x
+            Ok(x)
         }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Infallible> {
             for chunk in dest.chunks_mut(8) {
-                let bytes = self.next_u64().to_le_bytes();
+                let bytes = self.try_next_u64()?.to_le_bytes();
                 chunk.copy_from_slice(&bytes[..chunk.len()]);
             }
+            Ok(())
         }
     }
 

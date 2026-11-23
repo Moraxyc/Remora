@@ -12,7 +12,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use hmac::{Hmac, KeyInit, Mac};
 use md5::{Digest as _, Md5};
-use rand::RngCore as _;
+use rand::Rng as _;
 use sha1::Sha1;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
