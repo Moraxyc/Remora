@@ -106,7 +106,7 @@ impl SymbolTable {
             return String::new();
         }
         match key_hint {
-            Some("device_id" | "current_device_id" | "publisher_device_id") => {
+            Some("device_id" | "current_device_id" | "publisher_device_id" | "room_id") => {
                 self.intern("device", raw)
             }
             Some("connect_id" | "share_id") => self.intern("connect_id", raw),
@@ -226,6 +226,17 @@ mod tests {
                 ObservedStep {
                     index: 2,
                     id: None,
+                    actor: "host".into(),
+                    action: "room_info".into(),
+                    http_status: None,
+                    code: None,
+                    ack_status: Some("ok".into()),
+                    event_name: None,
+                    payload: json!([{ "room_id": device_id, "publisher": { "device_id": device_id } }]),
+                },
+                ObservedStep {
+                    index: 3,
+                    id: None,
                     actor: "viewer".into(),
                     action: "send_control".into(),
                     http_status: None,
@@ -235,7 +246,7 @@ mod tests {
                     payload: json!({ "ice_id": ice_id, "client_id": "c-host" }),
                 },
                 ObservedStep {
-                    index: 3,
+                    index: 4,
                     id: None,
                     actor: "host".into(),
                     action: "wait_event".into(),
@@ -254,15 +265,16 @@ mod tests {
         let a = normalize_run(&sample_result(40001, "uuid-aaa", "ice-111"));
         let b = normalize_run(&sample_result(50002, "uuid-bbb", "ice-222"));
         assert_eq!(a, b);
-        assert_eq!(a.steps[2].payload["ice_id"], "$ice_0");
+        assert_eq!(a.steps[2].payload[0]["room_id"], "$device_0");
         assert_eq!(a.steps[3].payload["ice_id"], "$ice_0");
+        assert_eq!(a.steps[4].payload["ice_id"], "$ice_0");
     }
 
     #[test]
     fn inequality_in_id_linking_is_preserved() {
         let mut r = sample_result(40001, "uuid-aaa", "ice-111");
-        r.steps[3].payload["ice_id"] = json!("ice-DIFFERENT");
+        r.steps[4].payload["ice_id"] = json!("ice-DIFFERENT");
         let n = normalize_run(&r);
-        assert_ne!(n.steps[2].payload["ice_id"], n.steps[3].payload["ice_id"]);
+        assert_ne!(n.steps[3].payload["ice_id"], n.steps[4].payload["ice_id"]);
     }
 }
