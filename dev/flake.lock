@@ -109,11 +109,11 @@
         "systems": "systems"
       },
       "locked": {
-        "lastModified": 1795184573,
-        "narHash": "sha256-+QtqvaOdALZLC9HpvfBhy8Ij5XE/9YyNNLaU5TU9NGw=",
+        "lastModified": 1795264122,
+        "narHash": "sha256-JOwLs8eT2rIeyB5r1ppwoDNx+jALl8UipW4alOvtT7I=",
         "owner": "VallierDev",
         "repo": "uu-remote-linux",
-        "rev": "1f01bad3e3a68278df35730586f15595564ef95e",
+        "rev": "e48e418b90ef3b4c202b211f02aff5a97b2e1781",
         "type": "github"
       },
       "original": {
