@@ -17,6 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".gv_pb.ClipboardTextChangeRequest",
             ".gv_pb.ClipboardDataBlock",
             ".gv_pb.ClipboardFileContentsResponse",
+            ".gv_pb.FileTransferBlock",
+            ".gv_pb.PortMappingFrame",
+            ".gv_pb.DrawStrokeRequest",
         ])
         .compile_fds(descriptors)?;
     println!("cargo::rerun-if-changed=proto");
