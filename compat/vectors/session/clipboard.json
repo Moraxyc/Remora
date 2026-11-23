@@ -1,0 +1,68 @@
+{
+  "suite": "session_clipboard",
+  "cases": [
+    {
+      "name": "clipboard_change_chunk",
+      "bytes_hex": "0801100a8a010b0807120568656c6c6f1801",
+      "expected": {
+        "kind": "change",
+        "seq": 1,
+        "timestamp": 10,
+        "content_id": 7,
+        "content": "hello",
+        "to_be_continued": true
+      }
+    },
+    {
+      "name": "clipboard_text_rpc_request",
+      "bytes_hex": "08021014aa010e0a020865520808011204636c6970",
+      "expected": {
+        "kind": "text_rpc_request",
+        "seq": 2,
+        "timestamp": 20,
+        "request_id": 101,
+        "format_id": 1,
+        "text": "clip"
+      }
+    },
+    {
+      "name": "clipboard_format_list_windows_unicode",
+      "bytes_hex": "0803101eaa010c0a0208664a060a040a02080d",
+      "expected": {
+        "kind": "format_list_request",
+        "seq": 3,
+        "timestamp": 30,
+        "request_id": 102,
+        "format_ids": [
+          13
+        ]
+      }
+    },
+    {
+      "name": "clipboard_format_data_ask",
+      "bytes_hex": "08041028aa01210a0208674a1b1219080d1205626c6b2d311a0e43465f554e49434f444554455854",
+      "expected": {
+        "kind": "format_data_ask",
+        "seq": 4,
+        "timestamp": 40,
+        "request_id": 103,
+        "format_id": 13,
+        "block_key": "blk-1",
+        "format_name": "CF_UNICODETEXT"
+      }
+    },
+    {
+      "name": "clipboard_data_block",
+      "bytes_hex": "08051032aa01170a0208684a111a0f0a05626c6b2d311a06480069000000",
+      "expected": {
+        "kind": "data_block",
+        "seq": 5,
+        "timestamp": 50,
+        "request_id": 104,
+        "block_key": "blk-1",
+        "block_id": 0,
+        "data_hex": "480069000000"
+      }
+    }
+  ]
+}

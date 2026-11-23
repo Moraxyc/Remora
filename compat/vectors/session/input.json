@@ -4,22 +4,64 @@
     {
       "name": "keyboard_heartbeat",
       "bytes_hex": "7b22686561727462656174223a226b62645f686561727462656174227d",
-      "expected": { "kind": "keyboard_heartbeat" }
+      "expected": {
+        "kind": "keyboard_heartbeat"
+      }
     },
     {
       "name": "keyboard_press_65",
       "bytes_hex": "7b22616374696f6e223a226b62645f7072657373222c226b6579223a36357d",
-      "expected": { "kind": "keyboard", "key": 65, "pressed": true }
+      "expected": {
+        "kind": "keyboard",
+        "key": 65,
+        "pressed": true
+      }
     },
     {
       "name": "mouse_move_absolute",
       "bytes_hex": "7b22616374696f6e223a226d6f7573655f6d6f76655f6162736f6c757465222c226162735f78223a31322c226162735f79223a33347d",
-      "expected": { "kind": "mouse_absolute", "x": 12.0, "y": 34.0 }
+      "expected": {
+        "kind": "mouse_absolute",
+        "x": 12,
+        "y": 34
+      }
+    },
+    {
+      "name": "mouse_button_middle_mk_mask",
+      "bytes_hex": "7b22616374696f6e223a226d6f7573655f7072657373222c22627574746f6e223a31367d",
+      "expected": {
+        "kind": "mouse_button",
+        "button": 16,
+        "pressed": true,
+        "decoded_button": "middle"
+      }
+    },
+    {
+      "name": "mouse_button_middle_legacy_4",
+      "bytes_hex": "7b22616374696f6e223a226d6f7573655f7072657373222c22627574746f6e223a347d",
+      "expected": {
+        "kind": "mouse_button",
+        "button": 4,
+        "pressed": true,
+        "decoded_button": "middle"
+      }
+    },
+    {
+      "name": "mouse_click_xbutton1",
+      "bytes_hex": "7b22616374696f6e223a226d6f7573655f636c69636b222c22627574746f6e223a33327d",
+      "expected": {
+        "kind": "mouse_click",
+        "button": 32,
+        "decoded_button": "xbutton1"
+      }
     },
     {
       "name": "unknown_input_action",
       "bytes_hex": "7b22616374696f6e223a226675747572655f67657374757265222c226b223a317d",
-      "expected": { "kind": "unknown", "name": "future_gesture" }
+      "expected": {
+        "kind": "unknown",
+        "name": "future_gesture"
+      }
     }
   ]
 }

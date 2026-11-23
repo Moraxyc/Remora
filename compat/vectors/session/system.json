@@ -1,0 +1,63 @@
+{
+  "suite": "session_system",
+  "cases": [
+    {
+      "name": "privacy_request_windows_disable_normal_quirk",
+      "bytes_hex": "0801109003aa01090a030891033a021002",
+      "expected": {
+        "kind": "privacy_request",
+        "seq": 1,
+        "timestamp": 400,
+        "request_id": 401,
+        "enable": false,
+        "privacy_type": 2,
+        "windows_normalized": "enable_normal"
+      }
+    },
+    {
+      "name": "privacy_response_ok",
+      "bytes_hex": "0802109103b2010b0a030892031a0410021802",
+      "expected": {
+        "kind": "privacy_response",
+        "seq": 2,
+        "timestamp": 401,
+        "request_id": 402,
+        "error_code": 0,
+        "req_privacy_type": 2,
+        "cur_privacy_type": 2
+      }
+    },
+    {
+      "name": "draw_toggle_request",
+      "bytes_hex": "0803109203aa010c0a03089303da01041a020801",
+      "expected": {
+        "kind": "draw_toggle_request",
+        "seq": 3,
+        "timestamp": 402,
+        "request_id": 403,
+        "enable": true
+      }
+    },
+    {
+      "name": "virtual_audio_noop_probe_response",
+      "bytes_hex": "0804109303b201080a030894038a0100",
+      "expected": {
+        "kind": "virtual_audio_policy_response",
+        "seq": 4,
+        "timestamp": 403,
+        "request_id": 404,
+        "error_code": 0
+      }
+    },
+    {
+      "name": "query_system_state",
+      "bytes_hex": "08051094038201020801",
+      "expected": {
+        "kind": "query_system_state",
+        "seq": 5,
+        "timestamp": 404,
+        "id": 1
+      }
+    }
+  ]
+}

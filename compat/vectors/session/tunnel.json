@@ -1,0 +1,72 @@
+{
+  "suite": "session_tunnel",
+  "cases": [
+    {
+      "name": "tunnel_syn_frame",
+      "bytes_hex": "080110ac02da0142080a1014181e2a3a7b2276657273696f6e223a312c227461726765745f686f7374223a223132372e302e302e31222c227461726765745f706f7274223a383038307d",
+      "expected": {
+        "seq": 1,
+        "timestamp": 300,
+        "session_id": 10,
+        "rule_id": 20,
+        "stream_id": 30,
+        "frame_type": "syn",
+        "syn_host": "127.0.0.1",
+        "syn_port": 8080
+      }
+    },
+    {
+      "name": "tunnel_syn_ack_ok",
+      "bytes_hex": "080210ad02da0121080a1014181e20032a177b2276657273696f6e223a312c226f6b223a747275657d",
+      "expected": {
+        "seq": 2,
+        "timestamp": 301,
+        "session_id": 10,
+        "rule_id": 20,
+        "stream_id": 30,
+        "frame_type": "syn_ack",
+        "syn_ack_ok": true
+      }
+    },
+    {
+      "name": "tunnel_data_frame",
+      "bytes_hex": "080310ae02da010e080a1014181e20022a0470696e67",
+      "expected": {
+        "seq": 3,
+        "timestamp": 302,
+        "session_id": 10,
+        "rule_id": 20,
+        "stream_id": 30,
+        "frame_type": "data",
+        "payload_hex": "70696e67"
+      }
+    },
+    {
+      "name": "tunnel_fin_frame",
+      "bytes_hex": "080410af02da0108080a1014181e2001",
+      "expected": {
+        "seq": 4,
+        "timestamp": 303,
+        "session_id": 10,
+        "rule_id": 20,
+        "stream_id": 30,
+        "frame_type": "fin",
+        "payload_hex": ""
+      }
+    },
+    {
+      "name": "tunnel_unknown_frame_type_preserved",
+      "bytes_hex": "080510b002da010d080a1014181e204d2a03726177",
+      "expected": {
+        "seq": 5,
+        "timestamp": 304,
+        "session_id": 10,
+        "rule_id": 20,
+        "stream_id": 30,
+        "frame_type": "unknown",
+        "unknown_code": 77,
+        "payload_hex": "726177"
+      }
+    }
+  ]
+}

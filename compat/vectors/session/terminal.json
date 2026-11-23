@@ -1,0 +1,61 @@
+{
+  "suite": "session_terminal",
+  "cases": [
+    {
+      "name": "term_open_frame",
+      "bytes_hex": "5445524d0101000007000000280000007b22636f6c73223a3132302c22726f7773223a34302c227368656c6c223a222f62696e2f7368227d",
+      "expected": {
+        "kind": "term_frame",
+        "version": 1,
+        "frame_type": 1,
+        "session_id": 7,
+        "open_cols": 120,
+        "open_rows": 40,
+        "open_shell": "/bin/sh"
+      }
+    },
+    {
+      "name": "term_close_with_json_target",
+      "bytes_hex": "5445524d0104000000000000100000007b2273657373696f6e5f6964223a397d",
+      "expected": {
+        "kind": "term_frame",
+        "version": 1,
+        "frame_type": 4,
+        "session_id": 0,
+        "close_target_session_id": 9
+      }
+    },
+    {
+      "name": "terminal_check_env_request",
+      "bytes_hex": "080110c801aa01080a0308ad02e20100",
+      "expected": {
+        "kind": "check_env_request",
+        "seq": 1,
+        "timestamp": 200,
+        "request_id": 301
+      }
+    },
+    {
+      "name": "terminal_rename_session_response",
+      "bytes_hex": "080210c901b2010e0a0308ae02d2010608071a026f6b",
+      "expected": {
+        "kind": "rename_session_response",
+        "seq": 2,
+        "timestamp": 201,
+        "request_id": 302,
+        "session_id": 7,
+        "code": 0,
+        "message": "ok"
+      }
+    },
+    {
+      "name": "terminal_session_changed",
+      "bytes_hex": "080310ca01e20100",
+      "expected": {
+        "kind": "session_changed",
+        "seq": 3,
+        "timestamp": 202
+      }
+    }
+  ]
+}
