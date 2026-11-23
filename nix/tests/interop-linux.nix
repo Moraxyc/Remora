@@ -20,6 +20,112 @@ let
     exec sh -c 'systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE && systemctl --user start test-wayland-session.target'
   '';
 
+  tcpEchoServer = pkgs.writeText "tcp-echo.py" ''
+    import socket, threading
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 18081))
+    srv.listen(8)
+
+    def handle(conn):
+        with conn:
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                conn.sendall(data)
+
+    while True:
+        conn, _ = srv.accept()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+  '';
+
+  portmapClient = pkgs.writeText "portmap-client.py" ''
+    import socket
+
+    expected = b"remora-portmap-ok\n"
+    with socket.create_connection(("127.0.0.1", 18080), timeout=10) as s:
+        s.settimeout(10)
+        s.sendall(expected)
+        got = b""
+        while len(got) < len(expected):
+            chunk = s.recv(len(expected) - len(got))
+            assert chunk, f"short read: {got!r}"
+            got += chunk
+        assert got == expected, got
+  '';
+
+  terminalDriver = pkgs.writeText "terminal-driver.py" ''
+    import fcntl, os, pty, select, subprocess, sys, termios, time
+
+    device_id = sys.argv[1]
+    marker = "remora-term_ok_42"
+    cmd = "printf '%s-%s\\n' remora term_ok_42; exit\n"
+    master, slave = pty.openpty()
+
+    def preexec():
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    proc = subprocess.Popen(
+        ["uuremote-viewer", "terminal", device_id],
+        stdin=slave,
+        stdout=slave,
+        stderr=subprocess.PIPE,
+        preexec_fn=preexec,
+        close_fds=True,
+    )
+    os.close(slave)
+
+    buf = ""
+    sent = False
+    deadline = time.time() + 30
+    start = time.time()
+    while time.time() < deadline:
+        r, _, _ = select.select([master], [], [], 0.2)
+        if master in r:
+            try:
+                chunk = os.read(master, 4096).decode("utf-8", errors="replace")
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if marker in buf and proc.poll() is not None:
+                break
+        if not sent and (buf or time.time() - start >= 2.0):
+            os.write(master, cmd.encode("utf-8"))
+            sent = True
+        if proc.poll() is not None:
+            break
+
+    try:
+        rc = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc = proc.wait(timeout=5)
+    # Drain any trailing output after process exit.
+    while True:
+        r, _, _ = select.select([master], [], [], 0.05)
+        if master not in r:
+            break
+        try:
+            chunk = os.read(master, 4096).decode("utf-8", errors="replace")
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+    os.close(master)
+
+    if rc != 0 or marker not in buf:
+        err = proc.stderr.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"terminal interop failed (rc={rc}); pty={buf!r}; stderr={err!r}"
+        )
+  '';
+
   assistDriver = pkgs.writeText "assist-driver.py" ''
     import fcntl, json, os, pty, re, select, subprocess, termios, time
 
@@ -182,6 +288,7 @@ in
 
     viewer = {
       environment.systemPackages = [
+        pkgs.python3
         uuRemotePackage
         labPackage
       ];
@@ -261,6 +368,48 @@ in
               f"{env_prefix} uuremote-viewer files {host_device_id} get /tmp/host-received.txt /tmp/viewer-got.txt"
           )
           assert viewer.succeed("cat /tmp/viewer-got.txt") == "hello-from-viewer-over-remora\n"
+
+      with subtest("viewer opens TCP portmap tunnel through Remora to host"):
+          host.succeed("systemd-run --unit=tcp-echo --quiet python3 ${tcpEchoServer}")
+          host.wait_for_open_port(18081, "127.0.0.1")
+          viewer.succeed(
+              "systemd-run --unit=uu-portmap --quiet "
+              "-p Environment=HOME=/root "
+              "-p Environment=UU_BASE_URL=http://server:8680 "
+              "-p Environment=UU_SIGN_KEY=${signKeyValue} "
+              f"uuremote-viewer portmap {host_device_id} 18080 127.0.0.1 18081"
+          )
+          viewer.wait_for_open_port(18080, "127.0.0.1")
+          viewer.succeed("python3 ${portmapClient}")
+          viewer.succeed("systemctl stop uu-portmap.service")
+
+      with subtest("viewer runs remote terminal command on host through Remora"):
+          viewer.succeed(f"{env_prefix} python3 ${terminalDriver} {host_device_id}")
+
+      with subtest("remora-lab tool-interop exercises file, terminal, tunnel, system, and prefer_relay against uuremote-server"):
+          viewer.succeed(
+              "remora-lab tool-interop "
+              "--url http://server:8680 "
+              "--sign-key ${signKeyValue} "
+              f"--device-id {host_device_id} "
+              "--prefer-relay "
+              "--require-relayed "
+              "--read-dir /tmp "
+              "--tunnel-host 127.0.0.1 "
+              "--tunnel-port 18081 "
+              "--timeout-secs 30"
+          )
+          host.succeed("systemctl stop tcp-echo.service")
+
+      with subtest("remora-lab runs tool-channel and prefer_relay session scenarios against Remora + coturn"):
+          viewer.succeed(
+              "remora-lab run "
+              "${sessionScenarios}/03-tool-channels.yaml "
+              "${sessionScenarios}/04-prefer-relay.yaml "
+              "--target url "
+              "--url http://server:8680 "
+              "--sign-key ${signKeyValue}"
+          )
 
       with subtest("3-column session matrix passes lab<->lab (P2P), lab<->lab (relay), and lab<->uu-remote-linux"):
           viewer.succeed(

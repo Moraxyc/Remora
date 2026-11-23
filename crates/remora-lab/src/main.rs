@@ -7,13 +7,21 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::time::Duration;
 
 use remora_endpoint::Endpoint;
-use remora_endpoint::role::{HostConfig, HostSession, ViewerConfig, ViewerSession};
+use remora_endpoint::role::{HostConfig, HostSession, ToolEvent, ViewerConfig, ViewerSession};
 use remora_proto::control::{JoinShareByCodeRequest, ShareControlModeRequest, SignKey};
+use remora_proto::pb::{self, file_transfer_ftp_request, file_transfer_ftp_response, rpc_request};
 use remora_proto::profile;
+use remora_proto::session::DataChannel;
+use remora_proto::session::control::ControlMessage;
+use remora_proto::session::file::FileMessage;
+use remora_proto::session::system::SystemMessage;
+use remora_proto::session::terminal::TerminalControlMessage;
+use remora_proto::session::tunnel::{TunnelFrame, TunnelFrameType, TunnelSyn, decode_syn_ack};
 
 use remora_lab::error::LabError;
 use remora_lab::headless::{
-    AnnexBFileVideoSource, HeadlessPlatform, RecordingInputSink, synthetic_annex_b_sample,
+    AnnexBFileVideoSource, HeadlessPlatform, RecordingInputSink, spawn_headless_tool_responder,
+    synthetic_annex_b_sample,
 };
 use remora_lab::matrix::{SessionMatrixConfig, run_matrix, run_session_matrix};
 use remora_lab::scenario::{Scenario, ScenarioResult, run_scenario};
@@ -175,6 +183,42 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         expect_frames: u64,
         /// Maximum seconds to wait before failing.
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+    },
+    /// Exercise file, terminal, tunnel, system, and relay preferences against a live host device.
+    ToolInterop {
+        /// Remora base URL (e.g. http://server:8680).
+        #[arg(long)]
+        url: String,
+        /// Request signing key.
+        #[arg(long, default_value = "remora-lab-sign-key")]
+        sign_key: String,
+        /// Disable request signing.
+        #[arg(long)]
+        no_sign_key: bool,
+        /// Target host device ID.
+        #[arg(long)]
+        device_id: String,
+        /// Force TURN relay on the viewer peer.
+        #[arg(long)]
+        force_relay: bool,
+        /// Prefer TURN relay (falling back to direct ICE when unavailable).
+        #[arg(long)]
+        prefer_relay: bool,
+        /// Require the negotiated ICE transport to be relayed.
+        #[arg(long)]
+        require_relayed: bool,
+        /// Remote directory path to list via FileTransferFtp::ReadDir.
+        #[arg(long, default_value = "/tmp")]
+        read_dir: String,
+        /// Optional TCP host reachable from the remote host for PortMappingFrame echo check.
+        #[arg(long)]
+        tunnel_host: Option<String>,
+        /// Optional TCP port paired with `--tunnel-host`.
+        #[arg(long)]
+        tunnel_port: Option<u16>,
+        /// Maximum seconds to wait per operation.
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
     },
@@ -408,6 +452,42 @@ async fn dispatch(cmd: Command) -> Result<bool, LabError> {
             )
             .await
         }
+        Command::ToolInterop {
+            url,
+            sign_key,
+            no_sign_key,
+            device_id,
+            force_relay,
+            prefer_relay,
+            require_relayed,
+            read_dir,
+            tunnel_host,
+            tunnel_port,
+            timeout_secs,
+        } => {
+            let effective_key = (!no_sign_key).then_some(sign_key.as_str());
+            let tunnel = match (tunnel_host, tunnel_port) {
+                (Some(host), Some(port)) => Some((host, port)),
+                (None, None) => None,
+                _ => {
+                    return Err(LabError::Scenario(
+                        "--tunnel-host and --tunnel-port must be specified together".into(),
+                    ));
+                }
+            };
+            run_tool_interop(
+                &url,
+                effective_key,
+                &device_id,
+                force_relay,
+                prefer_relay,
+                require_relayed,
+                &read_dir,
+                tunnel,
+                Duration::from_secs(timeout_secs),
+            )
+            .await
+        }
         Command::Record => {
             record::run_placeholder()?;
             Ok(true)
@@ -521,9 +601,10 @@ async fn run_serve_host(
         force_relay,
         ..Default::default()
     };
-    let session = HostSession::start(&endpoint, Box::new(platform), cfg)
+    let mut session = HostSession::start(&endpoint, Box::new(platform), cfg)
         .await
         .map_err(|e| LabError::Scenario(format!("serve-host start failed: {e}")))?;
+    let tool_task = spawn_headless_tool_responder(&mut session);
     let device_id = session.device_id().to_owned();
 
     let tmp_ready = ready_file.with_extension("tmp");
@@ -556,11 +637,295 @@ async fn run_serve_host(
     };
 
     session.close().await;
+    if let Some(task) = tool_task {
+        let _ = tokio::time::timeout(Duration::from_millis(250), task).await;
+    }
     let _ = endpoint
         .http()
         .device_unbind(&login.token, &device_id, Some(&device_id))
         .await;
     Ok(ok)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_interop(
+    base_url: &str,
+    sign_key: Option<&str>,
+    device_id: &str,
+    force_relay: bool,
+    prefer_relay: bool,
+    require_relayed: bool,
+    read_dir: &str,
+    tunnel: Option<(String, u16)>,
+    timeout: Duration,
+) -> Result<bool, LabError> {
+    let prof = profile::by_id("windows-4.48.2")
+        .ok_or_else(|| LabError::Scenario("missing windows-4.48.2 profile".into()))?;
+    let mut builder = Endpoint::builder(prof)
+        .base_url(base_url)
+        .device_name("remora-lab-tool-interop")
+        .auto_reconnect(false);
+    if let Some(key) = sign_key {
+        builder = builder.sign_key(SignKey::new(key));
+    }
+    let endpoint = builder
+        .build()
+        .map_err(|e| LabError::Scenario(format!("build endpoint: {e}")))?;
+    endpoint
+        .login()
+        .await
+        .map_err(|e| LabError::Scenario(format!("tool-interop login failed: {e}")))?;
+
+    let cfg = ViewerConfig {
+        force_relay,
+        prefer_relay,
+        connect_timeout: timeout,
+        ..Default::default()
+    };
+    let mut session =
+        ViewerSession::connect(&endpoint, device_id, Box::new(HeadlessPlatform::new()), cfg)
+            .await
+            .map_err(|e| LabError::Scenario(format!("tool-interop connect failed: {e}")))?;
+    let mut tool_rx = session
+        .take_tool_events()
+        .ok_or_else(|| LabError::Scenario("missing viewer tool_events receiver".into()))?;
+
+    let stats = session
+        .wait_tool_channels_ready(timeout)
+        .await
+        .map_err(|e| LabError::Scenario(format!("tool-interop channels ready failed: {e}")))?;
+    if require_relayed && !stats.is_relayed {
+        session.close().await;
+        return Err(LabError::Scenario(
+            "tool-interop expected relayed ICE transport".into(),
+        ));
+    }
+
+    let result = async {
+        // 1. File channel: ReadDir sent on CONTROL, reply expected on FILE.
+        session
+            .send_file_request(
+                DataChannel::Control,
+                101,
+                file_transfer_ftp_request::Which::ReadDir(pb::ReadDir {
+                    id: Some(pb::TaskId {
+                        task_id: 1,
+                        file_index: 0,
+                    }),
+                    path: read_dir.to_owned(),
+                }),
+            )
+            .await
+            .map_err(|e| LabError::Scenario(format!("send read_dir failed: {e}")))?;
+        let file_err = wait_for_tool(&mut tool_rx, timeout, |ev| match ev {
+            ToolEvent::File(msg) => match msg.as_ref() {
+                FileMessage::Response {
+                    request_id: 101,
+                    response,
+                    ..
+                } => match &response.which {
+                    Some(file_transfer_ftp_response::Which::FileDirectory(dir)) => {
+                        Some(dir.file_error)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .await?;
+        if file_err != pb::FileTransferError::FtSucceeded as i32 {
+            return Err(LabError::Scenario(format!(
+                "tool-interop read_dir returned file_error={file_err}"
+            )));
+        }
+
+        // 2. Terminal control RPC: CheckEnvReq -> CheckEnvResp(code=0).
+        session
+            .send_control(ControlMessage::RpcRequest {
+                seq: 102,
+                timestamp: 0,
+                request: pb::RpcRequest {
+                    request_header: Some(pb::RequestHeader { request_id: 102 }),
+                    which: Some(rpc_request::Which::TerminalCheckEnvReq(pb::CheckEnvReq {})),
+                },
+            })
+            .await
+            .map_err(|e| LabError::Scenario(format!("send check_env failed: {e}")))?;
+        let env_code = wait_for_tool(&mut tool_rx, timeout, |ev| match ev {
+            ToolEvent::TerminalControl(TerminalControlMessage::CheckEnvResponse {
+                request_id: 102,
+                code,
+                ..
+            }) => Some(*code),
+            _ => None,
+        })
+        .await?;
+        if env_code != 0 {
+            return Err(LabError::Scenario(format!(
+                "tool-interop check_env returned code={env_code}"
+            )));
+        }
+
+        // 3. System RPC: VirtualAudioDriverPolicyReq -> VirtualAudioPolicyResponse(error_code=0).
+        session
+            .send_control(ControlMessage::RpcRequest {
+                seq: 103,
+                timestamp: 0,
+                request: pb::RpcRequest {
+                    request_header: Some(pb::RequestHeader { request_id: 103 }),
+                    which: Some(rpc_request::Which::VirtualAudioDriverPolicyReq(
+                        pb::VirtualAudioDriverPolicyRequest { policy: 0 },
+                    )),
+                },
+            })
+            .await
+            .map_err(|e| LabError::Scenario(format!("send virtual audio probe failed: {e}")))?;
+        let audio_err = wait_for_tool(&mut tool_rx, timeout, |ev| match ev {
+            ToolEvent::System(msg) => match msg.as_ref() {
+                SystemMessage::VirtualAudioPolicyResponse {
+                    request_id: 103,
+                    error_code,
+                    ..
+                } => Some(*error_code),
+                _ => None,
+            },
+            _ => None,
+        })
+        .await?;
+        if audio_err != 0 {
+            return Err(LabError::Scenario(format!(
+                "tool-interop virtual audio probe returned error_code={audio_err}"
+            )));
+        }
+
+        // 4. Optional PortMappingFrame tunnel echo check against a live TCP endpoint.
+        if let Some((host, port)) = tunnel {
+            let syn_payload = serde_json::to_vec(&TunnelSyn {
+                version: 1,
+                target_host: host,
+                target_port: port,
+            })?;
+            session
+                .send_tunnel_frame(TunnelFrame {
+                    seq: 104,
+                    timestamp: 0,
+                    session_id: 1,
+                    rule_id: 1,
+                    stream_id: 1,
+                    frame_type: TunnelFrameType::Syn,
+                    payload: syn_payload,
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel syn failed: {e}")))?;
+            let syn_ok = wait_for_tool(&mut tool_rx, timeout, |ev| match ev {
+                ToolEvent::Tunnel(f)
+                    if f.session_id == 1
+                        && f.rule_id == 1
+                        && f.stream_id == 1
+                        && f.frame_type == TunnelFrameType::SynAck =>
+                {
+                    decode_syn_ack(&f.payload).ok().map(|ack| ack.ok)
+                }
+                _ => None,
+            })
+            .await?;
+            if !syn_ok {
+                return Err(LabError::Scenario(
+                    "tool-interop tunnel SYN_ACK returned ok=false".into(),
+                ));
+            }
+
+            let probe = b"remora-lab-tunnel-ok
+"
+            .to_vec();
+            session
+                .send_tunnel_frame(TunnelFrame {
+                    seq: 105,
+                    timestamp: 0,
+                    session_id: 1,
+                    rule_id: 1,
+                    stream_id: 1,
+                    frame_type: TunnelFrameType::Data,
+                    payload: probe.clone(),
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel data failed: {e}")))?;
+
+            let mut received = Vec::new();
+            let deadline = tokio::time::Instant::now() + timeout;
+            while received.len() < probe.len() {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let chunk = wait_for_tool(&mut tool_rx, remaining, |ev| match ev {
+                    ToolEvent::Tunnel(f)
+                        if f.session_id == 1
+                            && f.rule_id == 1
+                            && f.stream_id == 1
+                            && f.frame_type == TunnelFrameType::Data =>
+                    {
+                        Some(f.payload.clone())
+                    }
+                    _ => None,
+                })
+                .await?;
+                received.extend_from_slice(&chunk);
+            }
+            if received != probe {
+                return Err(LabError::Scenario(format!(
+                    "tool-interop tunnel echo mismatch: got {} bytes",
+                    received.len()
+                )));
+            }
+
+            session
+                .send_tunnel_frame(TunnelFrame {
+                    seq: 106,
+                    timestamp: 0,
+                    session_id: 1,
+                    rule_id: 1,
+                    stream_id: 1,
+                    frame_type: TunnelFrameType::Fin,
+                    payload: Vec::new(),
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel fin failed: {e}")))?;
+        }
+
+        Ok::<(), LabError>(())
+    }
+    .await;
+
+    session.close().await;
+    result?;
+    Ok(true)
+}
+
+async fn wait_for_tool<T>(
+    rx: &mut tokio::sync::mpsc::Receiver<ToolEvent>,
+    timeout: Duration,
+    mut matcher: impl FnMut(&ToolEvent) -> Option<T>,
+) -> Result<T, LabError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(ev)) => {
+                if let Some(val) = matcher(&ev) {
+                    return Ok(val);
+                }
+            }
+            Ok(None) => {
+                return Err(LabError::Scenario(
+                    "tool_events channel closed while waiting for reply".into(),
+                ));
+            }
+            Err(_) => {
+                return Err(LabError::Scenario(format!(
+                    "timed out waiting for tool reply after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+        }
+    }
 }
 
 async fn run_assist_join(
