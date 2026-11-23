@@ -15,7 +15,7 @@ use remora_endpoint::client::socket::SignalingSocket;
 use remora_endpoint::platform::Platform;
 use remora_endpoint::record::{TraceActor, TraceRecord, TraceRecorder};
 use remora_endpoint::role::{
-    AuthorizationDecision, HostConfig, HostSession, ViewerConfig, ViewerSession,
+    AuthorizationDecision, HostConfig, HostSession, ToolEvent, ViewerConfig, ViewerSession,
 };
 use remora_proto::control::signing::{PARAM_PREFIX, SIGN_HEADER, SignKey, sign};
 use remora_proto::control::{
@@ -27,9 +27,18 @@ use remora_proto::control::{
 };
 use remora_proto::machine::Timestamp;
 use remora_proto::machine::signaling::{SignalingEvent, SignalingMachine};
-use remora_proto::pb;
+use remora_proto::pb::{
+    self, draw_request, draw_response, file_transfer_ftp_request, file_transfer_ftp_response,
+    rpc_request,
+};
 use remora_proto::profile::{self, Profile};
+use remora_proto::session::DataChannel;
+use remora_proto::session::control::ControlMessage;
+use remora_proto::session::file::FileMessage;
 use remora_proto::session::input::InputMessage;
+use remora_proto::session::system::SystemMessage;
+use remora_proto::session::terminal::{TERM_VERSION, TermFrame, TerminalControlMessage};
+use remora_proto::session::tunnel::{TunnelFrame, TunnelFrameType, TunnelSyn, decode_syn_ack};
 use remora_proto::signal::{ControlAck, SignalEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,7 +49,7 @@ use url::Url;
 use crate::error::LabError;
 use crate::headless::{
     AnnexBFileVideoSource, HeadlessPlatform, MemoryClipboard, RecordingInputSink,
-    ScriptedInputSource, synthetic_annex_b_sample,
+    ScriptedInputSource, spawn_headless_tool_responder, synthetic_annex_b_sample,
 };
 use crate::redact::{find_secret_leak, redact_value};
 use crate::scenario::model::{
@@ -183,7 +192,10 @@ struct ActorState {
     last_peer_client_id: Option<String>,
     ws: Option<WsHandle>,
     host_session: Option<HostSession>,
+    host_tool_task: Option<JoinHandle<()>>,
     viewer_session: Option<ViewerSession>,
+    viewer_tool_rx: Option<mpsc::Receiver<ToolEvent>>,
+    next_tool_req_id: i64,
     input_sink: Option<RecordingInputSink>,
     clipboard_mirror: Option<MemoryClipboard>,
     sent_inputs: Vec<InputMessage>,
@@ -369,7 +381,10 @@ pub async fn run_scenario(
                 last_peer_client_id: None,
                 ws: None,
                 host_session: None,
+                host_tool_task: None,
                 viewer_session: None,
+                viewer_tool_rx: None,
+                next_tool_req_id: 1,
                 input_sink: None,
                 clipboard_mirror: None,
                 sent_inputs: Vec::new(),
@@ -398,12 +413,14 @@ pub async fn run_scenario(
 
     // Close any open sessions and WebSockets cleanly before reading final logs/traces.
     for actor_mutex in env.actors.values() {
-        let (ws, viewer_sess, host_sess) = {
+        let (ws, viewer_sess, host_sess, host_tool_task) = {
             let mut guard = actor_mutex.lock().await;
+            guard.viewer_tool_rx = None;
             (
                 guard.ws.take(),
                 guard.viewer_session.take(),
                 guard.host_session.take(),
+                guard.host_tool_task.take(),
             )
         };
         if let Some(sess) = viewer_sess {
@@ -411,6 +428,9 @@ pub async fn run_scenario(
         }
         if let Some(sess) = host_sess {
             sess.close().await;
+        }
+        if let Some(task) = host_tool_task {
+            let _ = tokio::time::timeout(Duration::from_millis(250), task).await;
         }
         if let Some(handle) = ws {
             handle.close().await;
@@ -1941,16 +1961,20 @@ async fn execute_action_step(
         }
         StepAction::SessionHostStart {
             force_relay,
+            prefer_relay,
             reject_reason,
             loop_video,
         } => {
-            let (ep, prev_host) = {
+            let (ep, prev_host, prev_tool_task) = {
                 let mut actor = actor_mutex.lock().await;
                 let ep = build_actor_endpoint(&actor, env, None)?;
-                (ep, actor.host_session.take())
+                (ep, actor.host_session.take(), actor.host_tool_task.take())
             };
             if let Some(prev) = prev_host {
                 prev.close().await;
+            }
+            if let Some(task) = prev_tool_task {
+                let _ = tokio::time::timeout(Duration::from_millis(250), task).await;
             }
             let input_sink = RecordingInputSink::new();
             let clipboard = MemoryClipboard::new();
@@ -1962,6 +1986,7 @@ async fn execute_action_step(
 
             let mut cfg = HostConfig {
                 force_relay: *force_relay,
+                prefer_relay: *prefer_relay,
                 ..Default::default()
             };
             if let Some(reason) = reject_reason {
@@ -1971,9 +1996,10 @@ async fn execute_action_step(
                 }));
             }
 
-            let session = HostSession::start(&ep, Box::new(platform), cfg)
+            let mut session = HostSession::start(&ep, Box::new(platform), cfg)
                 .await
                 .map_err(|e| LabError::Scenario(format!("host session start failed: {e}")))?;
+            let tool_task = spawn_headless_tool_responder(&mut session);
             let dev_id = session.device_id().to_owned();
             {
                 let mut actor = actor_mutex.lock().await;
@@ -1981,6 +2007,7 @@ async fn execute_action_step(
                 actor.input_sink = Some(input_sink);
                 actor.clipboard_mirror = Some(clipboard);
                 actor.host_session = Some(session);
+                actor.host_tool_task = tool_task;
             }
             (
                 "session_host_start",
@@ -1992,6 +2019,7 @@ async fn execute_action_step(
                     payload: json!({
                         "device_id": dev_id,
                         "force_relay": force_relay,
+                        "prefer_relay": prefer_relay,
                     }),
                 },
             )
@@ -2000,6 +2028,7 @@ async fn execute_action_step(
             target,
             token,
             force_relay,
+            prefer_relay,
             force_join,
             timeout_ms,
         } => {
@@ -2010,6 +2039,7 @@ async fn execute_action_step(
             };
             let (ep, has_token, prev_viewer) = {
                 let mut actor = actor_mutex.lock().await;
+                actor.viewer_tool_rx = None;
                 let has_tok = explicit_tok.is_some() || actor.user_token.is_some();
                 let ep = build_actor_endpoint(&actor, env, explicit_tok.as_deref())?;
                 (ep, has_tok, actor.viewer_session.take())
@@ -2031,14 +2061,16 @@ async fn execute_action_step(
 
             let cfg = ViewerConfig {
                 force_relay: *force_relay,
+                prefer_relay: *prefer_relay,
                 force_join: *force_join,
                 connect_timeout: Duration::from_millis(*timeout_ms),
                 ..Default::default()
             };
 
-            let session = ViewerSession::connect(&ep, &target_id, Box::new(platform), cfg)
+            let mut session = ViewerSession::connect(&ep, &target_id, Box::new(platform), cfg)
                 .await
                 .map_err(|e| LabError::Scenario(format!("viewer connect failed: {e}")))?;
+            let tool_rx = session.take_tool_events();
             let stats = session
                 .wait_ready(Duration::from_millis(*timeout_ms))
                 .await
@@ -2049,6 +2081,7 @@ async fn execute_action_step(
                 actor.last_ice_id = Some(ice_id.clone());
                 actor.clipboard_mirror = Some(clipboard);
                 actor.viewer_session = Some(session);
+                actor.viewer_tool_rx = tool_rx;
             }
             (
                 "session_viewer_connect",
@@ -2131,6 +2164,7 @@ async fn execute_action_step(
             expected_clipboard,
             require_relayed,
             require_p2p,
+            require_tool_channels,
             timeout_ms,
         } => {
             let expected_clip = match expected_clipboard {
@@ -2143,6 +2177,7 @@ async fn execute_action_step(
                 let is_relayed;
                 let connected;
                 let peer_ready;
+                let tool_channels_ready;
                 let mut frames_ok = min_frames.is_none();
                 let mut inputs_ok = min_inputs.is_none();
                 let mut clip_ok = expected_clip.is_none();
@@ -2154,6 +2189,7 @@ async fn execute_action_step(
                         let st = vsess.stats();
                         connected = st.connected;
                         peer_ready = st.peer_ready;
+                        tool_channels_ready = st.tool_channels_ready;
                         is_relayed = st.is_relayed;
                         if let Some(min_f) = min_frames {
                             frames_ok = st.video_frames_received >= *min_f;
@@ -2178,6 +2214,7 @@ async fn execute_action_step(
                         let st = hsess.stats();
                         connected = st.connected;
                         peer_ready = st.peer_ready;
+                        tool_channels_ready = st.tool_channels_ready;
                         is_relayed = st.is_relayed;
                         if let Some(min_i) = min_inputs {
                             let count = actor
@@ -2212,10 +2249,16 @@ async fn execute_action_step(
                         ok = false;
                         diag = "expected direct P2P ICE transport, got relayed".into();
                     }
+                    if *require_tool_channels == Some(true) && !(peer_ready && tool_channels_ready)
+                    {
+                        ok = false;
+                        diag = "waiting for peer_ready and tool data channels (TEXT/FILE/BINARY)"
+                            .into();
+                    }
                 }
 
                 if ok {
-                    break json!({
+                    let mut payload = json!({
                         "connected": connected,
                         "peer_ready": peer_ready,
                         "is_relayed": is_relayed,
@@ -2223,6 +2266,10 @@ async fn execute_action_step(
                         "min_inputs_met": inputs_ok,
                         "clipboard_matched": clip_ok,
                     });
+                    if require_tool_channels.is_some() {
+                        payload["tool_channels_ready"] = json!(tool_channels_ready);
+                    }
+                    break payload;
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(LabError::Scenario(format!(
@@ -2265,16 +2312,669 @@ async fn execute_action_step(
                 },
             )
         }
-        StepAction::SessionClose => {
-            let (viewer_sess, host_sess) = {
+        StepAction::SessionFileReadDir {
+            path,
+            task_id,
+            channel,
+            timeout_ms,
+        } => {
+            let resolved_path = env.resolve_template(path).await;
+            let dc = parse_data_channel(channel.as_deref())?;
+            let (req_id, resp) = {
                 let mut actor = actor_mutex.lock().await;
-                (actor.viewer_session.take(), actor.host_session.take())
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_file_request(
+                    dc,
+                    req_id,
+                    file_transfer_ftp_request::Which::ReadDir(pb::ReadDir {
+                        id: Some(pb::TaskId {
+                            task_id: *task_id,
+                            file_index: 0,
+                        }),
+                        path: resolved_path.clone(),
+                    }),
+                )
+                .await
+                .map_err(|e| LabError::Scenario(format!("send read_dir failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                let dir = wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::File(msg) => match msg.as_ref() {
+                        FileMessage::Response {
+                            request_id,
+                            response,
+                            ..
+                        } if *request_id == req_id => match &response.which {
+                            Some(file_transfer_ftp_response::Which::FileDirectory(dir)) => {
+                                Some(dir.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?;
+                (req_id, dir)
+            };
+            (
+                "session_file_read_dir",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("file_directory".into()),
+                    payload: json!({
+                        "request_id": req_id,
+                        "task_id": resp.id.as_ref().map(|id| id.task_id),
+                        "path": resp.path,
+                        "file_error": resp.file_error,
+                        "entry_count": resp.entries.len(),
+                    }),
+                },
+            )
+        }
+        StepAction::SessionFileBlock {
+            task_id,
+            file_index,
+            block_id,
+            data,
+            timeout_ms,
+        } => {
+            let resolved_data = env.resolve_template(data).await;
+            let resp = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_file_request(
+                    DataChannel::File,
+                    req_id,
+                    file_transfer_ftp_request::Which::FileBlock(pb::FileTransferBlock {
+                        id: Some(pb::TaskId {
+                            task_id: *task_id,
+                            file_index: *file_index,
+                        }),
+                        block_id: *block_id,
+                        data: resolved_data.into_bytes(),
+                    }),
+                )
+                .await
+                .map_err(|e| LabError::Scenario(format!("send file_block failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::File(msg) => match msg.as_ref() {
+                        FileMessage::Response {
+                            request_id,
+                            response,
+                            ..
+                        } if *request_id == req_id => match &response.which {
+                            Some(file_transfer_ftp_response::Which::BlockConfirm(confirm)) => {
+                                Some(*confirm)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_file_block",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("file_block_confirm".into()),
+                    payload: json!({
+                        "task_id": resp.id.as_ref().map(|id| id.task_id),
+                        "file_index": resp.id.as_ref().map(|id| id.file_index),
+                        "block_id": resp.block_id,
+                        "block_len": resp.block_len,
+                        "err": resp.err,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionFileRemoveDir {
+            path,
+            task_id,
+            recursive,
+            timeout_ms,
+        } => {
+            let resolved_path = env.resolve_template(path).await;
+            let resp = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_file_request(
+                    DataChannel::File,
+                    req_id,
+                    file_transfer_ftp_request::Which::RemoveDir(pb::FileRemoveDir {
+                        id: Some(pb::TaskId {
+                            task_id: *task_id,
+                            file_index: 0,
+                        }),
+                        path: resolved_path,
+                        recursive: *recursive,
+                    }),
+                )
+                .await
+                .map_err(|e| LabError::Scenario(format!("send remove_dir failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::File(msg) => match msg.as_ref() {
+                        FileMessage::Response {
+                            request_id,
+                            response,
+                            ..
+                        } if *request_id == req_id => match &response.which {
+                            Some(file_transfer_ftp_response::Which::Result(result)) => {
+                                Some(result.clone())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_file_remove_dir",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("file_remove_dir_result".into()),
+                    payload: json!({
+                        "task_id": resp.id.as_ref().map(|id| id.task_id),
+                        "file_error": resp.file_error,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionTerminalCheckEnv { timeout_ms } => {
+            let (code, message) = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_control(ControlMessage::RpcRequest {
+                    seq: req_id,
+                    timestamp: 0,
+                    request: pb::RpcRequest {
+                        request_header: Some(pb::RequestHeader { request_id: req_id }),
+                        which: Some(rpc_request::Which::TerminalCheckEnvReq(pb::CheckEnvReq {})),
+                    },
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send terminal check_env failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::TerminalControl(TerminalControlMessage::CheckEnvResponse {
+                        request_id,
+                        code,
+                        message,
+                        ..
+                    }) if *request_id == req_id => Some((*code, message.clone())),
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_terminal_check_env",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("terminal_check_env".into()),
+                    payload: json!({
+                        "code": code,
+                        "message": message,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionTerminalRoundtrip {
+            session_id,
+            input,
+            close_header_session_id,
+            timeout_ms,
+        } => {
+            let resolved_input = env.resolve_template(input).await;
+            let timeout = Duration::from_millis(*timeout_ms);
+            let close_hdr_id = close_header_session_id.unwrap_or(*session_id);
+            let (opened, echoed, closed_target, close_reply_header_id) = {
+                let mut actor = actor_mutex.lock().await;
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                let open_payload = serde_json::to_vec(&json!({
+                    "cols": 80,
+                    "rows": 24,
+                    "shell": "/bin/sh",
+                }))
+                .unwrap_or_default();
+                sess.send_term_frame(TermFrame {
+                    version: TERM_VERSION,
+                    frame_type: 1,
+                    flags: [0, 0],
+                    session_id: *session_id,
+                    payload: open_payload,
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send term open failed: {e}")))?;
+
+                let open_ack = {
+                    let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                        LabError::Scenario("actor has no viewer tool_events receiver".into())
+                    })?;
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::TermFrame(f)
+                            if f.frame_type == 1 && f.session_id == *session_id =>
+                        {
+                            let v: Value = serde_json::from_slice(&f.payload).ok()?;
+                            v.get("ok").and_then(Value::as_bool)
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+
+                let sess = actor.viewer_session.as_ref().unwrap();
+                sess.send_term_frame(TermFrame {
+                    version: TERM_VERSION,
+                    frame_type: 2,
+                    flags: [0, 0],
+                    session_id: *session_id,
+                    payload: resolved_input.into_bytes(),
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send term data failed: {e}")))?;
+
+                let echoed = {
+                    let rx = actor.viewer_tool_rx.as_mut().unwrap();
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::TermFrame(f)
+                            if f.frame_type == 2 && f.session_id == *session_id =>
+                        {
+                            Some(String::from_utf8_lossy(&f.payload).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+
+                let close_payload = if close_header_session_id.is_some() {
+                    serde_json::to_vec(&json!({ "session_id": *session_id })).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let sess = actor.viewer_session.as_ref().unwrap();
+                sess.send_term_frame(TermFrame {
+                    version: TERM_VERSION,
+                    frame_type: 4,
+                    flags: [0, 0],
+                    session_id: close_hdr_id,
+                    payload: close_payload,
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send term close failed: {e}")))?;
+
+                let (closed_target, close_reply_hdr) = {
+                    let rx = actor.viewer_tool_rx.as_mut().unwrap();
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::TermFrame(f)
+                            if f.frame_type == 4 && f.session_id == close_hdr_id =>
+                        {
+                            let v: Value = serde_json::from_slice(&f.payload).ok()?;
+                            let target = v.get("closed_session_id")?.as_u64()?;
+                            Some((target, f.session_id))
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+                (open_ack, echoed, closed_target, close_reply_hdr)
+            };
+            (
+                "session_terminal_roundtrip",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("terminal_ok".into()),
+                    payload: json!({
+                        "opened": opened,
+                        "echoed": echoed,
+                        "closed_session_id": closed_target,
+                        "close_reply_header_id": close_reply_header_id,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionTunnelRoundtrip {
+            session_id,
+            rule_id,
+            stream_id,
+            target_host,
+            target_port,
+            data,
+            timeout_ms,
+        } => {
+            let resolved_data = env.resolve_template(data).await;
+            let timeout = Duration::from_millis(*timeout_ms);
+            let (syn_ack_ok, echoed, fin_received) = {
+                let mut actor = actor_mutex.lock().await;
+                let syn_payload = serde_json::to_vec(&TunnelSyn {
+                    version: 1,
+                    target_host: target_host.clone(),
+                    target_port: *target_port,
+                })
+                .unwrap_or_default();
+                let seq1 = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_tunnel_frame(TunnelFrame {
+                    seq: seq1,
+                    timestamp: 0,
+                    session_id: *session_id,
+                    rule_id: *rule_id,
+                    stream_id: *stream_id,
+                    frame_type: TunnelFrameType::Syn,
+                    payload: syn_payload,
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel syn failed: {e}")))?;
+
+                let syn_ack_ok = {
+                    let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                        LabError::Scenario("actor has no viewer tool_events receiver".into())
+                    })?;
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::Tunnel(f)
+                            if f.session_id == *session_id
+                                && f.rule_id == *rule_id
+                                && f.stream_id == *stream_id
+                                && f.frame_type == TunnelFrameType::SynAck =>
+                        {
+                            decode_syn_ack(&f.payload).ok().map(|ack| ack.ok)
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+
+                let seq2 = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().unwrap();
+                sess.send_tunnel_frame(TunnelFrame {
+                    seq: seq2,
+                    timestamp: 0,
+                    session_id: *session_id,
+                    rule_id: *rule_id,
+                    stream_id: *stream_id,
+                    frame_type: TunnelFrameType::Data,
+                    payload: resolved_data.into_bytes(),
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel data failed: {e}")))?;
+
+                let echoed = {
+                    let rx = actor.viewer_tool_rx.as_mut().unwrap();
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::Tunnel(f)
+                            if f.session_id == *session_id
+                                && f.rule_id == *rule_id
+                                && f.stream_id == *stream_id
+                                && f.frame_type == TunnelFrameType::Data =>
+                        {
+                            Some(String::from_utf8_lossy(&f.payload).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+
+                let seq3 = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().unwrap();
+                sess.send_tunnel_frame(TunnelFrame {
+                    seq: seq3,
+                    timestamp: 0,
+                    session_id: *session_id,
+                    rule_id: *rule_id,
+                    stream_id: *stream_id,
+                    frame_type: TunnelFrameType::Fin,
+                    payload: Vec::new(),
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send tunnel fin failed: {e}")))?;
+
+                let fin_ok = {
+                    let rx = actor.viewer_tool_rx.as_mut().unwrap();
+                    wait_tool_event(rx, timeout, |ev| match ev {
+                        ToolEvent::Tunnel(f)
+                            if f.session_id == *session_id
+                                && f.rule_id == *rule_id
+                                && f.stream_id == *stream_id
+                                && f.frame_type == TunnelFrameType::Fin =>
+                        {
+                            Some(true)
+                        }
+                        _ => None,
+                    })
+                    .await?
+                };
+                (syn_ack_ok, echoed, fin_ok)
+            };
+            (
+                "session_tunnel_roundtrip",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("tunnel_ok".into()),
+                    payload: json!({
+                        "syn_ack_ok": syn_ack_ok,
+                        "echoed": echoed,
+                        "fin_received": fin_received,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionSystemPrivacy {
+            enable,
+            privacy_type,
+            timeout_ms,
+        } => {
+            let resp = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_control(ControlMessage::RpcRequest {
+                    seq: req_id,
+                    timestamp: 0,
+                    request: pb::RpcRequest {
+                        request_header: Some(pb::RequestHeader { request_id: req_id }),
+                        which: Some(rpc_request::Which::PrivateScreenSetting(
+                            pb::PrivateScreenSettingRequest {
+                                enable: *enable,
+                                privacy_type: *privacy_type,
+                                setting_source: String::new(),
+                            },
+                        )),
+                    },
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send privacy request failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::System(msg) => match msg.as_ref() {
+                        SystemMessage::PrivacyResponse {
+                            request_id,
+                            response,
+                            ..
+                        } if *request_id == req_id => Some(*response),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_system_privacy",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("privacy_response".into()),
+                    payload: json!({
+                        "error_code": resp.error_code,
+                        "req_privacy_type": resp.req_privacy_type,
+                        "cur_privacy_type": resp.cur_privacy_type,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionSystemDraw { enable, timeout_ms } => {
+            let error_code = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_control(ControlMessage::RpcRequest {
+                    seq: req_id,
+                    timestamp: 0,
+                    request: pb::RpcRequest {
+                        request_header: Some(pb::RequestHeader { request_id: req_id }),
+                        which: Some(rpc_request::Which::DrawReq(pb::DrawRequest {
+                            which: Some(draw_request::Which::ToggleRequest(
+                                pb::DrawToggleRequest { enable: *enable },
+                            )),
+                        })),
+                    },
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send draw toggle failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::System(msg) => match msg.as_ref() {
+                        SystemMessage::DrawResponse {
+                            request_id,
+                            response,
+                            ..
+                        } if *request_id == req_id => match &response.which {
+                            Some(draw_response::Which::ToggleResponse(t)) => Some(t.error_code),
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_system_draw",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("draw_response".into()),
+                    payload: json!({
+                        "error_code": error_code,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionSystemVirtualAudioProbe { policy, timeout_ms } => {
+            let error_code = {
+                let mut actor = actor_mutex.lock().await;
+                let req_id = alloc_tool_req_id(&mut actor);
+                let sess = actor.viewer_session.as_ref().ok_or_else(|| {
+                    LabError::Scenario("actor has no active viewer_session".into())
+                })?;
+                sess.send_control(ControlMessage::RpcRequest {
+                    seq: req_id,
+                    timestamp: 0,
+                    request: pb::RpcRequest {
+                        request_header: Some(pb::RequestHeader { request_id: req_id }),
+                        which: Some(rpc_request::Which::VirtualAudioDriverPolicyReq(
+                            pb::VirtualAudioDriverPolicyRequest { policy: *policy },
+                        )),
+                    },
+                })
+                .await
+                .map_err(|e| LabError::Scenario(format!("send virtual audio probe failed: {e}")))?;
+                let rx = actor.viewer_tool_rx.as_mut().ok_or_else(|| {
+                    LabError::Scenario("actor has no viewer tool_events receiver".into())
+                })?;
+                wait_tool_event(rx, Duration::from_millis(*timeout_ms), |ev| match ev {
+                    ToolEvent::System(msg) => match msg.as_ref() {
+                        SystemMessage::VirtualAudioPolicyResponse {
+                            request_id,
+                            error_code,
+                            ..
+                        } if *request_id == req_id => Some(*error_code),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .await?
+            };
+            (
+                "session_system_virtual_audio_probe",
+                StepOutcome {
+                    http_status: None,
+                    code: None,
+                    ack_status: None,
+                    event_name: Some("virtual_audio_response".into()),
+                    payload: json!({
+                        "error_code": error_code,
+                    }),
+                },
+            )
+        }
+        StepAction::SessionClose => {
+            let (viewer_sess, host_sess, host_tool_task) = {
+                let mut actor = actor_mutex.lock().await;
+                actor.viewer_tool_rx = None;
+                (
+                    actor.viewer_session.take(),
+                    actor.host_session.take(),
+                    actor.host_tool_task.take(),
+                )
             };
             if let Some(sess) = viewer_sess {
                 sess.close().await;
             }
             if let Some(sess) = host_sess {
                 sess.close().await;
+            }
+            if let Some(task) = host_tool_task {
+                let _ = tokio::time::timeout(Duration::from_millis(250), task).await;
             }
             (
                 "session_close",
@@ -2327,6 +3027,52 @@ async fn execute_action_step(
     ));
 
     Ok(())
+}
+
+fn alloc_tool_req_id(actor: &mut ActorState) -> i64 {
+    let id = actor.next_tool_req_id;
+    actor.next_tool_req_id += 1;
+    id
+}
+
+fn parse_data_channel(raw: Option<&str>) -> Result<DataChannel, LabError> {
+    match raw.unwrap_or("file") {
+        "file" | "FILE_DATA_CHANNEL" => Ok(DataChannel::File),
+        "control" | "CONTROL_DATA_CHANNEL" => Ok(DataChannel::Control),
+        "text" | "TEXT_DATA_CHANNEL" => Ok(DataChannel::Text),
+        "binary" | "BINARY_DATA_CHANNEL" => Ok(DataChannel::Binary),
+        other => Err(LabError::Scenario(format!(
+            "unsupported data channel `{other}`"
+        ))),
+    }
+}
+
+async fn wait_tool_event<T>(
+    rx: &mut mpsc::Receiver<ToolEvent>,
+    timeout: Duration,
+    mut matcher: impl FnMut(&ToolEvent) -> Option<T>,
+) -> Result<T, LabError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(ev)) => {
+                if let Some(matched) = matcher(&ev) {
+                    return Ok(matched);
+                }
+            }
+            Ok(None) => {
+                return Err(LabError::Scenario(
+                    "viewer tool_events channel closed before expected reply".into(),
+                ));
+            }
+            Err(_) => {
+                return Err(LabError::Scenario(format!(
+                    "timed out waiting for tool event after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+        }
+    }
 }
 
 fn build_actor_endpoint(

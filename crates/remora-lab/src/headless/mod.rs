@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod clipboard;
 pub mod input;
+pub mod tools;
 pub mod video;
 
 use remora_endpoint::platform::{
@@ -12,6 +13,7 @@ use remora_endpoint::platform::{
 pub use audio::{CountingAudioSink, SilenceAudioSource};
 pub use clipboard::MemoryClipboard;
 pub use input::{RecordingInputSink, ScriptedInputSource};
+pub use tools::spawn_headless_tool_responder;
 pub use video::{AnnexBFileVideoSource, CountingVideoSink, synthetic_annex_b_sample};
 
 /// Complete headless endpoint platform combining scripted/file sources and counting/recording sinks.

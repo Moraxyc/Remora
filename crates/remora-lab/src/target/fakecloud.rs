@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use futures_util::SinkExt;
+use prost::Message as _;
 use remora_proto::control::{
     AssistDeviceRecord, AssistFavoritesRequest, CancelRemoteAssistRequest, JoinShareByCodeRequest,
     JoinShareByConfirmationRequest, ShareConfirmationRequest, ShareControlMode,
@@ -2930,7 +2931,7 @@ async fn handle_ws_event(
                             ice_id.clone(),
                             (ticket.device_id.clone(), conn_id.to_owned(), ticket.shared),
                         );
-                        let bc = json!({
+                        let mut bc = json!({
                             "ice_id": ice_id,
                             "client_id": conn_id,
                             "app_control_id": ctrl.app_control_id,
@@ -2938,6 +2939,9 @@ async fn handle_ws_event(
                             "force_relay": false,
                             "app_data": placeholder(0),
                         });
+                        if let Some(platform) = controller_platform(&ctrl.connect_options) {
+                            bc["controller_platform"] = platform.into();
+                        }
                         let batch_host = vec![
                             WsOut::Text(encode_binary_event("be-controlled", &[bc], 1, None)),
                             WsOut::Binary(ctrl.connect_options),
@@ -3046,4 +3050,15 @@ async fn handle_ws_event(
         }
         _ => {}
     }
+}
+
+fn controller_platform(connect_options: &[u8]) -> Option<u8> {
+    let options = remora_proto::pb::ConnectOptions::decode(connect_options).ok()?;
+    Some(match options.client_type {
+        3 => 1, // Windows
+        2 => 2, // Android
+        1 => 3, // iOS
+        4 => 4, // macOS
+        _ => return None,
+    })
 }

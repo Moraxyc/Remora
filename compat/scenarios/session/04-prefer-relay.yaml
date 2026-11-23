@@ -1,0 +1,82 @@
+name: 04-prefer-relay
+description: Lab Host and Viewer use prefer_relay over a TURN-capable cloud and verify relayed transport with media and input
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: session-prefer-relay-host
+  viewer:
+    kind: viewer
+    device_name: session-prefer-relay-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: session_host_start
+    prefer_relay: true
+    loop_video: true
+
+  - actor: viewer
+    action: session_viewer_connect
+    target: host
+    token: "${host.user_token}"
+    prefer_relay: true
+    expect:
+      ack_status: success
+      json_eq:
+        connected: true
+        peer_ready: true
+        is_relayed: true
+
+  - actor: viewer
+    action: session_wait
+    min_frames: 3
+    require_relayed: true
+    expect:
+      json_eq:
+        min_frames_met: true
+        is_relayed: true
+
+  - actor: viewer
+    action: session_send_input
+    kind: mouse_press
+    button: 16
+
+  - actor: host
+    action: session_wait
+    min_inputs: 1
+    require_relayed: true
+    expect:
+      json_eq:
+        min_inputs_met: true
+        is_relayed: true
+
+  - actor: viewer
+    action: session_close
+
+  - actor: host
+    action: session_close
+
+  - actor: viewer
+    action: user_logout
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

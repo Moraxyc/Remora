@@ -1,0 +1,172 @@
+name: 03-tool-channels
+description: Lab Host and Viewer exercise file, terminal, tunnel, and system tool channels over WebRTC data channels
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: session-tools-host
+  viewer:
+    kind: viewer
+    device_name: session-tools-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: session_host_start
+    force_relay: false
+    loop_video: true
+
+  - actor: viewer
+    action: session_viewer_connect
+    target: host
+    token: "${host.user_token}"
+    force_relay: false
+    expect:
+      ack_status: success
+      json_eq:
+        connected: true
+        peer_ready: true
+
+  - actor: viewer
+    action: session_wait
+    require_tool_channels: true
+    expect:
+      json_eq:
+        tool_channels_ready: true
+
+  - actor: host
+    action: session_wait
+    require_tool_channels: true
+    expect:
+      json_eq:
+        tool_channels_ready: true
+
+  # File channel: ReadDir sent on CONTROL with iOS :/Default alias, reply received on FILE
+  - actor: viewer
+    action: session_file_read_dir
+    path: ":/Default"
+    task_id: 11
+    channel: control
+    expect:
+      json_eq:
+        task_id: 11
+        path: "/downloads"
+        file_error: 1
+        entry_count: 1
+
+  # File channel: block transfer confirm preserves task_id, block_id, and block_len
+  - actor: viewer
+    action: session_file_block
+    task_id: 11
+    file_index: 1
+    block_id: 3
+    data: "hello-file-block"
+    expect:
+      json_eq:
+        task_id: 11
+        file_index: 1
+        block_id: 3
+        block_len: 16
+        err: 1
+
+  # File channel: RemoveDir replies with FileTransferResult (6) carrying task_id
+  - actor: viewer
+    action: session_file_remove_dir
+    path: "/downloads/tmp"
+    task_id: 12
+    recursive: true
+    expect:
+      json_eq:
+        task_id: 12
+        file_error: 1
+
+  # Terminal control RPC + BINARY TERM framing (including JSON close-target override)
+  - actor: viewer
+    action: session_terminal_check_env
+    expect:
+      json_eq:
+        code: 0
+        message: "ok"
+
+  - actor: viewer
+    action: session_terminal_roundtrip
+    session_id: 7
+    input: "whoami"
+    close_header_session_id: 0
+    expect:
+      json_eq:
+        opened: true
+        echoed: "echo:whoami"
+        closed_session_id: 7
+        close_reply_header_id: 0
+
+  # Port-mapping tunnel SYN / SYN_ACK / DATA / FIN over FILE_DATA_CHANNEL
+  - actor: viewer
+    action: session_tunnel_roundtrip
+    session_id: 10
+    rule_id: 20
+    stream_id: 30
+    target_host: "127.0.0.1"
+    target_port: 8080
+    data: "tunnel-ping"
+    expect:
+      json_eq:
+        syn_ack_ok: true
+        echoed: "tunnel-ping"
+        fin_received: true
+
+  # System RPCs: privacy screen (Windows enable=false + PS_NORMAL_PRIVACY -> Enable(normal) on TEXT),
+  # draw toggle reply on TEXT, and virtual audio no-op probe reply
+  - actor: viewer
+    action: session_system_privacy
+    enable: false
+    privacy_type: 2
+    expect:
+      json_eq:
+        error_code: 0
+        req_privacy_type: 2
+        cur_privacy_type: 2
+
+  - actor: viewer
+    action: session_system_draw
+    enable: true
+    expect:
+      json_eq:
+        error_code: 0
+
+  - actor: viewer
+    action: session_system_virtual_audio_probe
+    policy: 1
+    expect:
+      json_eq:
+        error_code: 0
+
+  - actor: viewer
+    action: session_close
+
+  - actor: host
+    action: session_close
+
+  - actor: viewer
+    action: user_logout
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

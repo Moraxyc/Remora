@@ -366,6 +366,8 @@ pub enum StepAction {
         #[serde(default)]
         force_relay: bool,
         #[serde(default)]
+        prefer_relay: bool,
+        #[serde(default)]
         reject_reason: Option<String>,
         #[serde(default = "default_true")]
         loop_video: bool,
@@ -376,6 +378,8 @@ pub enum StepAction {
         token: Option<String>,
         #[serde(default)]
         force_relay: bool,
+        #[serde(default)]
+        prefer_relay: bool,
         #[serde(default)]
         force_join: bool,
         #[serde(default = "default_session_timeout_ms")]
@@ -412,6 +416,80 @@ pub enum StepAction {
         require_relayed: Option<bool>,
         #[serde(default)]
         require_p2p: Option<bool>,
+        #[serde(default)]
+        require_tool_channels: Option<bool>,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionFileReadDir {
+        path: String,
+        #[serde(default = "default_task_id")]
+        task_id: i32,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionFileBlock {
+        #[serde(default = "default_task_id")]
+        task_id: i32,
+        #[serde(default)]
+        file_index: i32,
+        #[serde(default)]
+        block_id: i32,
+        data: String,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionFileRemoveDir {
+        path: String,
+        #[serde(default = "default_task_id")]
+        task_id: i32,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionTerminalCheckEnv {
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionTerminalRoundtrip {
+        #[serde(default = "default_term_session_id")]
+        session_id: u32,
+        input: String,
+        #[serde(default)]
+        close_header_session_id: Option<u32>,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionTunnelRoundtrip {
+        #[serde(default = "default_u64_one")]
+        session_id: u64,
+        #[serde(default = "default_u64_one")]
+        rule_id: u64,
+        #[serde(default = "default_u64_one")]
+        stream_id: u64,
+        target_host: String,
+        target_port: u16,
+        data: String,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionSystemPrivacy {
+        enable: bool,
+        privacy_type: i32,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionSystemDraw {
+        enable: bool,
+        #[serde(default = "default_session_timeout_ms")]
+        timeout_ms: u64,
+    },
+    SessionSystemVirtualAudioProbe {
+        #[serde(default)]
+        policy: i32,
         #[serde(default = "default_session_timeout_ms")]
         timeout_ms: u64,
     },
@@ -440,6 +518,18 @@ fn default_frame_count() -> u64 {
 
 fn default_session_timeout_ms() -> u64 {
     10_000
+}
+
+fn default_task_id() -> i32 {
+    1
+}
+
+fn default_term_session_id() -> u32 {
+    1
+}
+
+fn default_u64_one() -> u64 {
+    1
 }
 
 /// Assertions evaluated after a step finishes.
