@@ -22,7 +22,7 @@ hmac = "0.13.0"
 http = "1.5.0"
 md-5 = "0.11.0"
 prost = "0.14.6"
-rand = "0.9.5"
+rand = "0.10.0"
 remora-endpoint = { path = "../remora-endpoint", features = ["client", "peer", "record"] }
 remora-proto = { path = "../remora-proto" }
 reqwest = "0.13.5"
