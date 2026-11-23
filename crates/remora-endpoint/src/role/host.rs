@@ -10,8 +10,13 @@ use prost::Message as _;
 use remora_proto::machine::peer::{PeerRole, parse_ice_servers};
 use remora_proto::machine::signaling::SignalingEvent;
 use remora_proto::pb;
-use remora_proto::session::control::feature_flag_from_caps;
+use remora_proto::session::DataChannel;
+use remora_proto::session::control::{ControlMessage, feature_flag_from_caps};
+use remora_proto::session::terminal::TermFrame;
+use remora_proto::session::tunnel::TunnelFrame;
 use remora_proto::signal::SignalEvent;
+
+use super::{HostToolEvent, ToolEvent};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -22,6 +27,7 @@ use crate::{Endpoint, EndpointError, RoomEventStream, RoomSender};
 
 const HOST_CMD_CAP: usize = 64;
 const PEER_EVENT_CAP: usize = 256;
+const TOOL_EVENT_CAP: usize = 128;
 
 /// Metadata supplied to the host's authorization callback on incoming `be-controlled` requests.
 #[derive(Debug, Clone)]
@@ -51,6 +57,7 @@ pub type HostAuthorizer = Arc<dyn Fn(&AuthorizationRequest) -> AuthorizationDeci
 pub struct HostConfig {
     pub authorizer: Option<HostAuthorizer>,
     pub force_relay: bool,
+    pub prefer_relay: bool,
     pub enable_hevc: bool,
     pub enable_audio: bool,
     pub video_width: i32,
@@ -67,6 +74,7 @@ impl fmt::Debug for HostConfig {
         f.debug_struct("HostConfig")
             .field("has_authorizer", &self.authorizer.is_some())
             .field("force_relay", &self.force_relay)
+            .field("prefer_relay", &self.prefer_relay)
             .field("enable_hevc", &self.enable_hevc)
             .field("enable_audio", &self.enable_audio)
             .field("replace_existing_desktop", &self.replace_existing_desktop)
@@ -79,6 +87,7 @@ impl Default for HostConfig {
         Self {
             authorizer: None,
             force_relay: false,
+            prefer_relay: false,
             enable_hevc: false,
             enable_audio: true,
             video_width: 1920,
@@ -101,6 +110,7 @@ pub struct HostStats {
     pub rejected_sessions: u64,
     pub connected: bool,
     pub peer_ready: bool,
+    pub tool_channels_ready: bool,
     pub is_relayed: bool,
     pub video_frames_sent: u64,
     pub audio_frames_sent: u64,
@@ -114,7 +124,167 @@ enum HostCommand {
     PushVideoFrame(EncodedVideoFrame),
     PushAudioFrame(EncodedAudioFrame),
     SetClipboard(String),
+    SendFileResponse {
+        ice_id: Option<String>,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    },
+    SendTunnelFrame {
+        ice_id: Option<String>,
+        frame: TunnelFrame,
+    },
+    SendTermFrame {
+        ice_id: Option<String>,
+        frame: TermFrame,
+    },
+    SendTerminalSessionChanged {
+        ice_id: Option<String>,
+    },
+    SendPrivacyResponse {
+        ice_id: Option<String>,
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    },
+    SendDrawResponse {
+        ice_id: Option<String>,
+        request_id: i64,
+        response: pb::DrawResponse,
+    },
+    SendVirtualAudioPolicyResponse {
+        ice_id: Option<String>,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    },
+    SendControl {
+        ice_id: Option<String>,
+        msg: ControlMessage,
+    },
     Close,
+}
+
+/// Cloneable weak handle for sending tool-channel and system replies through a running [`HostSession`].
+///
+/// Holding a `HostToolSender` does not keep the host command channel open after `HostSession` is dropped.
+#[derive(Clone, Debug)]
+pub struct HostToolSender {
+    cmd_tx: mpsc::WeakSender<HostCommand>,
+}
+
+impl HostToolSender {
+    async fn send(&self, cmd: HostCommand) -> Result<(), EndpointError> {
+        let tx = self
+            .cmd_tx
+            .upgrade()
+            .ok_or(EndpointError::SignalingClosed)?;
+        tx.send(cmd)
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_file_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendFileResponse {
+            ice_id: ice_id.map(str::to_owned),
+            request_id,
+            which,
+        })
+        .await
+    }
+
+    pub async fn send_tunnel_frame(
+        &self,
+        ice_id: Option<&str>,
+        frame: TunnelFrame,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendTunnelFrame {
+            ice_id: ice_id.map(str::to_owned),
+            frame,
+        })
+        .await
+    }
+
+    pub async fn send_term_frame(
+        &self,
+        ice_id: Option<&str>,
+        frame: TermFrame,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendTermFrame {
+            ice_id: ice_id.map(str::to_owned),
+            frame,
+        })
+        .await
+    }
+
+    pub async fn send_terminal_session_changed(
+        &self,
+        ice_id: Option<&str>,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendTerminalSessionChanged {
+            ice_id: ice_id.map(str::to_owned),
+        })
+        .await
+    }
+
+    pub async fn send_privacy_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendPrivacyResponse {
+            ice_id: ice_id.map(str::to_owned),
+            request_id,
+            response,
+        })
+        .await
+    }
+
+    pub async fn send_draw_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        response: pb::DrawResponse,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendDrawResponse {
+            ice_id: ice_id.map(str::to_owned),
+            request_id,
+            response,
+        })
+        .await
+    }
+
+    pub async fn send_virtual_audio_policy_response(
+        &self,
+        ice_id: Option<&str>,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendVirtualAudioPolicyResponse {
+            ice_id: ice_id.map(str::to_owned),
+            channel,
+            request_id,
+            error_code,
+        })
+        .await
+    }
+
+    pub async fn send_control(
+        &self,
+        ice_id: Option<&str>,
+        msg: ControlMessage,
+    ) -> Result<(), EndpointError> {
+        self.send(HostCommand::SendControl {
+            ice_id: ice_id.map(str::to_owned),
+            msg,
+        })
+        .await
+    }
 }
 
 /// Managed host session driving signaling, authorization, WebRTC peers, and [`Platform`] I/O.
@@ -122,6 +292,7 @@ pub struct HostSession {
     device_id: String,
     cmd_tx: mpsc::Sender<HostCommand>,
     stats_rx: watch::Receiver<HostStats>,
+    tool_events: Option<mpsc::Receiver<HostToolEvent>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -177,6 +348,7 @@ impl HostSession {
         };
         let (cmd_tx, cmd_rx) = mpsc::channel(HOST_CMD_CAP);
         let (stats_tx, stats_rx) = watch::channel(initial_stats);
+        let (tool_tx, tool_rx) = mpsc::channel(TOOL_EVENT_CAP);
 
         let supervisor = HostSupervisor {
             config,
@@ -191,6 +363,7 @@ impl HostSession {
                 ..Default::default()
             },
             stats_tx,
+            tool_tx,
             peers: HashMap::new(),
             last_clipboard_sent: None,
         };
@@ -200,6 +373,7 @@ impl HostSession {
             device_id,
             cmd_tx,
             stats_rx,
+            tool_events: Some(tool_rx),
             task: Some(task),
         })
     }
@@ -229,6 +403,138 @@ impl HostSession {
     pub async fn set_clipboard(&self, text: impl Into<String>) -> Result<(), EndpointError> {
         self.cmd_tx
             .send(HostCommand::SetClipboard(text.into()))
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    /// Takes ownership of the bounded inbound tool-channel event receiver.
+    pub fn take_tool_events(&mut self) -> Option<mpsc::Receiver<HostToolEvent>> {
+        self.tool_events.take()
+    }
+
+    /// Returns a cloneable weak sender for tool-channel and system replies.
+    pub fn tool_sender(&self) -> HostToolSender {
+        HostToolSender {
+            cmd_tx: self.cmd_tx.downgrade(),
+        }
+    }
+
+    pub async fn send_file_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendFileResponse {
+                ice_id: ice_id.map(str::to_owned),
+                request_id,
+                which,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_tunnel_frame(
+        &self,
+        ice_id: Option<&str>,
+        frame: TunnelFrame,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendTunnelFrame {
+                ice_id: ice_id.map(str::to_owned),
+                frame,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_term_frame(
+        &self,
+        ice_id: Option<&str>,
+        frame: TermFrame,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendTermFrame {
+                ice_id: ice_id.map(str::to_owned),
+                frame,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_terminal_session_changed(
+        &self,
+        ice_id: Option<&str>,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendTerminalSessionChanged {
+                ice_id: ice_id.map(str::to_owned),
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_privacy_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendPrivacyResponse {
+                ice_id: ice_id.map(str::to_owned),
+                request_id,
+                response,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_draw_response(
+        &self,
+        ice_id: Option<&str>,
+        request_id: i64,
+        response: pb::DrawResponse,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendDrawResponse {
+                ice_id: ice_id.map(str::to_owned),
+                request_id,
+                response,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_virtual_audio_policy_response(
+        &self,
+        ice_id: Option<&str>,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendVirtualAudioPolicyResponse {
+                ice_id: ice_id.map(str::to_owned),
+                channel,
+                request_id,
+                error_code,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_control(
+        &self,
+        ice_id: Option<&str>,
+        msg: ControlMessage,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(HostCommand::SendControl {
+                ice_id: ice_id.map(str::to_owned),
+                msg,
+            })
             .await
             .map_err(|_| EndpointError::SignalingClosed)
     }
@@ -264,8 +570,10 @@ impl HostSession {
 
 struct ActiveHostPeer {
     sender: PeerSender,
+    controller_platform: Option<u8>,
     is_desktop: bool,
     ready: bool,
+    tool_channels_ready: bool,
     closing: bool,
     forward_task: JoinHandle<()>,
 }
@@ -280,6 +588,7 @@ struct HostSupervisor {
     cmd_rx: mpsc::Receiver<HostCommand>,
     stats: HostStats,
     stats_tx: watch::Sender<HostStats>,
+    tool_tx: mpsc::Sender<HostToolEvent>,
     peers: HashMap<String, ActiveHostPeer>,
     last_clipboard_sent: Option<String>,
 }
@@ -366,6 +675,53 @@ impl HostSupervisor {
                             self.last_clipboard_sent = Some(text.clone());
                             self.broadcast_clipboard(&text).await;
                         }
+                        Some(HostCommand::SendFileResponse { ice_id, request_id, which }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_file_response(request_id, which).await;
+                            }
+                        }
+                        Some(HostCommand::SendTunnelFrame { ice_id, frame }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_tunnel_frame(frame).await;
+                            }
+                        }
+                        Some(HostCommand::SendTermFrame { ice_id, frame }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_term_frame(frame).await;
+                            }
+                        }
+                        Some(HostCommand::SendTerminalSessionChanged { ice_id }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_terminal_session_changed().await;
+                            }
+                        }
+                        Some(HostCommand::SendPrivacyResponse { ice_id, request_id, response }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_privacy_response(request_id, response).await;
+                            }
+                        }
+                        Some(HostCommand::SendDrawResponse { ice_id, request_id, response }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_draw_response(request_id, response).await;
+                            }
+                        }
+                        Some(HostCommand::SendVirtualAudioPolicyResponse {
+                            ice_id,
+                            channel,
+                            request_id,
+                            error_code,
+                        }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender
+                                    .send_virtual_audio_policy_response(channel, request_id, error_code)
+                                    .await;
+                            }
+                        }
+                        Some(HostCommand::SendControl { ice_id, msg }) => {
+                            if let Some(sender) = self.resolve_peer_sender(ice_id.as_deref()) {
+                                let _ = sender.send_control(msg).await;
+                            }
+                        }
                         Some(HostCommand::Close) | None => {
                             break;
                         }
@@ -440,6 +796,7 @@ impl HostSupervisor {
         peer_cfg.app_control_id = bc.app_control_id;
         peer_cfg.ice_servers = parse_ice_servers(&bc.ice_servers);
         peer_cfg.force_relay = bc.force_relay || self.config.force_relay;
+        peer_cfg.prefer_relay = self.config.prefer_relay;
         peer_cfg.controller_platform = bc.controller_platform;
         peer_cfg.feature_flag = self.host_features;
         peer_cfg.enable_hevc = self.config.enable_hevc;
@@ -467,8 +824,10 @@ impl HostSupervisor {
                     bc.ice_id.clone(),
                     ActiveHostPeer {
                         sender,
+                        controller_platform: bc.controller_platform,
                         is_desktop,
                         ready: false,
+                        tool_channels_ready: false,
                         closing: false,
                         forward_task,
                     },
@@ -489,6 +848,21 @@ impl HostSupervisor {
                 self.stats.connected = true;
                 self.stats.is_relayed = is_relayed;
                 self.publish_stats();
+            }
+            PeerSessionEvent::ToolChannelsReady { .. } => {
+                if let Some(peer) = self.peers.get_mut(ice_id) {
+                    peer.tool_channels_ready = true;
+                    self.stats.tool_channels_ready = true;
+                    self.publish_stats();
+                }
+            }
+            PeerSessionEvent::ToolChannelsClosed { .. } => {
+                if let Some(peer) = self.peers.get_mut(ice_id) {
+                    peer.tool_channels_ready = false;
+                    self.stats.tool_channels_ready =
+                        self.peers.values().any(|p| p.tool_channels_ready);
+                    self.publish_stats();
+                }
             }
             PeerSessionEvent::PeerReady { .. } => {
                 let mut should_pump = false;
@@ -519,6 +893,21 @@ impl HostSupervisor {
                 }
                 self.stats.clipboard_received += 1;
                 self.publish_stats();
+            }
+            PeerSessionEvent::File(msg) => {
+                self.forward_tool_event(ice_id, ToolEvent::File(msg));
+            }
+            PeerSessionEvent::Tunnel(frame) => {
+                self.forward_tool_event(ice_id, ToolEvent::Tunnel(frame));
+            }
+            PeerSessionEvent::TermFrame(frame) => {
+                self.forward_tool_event(ice_id, ToolEvent::TermFrame(frame));
+            }
+            PeerSessionEvent::TerminalControl(msg) => {
+                self.forward_tool_event(ice_id, ToolEvent::TerminalControl(msg));
+            }
+            PeerSessionEvent::System(msg) => {
+                self.forward_tool_event(ice_id, ToolEvent::System(msg));
             }
             PeerSessionEvent::Closed { .. } => {
                 self.remove_peer(ice_id).await;
@@ -616,12 +1005,37 @@ impl HostSupervisor {
         }
     }
 
+    fn resolve_peer_sender(&self, ice_id: Option<&str>) -> Option<&PeerSender> {
+        if let Some(id) = ice_id {
+            return self.peers.get(id).filter(|p| !p.closing).map(|p| &p.sender);
+        }
+        if let Some(last) = &self.stats.last_peer_ice_id
+            && let Some(peer) = self.peers.get(last)
+            && !peer.closing
+        {
+            return Some(&peer.sender);
+        }
+        self.peers.values().find(|p| !p.closing).map(|p| &p.sender)
+    }
+
+    fn forward_tool_event(&self, ice_id: &str, event: ToolEvent) {
+        let controller_platform = self.peers.get(ice_id).and_then(|p| p.controller_platform);
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.tool_tx.try_send(HostToolEvent {
+            ice_id: ice_id.to_owned(),
+            controller_platform,
+            event,
+        }) {
+            warn!(ice_id = %ice_id, "host tool_events queue full; dropped event");
+        }
+    }
+
     async fn remove_peer(&mut self, ice_id: &str) {
         if let Some(peer) = self.peers.remove(ice_id) {
             peer.sender.close().await;
             let _ = tokio::time::timeout(Duration::from_millis(200), peer.forward_task).await;
             self.stats.active_peers = self.peers.len();
             self.stats.peer_ready = self.peers.values().any(|p| p.ready);
+            self.stats.tool_channels_ready = self.peers.values().any(|p| p.tool_channels_ready);
             self.publish_stats();
         }
     }

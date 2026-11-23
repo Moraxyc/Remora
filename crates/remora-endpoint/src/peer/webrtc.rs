@@ -270,6 +270,7 @@ impl PeerSessionConfig {
 pub struct PeerStats {
     pub connected: bool,
     pub control_open: bool,
+    pub tool_channels_ready: bool,
     pub peer_ready: bool,
     pub is_relayed: bool,
     pub turn_packets_tx: u64,
@@ -291,6 +292,12 @@ pub enum PeerSessionEvent {
         is_relayed: bool,
     },
     ControlChannelReady {
+        ice_id: String,
+    },
+    ToolChannelsReady {
+        ice_id: String,
+    },
+    ToolChannelsClosed {
         ice_id: String,
     },
     PeerReady {
@@ -334,6 +341,14 @@ impl fmt::Debug for PeerSessionEvent {
                 .finish(),
             Self::ControlChannelReady { ice_id } => f
                 .debug_struct("ControlChannelReady")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::ToolChannelsReady { ice_id } => f
+                .debug_struct("ToolChannelsReady")
+                .field("ice_id", ice_id)
+                .finish(),
+            Self::ToolChannelsClosed { ice_id } => f
+                .debug_struct("ToolChannelsClosed")
                 .field("ice_id", ice_id)
                 .finish(),
             Self::PeerReady { ice_id } => {
@@ -657,7 +672,19 @@ impl PeerHandle {
         config: PeerSessionConfig,
         signaling: Arc<R>,
     ) -> Result<Self, PeerSessionError> {
-        let turn_alloc = TurnAllocation::allocate_first(&config.ice_servers).await?;
+        let turn_alloc = match TurnAllocation::allocate_first(&config.ice_servers).await {
+            Ok(alloc) => alloc,
+            Err(err) if !config.force_relay => {
+                warn!(
+                    ice_id = %config.ice_id,
+                    prefer_relay = config.prefer_relay,
+                    error = %err,
+                    "TURN allocation failed; falling back to direct ICE"
+                );
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
         let effective_force_relay = if turn_alloc.is_none() {
             if config.force_relay {
                 return Err(PeerSessionError::NoRelayAvailable);
@@ -1360,9 +1387,25 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     }
                     Str0mEvent::ChannelOpen(id, label) => {
                         let ch = self.registry.register_channel(id, &label);
+                        let mut stats_dirty = false;
                         if ch == DataChannel::Control {
                             self.stats.control_open = true;
+                            stats_dirty = true;
+                        }
+                        let mut emit_tool_ready = false;
+                        if !self.stats.tool_channels_ready && self.registry.has_tool_channels() {
+                            self.stats.tool_channels_ready = true;
+                            stats_dirty = true;
+                            emit_tool_ready = true;
+                        }
+                        if stats_dirty {
                             self.publish_stats();
+                        }
+                        if emit_tool_ready {
+                            self.emit(PeerSessionEvent::ToolChannelsReady {
+                                ice_id: self.config.ice_id.clone(),
+                            })
+                            .await;
                         }
                         let mnow = self.machine_now();
                         self.machine.on_channel_open(mnow, ch.clone())?;
@@ -1388,11 +1431,28 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                         }
                     }
                     Str0mEvent::ChannelClose(id) => {
-                        if let Some(ch) = self.registry.unregister_channel(id)
-                            && ch == DataChannel::Control
-                        {
-                            self.stats.control_open = false;
-                            self.publish_stats();
+                        if let Some(ch) = self.registry.unregister_channel(id) {
+                            let mut stats_dirty = false;
+                            if ch == DataChannel::Control {
+                                self.stats.control_open = false;
+                                stats_dirty = true;
+                            }
+                            let mut emit_tool_closed = false;
+                            if self.stats.tool_channels_ready && !self.registry.has_tool_channels()
+                            {
+                                self.stats.tool_channels_ready = false;
+                                stats_dirty = true;
+                                emit_tool_closed = true;
+                            }
+                            if stats_dirty {
+                                self.publish_stats();
+                            }
+                            if emit_tool_closed {
+                                self.emit(PeerSessionEvent::ToolChannelsClosed {
+                                    ice_id: self.config.ice_id.clone(),
+                                })
+                                .await;
+                            }
                         }
                     }
                     Str0mEvent::MediaData(data) => {
@@ -1790,6 +1850,40 @@ mod tests {
             PeerHandle::spawn(config, Arc::new(signaling)).await,
             Err(PeerSessionError::NoRelayAvailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn prefer_relay_with_invalid_turn_falls_back_while_force_relay_fails() {
+        let bad_server = IceServerSpec {
+            urls: vec!["turn:not-a-valid-port:abc".into()],
+            username: "u".into(),
+            credential: "p".into(),
+        };
+
+        let (signaling, _outgoing) = ChannelSignalingRelay::new();
+        let mut force_cfg = PeerSessionConfig::new(PeerRole::Viewer, "ice-force-bad-turn");
+        force_cfg.force_relay = true;
+        force_cfg.ice_servers = vec![bad_server.clone()];
+        assert!(matches!(
+            PeerHandle::spawn(force_cfg, Arc::new(signaling)).await,
+            Err(PeerSessionError::Ice(_))
+        ));
+
+        let (signaling, mut outgoing) = ChannelSignalingRelay::new();
+        let mut prefer_cfg = PeerSessionConfig::new(PeerRole::Viewer, "ice-prefer-bad-turn");
+        prefer_cfg.prefer_relay = true;
+        prefer_cfg.ice_servers = vec![bad_server];
+        let peer = PeerHandle::spawn(prefer_cfg, Arc::new(signaling))
+            .await
+            .unwrap();
+        let Some(PeerSignalingOut::Soac(_)) =
+            tokio::time::timeout(Duration::from_secs(2), outgoing.recv())
+                .await
+                .unwrap()
+        else {
+            panic!("expected direct ICE offer fallback");
+        };
+        peer.sender().close().await;
     }
 
     #[tokio::test]

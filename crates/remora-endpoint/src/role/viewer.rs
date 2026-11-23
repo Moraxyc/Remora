@@ -9,13 +9,18 @@ use rand::Rng as _;
 use remora_proto::machine::peer::{PeerRole, parse_ice_servers};
 use remora_proto::machine::signaling::SignalingEvent;
 use remora_proto::pb;
-use remora_proto::session::control::feature_flag_from_caps;
+use remora_proto::session::DataChannel;
+use remora_proto::session::control::{ControlMessage, feature_flag_from_caps};
 use remora_proto::session::input::InputMessage;
+use remora_proto::session::terminal::TermFrame;
+use remora_proto::session::tunnel::TunnelFrame;
+
+use super::ToolEvent;
 use remora_proto::signal::{ControlAck, SignalEvent, placeholder};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::peer::{PeerEventReceiver, PeerHandle, PeerSender, PeerSessionConfig, PeerSessionEvent};
 use crate::platform::Platform;
@@ -23,6 +28,7 @@ use crate::role::host::resolve_probe_target;
 use crate::{Endpoint, EndpointError, RoomEventStream, RoomSender};
 
 const VIEWER_CMD_CAP: usize = 64;
+const TOOL_EVENT_CAP: usize = 128;
 
 /// Configuration for [`ViewerSession`].
 #[derive(Debug, Clone)]
@@ -68,6 +74,7 @@ pub struct ViewerStats {
     pub ice_id: String,
     pub connected: bool,
     pub control_open: bool,
+    pub tool_channels_ready: bool,
     pub peer_ready: bool,
     pub is_relayed: bool,
     pub video_frames_received: u64,
@@ -82,6 +89,14 @@ pub struct ViewerStats {
 enum ViewerCommand {
     SendInput(InputMessage),
     SendClipboard(String),
+    SendFileRequest {
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    },
+    SendTunnelFrame(TunnelFrame),
+    SendTermFrame(TermFrame),
+    SendControl(ControlMessage),
     RequestKeyframe,
     Close,
 }
@@ -91,6 +106,7 @@ pub struct ViewerSession {
     ice_id: String,
     cmd_tx: mpsc::Sender<ViewerCommand>,
     stats_rx: watch::Receiver<ViewerStats>,
+    tool_events: Option<mpsc::Receiver<ToolEvent>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -307,6 +323,7 @@ impl ViewerSession {
         };
         let (cmd_tx, cmd_rx) = mpsc::channel(VIEWER_CMD_CAP);
         let (stats_tx, stats_rx) = watch::channel(initial_stats.clone());
+        let (tool_tx, tool_rx) = mpsc::channel(TOOL_EVENT_CAP);
 
         let supervisor = ViewerSupervisor {
             ice_id: ice_id.clone(),
@@ -319,6 +336,7 @@ impl ViewerSession {
             cmd_rx,
             stats: initial_stats,
             stats_tx,
+            tool_tx,
             last_clipboard_sent: None,
         };
         let task = tokio::spawn(supervisor.run());
@@ -327,6 +345,7 @@ impl ViewerSession {
             ice_id,
             cmd_tx,
             stats_rx,
+            tool_events: Some(tool_rx),
             task: Some(task),
         })
     }
@@ -353,6 +372,48 @@ impl ViewerSession {
             .map_err(|_| EndpointError::SignalingClosed)
     }
 
+    /// Takes ownership of the bounded inbound tool-channel event receiver.
+    pub fn take_tool_events(&mut self) -> Option<mpsc::Receiver<ToolEvent>> {
+        self.tool_events.take()
+    }
+
+    pub async fn send_file_request(
+        &self,
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    ) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(ViewerCommand::SendFileRequest {
+                channel,
+                request_id,
+                which,
+            })
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_tunnel_frame(&self, frame: TunnelFrame) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(ViewerCommand::SendTunnelFrame(frame))
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_term_frame(&self, frame: TermFrame) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(ViewerCommand::SendTermFrame(frame))
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
+    pub async fn send_control(&self, msg: ControlMessage) -> Result<(), EndpointError> {
+        self.cmd_tx
+            .send(ViewerCommand::SendControl(msg))
+            .await
+            .map_err(|_| EndpointError::SignalingClosed)
+    }
+
     pub async fn request_keyframe(&self) -> Result<(), EndpointError> {
         self.cmd_tx
             .send(ViewerCommand::RequestKeyframe)
@@ -363,6 +424,15 @@ impl ViewerSession {
     /// Waits until the echo handshake completes (`peer_ready == true`) or `timeout` expires.
     pub async fn wait_ready(&self, timeout: Duration) -> Result<ViewerStats, EndpointError> {
         self.wait_until(timeout, |s| s.peer_ready).await
+    }
+
+    /// Waits until echo handshake and all tool data channels (TEXT, FILE, BINARY) are open.
+    pub async fn wait_tool_channels_ready(
+        &self,
+        timeout: Duration,
+    ) -> Result<ViewerStats, EndpointError> {
+        self.wait_until(timeout, |s| s.peer_ready && s.tool_channels_ready)
+            .await
     }
 
     /// Waits until at least `min_frames` encoded video frames have arrived on the video track.
@@ -430,12 +500,19 @@ struct ViewerSupervisor {
     cmd_rx: mpsc::Receiver<ViewerCommand>,
     stats: ViewerStats,
     stats_tx: watch::Sender<ViewerStats>,
+    tool_tx: mpsc::Sender<ToolEvent>,
     last_clipboard_sent: Option<String>,
 }
 
 impl ViewerSupervisor {
     fn publish_stats(&self) {
         let _ = self.stats_tx.send(self.stats.clone());
+    }
+
+    fn forward_tool_event(&self, event: ToolEvent) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.tool_tx.try_send(event) {
+            warn!(ice_id = %self.ice_id, "viewer tool_events queue full; dropped event");
+        }
     }
 
     async fn run(mut self) {
@@ -489,6 +566,14 @@ impl ViewerSupervisor {
                             self.stats.control_open = true;
                             self.publish_stats();
                         }
+                        PeerSessionEvent::ToolChannelsReady { .. } => {
+                            self.stats.tool_channels_ready = true;
+                            self.publish_stats();
+                        }
+                        PeerSessionEvent::ToolChannelsClosed { .. } => {
+                            self.stats.tool_channels_ready = false;
+                            self.publish_stats();
+                        }
                         PeerSessionEvent::PeerReady { .. } => {
                             self.stats.peer_ready = true;
                             self.publish_stats();
@@ -521,6 +606,21 @@ impl ViewerSupervisor {
                             }
                             self.stats.clipboard_received += 1;
                             self.publish_stats();
+                        }
+                        PeerSessionEvent::File(msg) => {
+                            self.forward_tool_event(ToolEvent::File(msg));
+                        }
+                        PeerSessionEvent::Tunnel(frame) => {
+                            self.forward_tool_event(ToolEvent::Tunnel(frame));
+                        }
+                        PeerSessionEvent::TermFrame(frame) => {
+                            self.forward_tool_event(ToolEvent::TermFrame(frame));
+                        }
+                        PeerSessionEvent::TerminalControl(msg) => {
+                            self.forward_tool_event(ToolEvent::TerminalControl(msg));
+                        }
+                        PeerSessionEvent::System(msg) => {
+                            self.forward_tool_event(ToolEvent::System(msg));
                         }
                         PeerSessionEvent::Closed { .. } => {
                             break;
@@ -566,6 +666,25 @@ impl ViewerSupervisor {
                                 self.stats.clipboard_sent += 1;
                                 self.publish_stats();
                             }
+                        }
+                        Some(ViewerCommand::SendFileRequest {
+                            channel,
+                            request_id,
+                            which,
+                        }) => {
+                            let _ = self
+                                .peer_sender
+                                .send_file_request(channel, request_id, which)
+                                .await;
+                        }
+                        Some(ViewerCommand::SendTunnelFrame(frame)) => {
+                            let _ = self.peer_sender.send_tunnel_frame(frame).await;
+                        }
+                        Some(ViewerCommand::SendTermFrame(frame)) => {
+                            let _ = self.peer_sender.send_term_frame(frame).await;
+                        }
+                        Some(ViewerCommand::SendControl(msg)) => {
+                            let _ = self.peer_sender.send_control(msg).await;
                         }
                         Some(ViewerCommand::RequestKeyframe) => {
                             let _ = self.peer_sender.request_keyframe().await;

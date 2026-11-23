@@ -91,6 +91,14 @@ impl ChannelRegistry {
         self.label_to_id.get(ch).copied()
     }
 
+    /// Returns true once CONTROL, TEXT, FILE, and BINARY data channels are all open.
+    pub fn has_tool_channels(&self) -> bool {
+        self.channel_id(&DataChannel::Control).is_some()
+            && self.channel_id(&DataChannel::Text).is_some()
+            && self.channel_id(&DataChannel::File).is_some()
+            && self.channel_id(&DataChannel::Binary).is_some()
+    }
+
     pub fn set_video_tx_mid(&mut self, mid: Mid) {
         self.video_tx_mid = Some(mid);
     }
