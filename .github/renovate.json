@@ -4,6 +4,15 @@
     "github>Moraxyc/renovate-config",
     ":semanticCommitTypeAll(chore)"
   ],
+  "packageRules": [
+    {
+      "description": "Keep typescript on 6.x for @sveltejs/kit and svelte-check peerDependencies; tsgo already uses @typescript/native",
+      "matchManagers": ["npm"],
+      "matchDepNames": ["typescript"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ],
   "ignorePaths": [
     "**/node_modules/**",
     "**/bower_components/**",
