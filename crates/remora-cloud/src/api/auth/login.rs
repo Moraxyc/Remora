@@ -302,6 +302,17 @@ pub struct LoginResponse {
     token: String,
     user_id: String,
     nickname: String,
+    member_type: u8,
+    member_display_status: u8,
+    member_expired_at: u64,
+    member_additional_desc: &'static str,
+    member_trial_status: u8,
+    is_verified_realname: bool,
+    coin_balance: u64,
+    email: &'static str,
+    family_name: &'static str,
+    given_name: &'static str,
+    is_new_registration: bool,
 }
 
 /// `POST /api/v1/login/by_qrcode`: trades a confirmed QR login for a user token, once.
@@ -321,6 +332,17 @@ pub async fn by_qrcode(
         token: tokens.issue_user(&session),
         user_id: profile.id,
         nickname: profile.name,
+        member_type: 0,
+        member_display_status: 0,
+        member_expired_at: 0,
+        member_additional_desc: "",
+        member_trial_status: 0,
+        is_verified_realname: false,
+        coin_balance: 0,
+        email: "",
+        family_name: "",
+        given_name: "",
+        is_new_registration: false,
     }))
 }
 

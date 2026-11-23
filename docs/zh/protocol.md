@@ -160,7 +160,7 @@ Engine.IO 建立后，客户端发送 `"40"` 加入 Socket.IO 默认命名空间
 
 | 方向 | 事件名 | 载荷与处理行为 |
 |---|---|---|
-| Host → Cloud | `room_info`（带 Ack） | 被控端就绪通告。服务端回复 Ack `{}`，并立即向该被控端推送 `bmsg_push`：`{"data":{"status":"online","publisher_availability_status":"ready"}}`，房间随即进入在线可连接状态。 |
+| Host → Cloud | `room_info`（带 Ack） | 被控端就绪通告。服务端回复 Ack `{"room_id","publisher","you","subscribers","iceServers","reconnect_buffer"}`，并立即向该被控端推送 `bmsg_push`：`{"data":{"status":"online","publisher_availability_status":"ready"}}`，房间随即进入在线可连接状态。 |
 | Host / Viewer → Cloud | `refresh_reconnect_key`（带 Ack） | 服务端回复 Ack `["success", {"reconnect_key": "<32位十六进制>"}]`。 |
 | Viewer → Cloud | `control`（带 Ack，含 1 个二进制附件） | 请求建立控制会话。JSON 参数包含 `app_control_id`、可选 `streamer_data` 以及指向序列化 `gv_pb.ConnectOptions` 附件的 `app_data` 占位符。允许接入时，服务端分配 `ice_id` 与临时 TURN 凭据，向被控端发送 `be-controlled`，并向控制端回复 Ack `["success", {"ice_id", "client_id": <host_id>, "app_control_id", "iceServers", "force_relay"}]`；拒绝时回复 `["failure", {"reason": "host offline" \| "controlled from another device"}]`。 |
 | Cloud → Host | `be-controlled`（含 1 个二进制附件） | JSON 参数包含 `ice_id`、`client_id`（控制端连接 ID）、`app_control_id`、`iceServers`、`force_relay`、`app_data` 占位符、可选 `streamer_data`，以及由 `ConnectOptions.client_type` 映射的 `controller_platform`（`1` Windows、`2` Android、`3` iOS、`4` macOS）；二进制帧原样转发 `ConnectOptions`。 |

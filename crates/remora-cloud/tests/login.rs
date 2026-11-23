@@ -23,6 +23,17 @@ struct Login {
     token: String,
     user_id: String,
     nickname: Option<String>,
+    email: String,
+    member_expired_at: u64,
+    is_verified_realname: bool,
+    coin_balance: u64,
+    family_name: String,
+    given_name: String,
+    is_new_registration: bool,
+    member_type: Option<u8>,
+    member_display_status: Option<u8>,
+    member_additional_desc: Option<String>,
+    member_trial_status: Option<u8>,
 }
 
 async fn generate(app: &Router) -> Gen {
@@ -57,6 +68,17 @@ async fn qr_login_is_confirmed_and_yields_a_token_with_csrf() {
         .unwrap();
     assert!(!login.user_id.is_empty());
     assert!(login.nickname.is_some_and(|name| !name.is_empty()));
+    assert_eq!(login.email, "");
+    assert_eq!(login.member_expired_at, 0);
+    assert!(!login.is_verified_realname);
+    assert_eq!(login.coin_balance, 0);
+    assert_eq!(login.family_name, "");
+    assert_eq!(login.given_name, "");
+    assert!(!login.is_new_registration);
+    assert_eq!(login.member_type, Some(0));
+    assert_eq!(login.member_display_status, Some(0));
+    assert_eq!(login.member_additional_desc.as_deref(), Some(""));
+    assert_eq!(login.member_trial_status, Some(0));
 
     // Clients take `csrf` from the JWT payload and refuse tokens without it.
     let payload = login.token.split('.').nth(1).unwrap();

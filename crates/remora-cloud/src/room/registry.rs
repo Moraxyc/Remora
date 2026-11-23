@@ -634,7 +634,21 @@ impl RoomActor {
         match (&room.role, event) {
             (Role::Host, SignalEvent::RoomInfo(_)) => {
                 if let Some(ack_id) = ack_id {
-                    self.send_ack(&client_id, ack_id, vec![json!({})]).await;
+                    let participant = json!({
+                        "client_id": client_id,
+                        "device_id": self.device_id,
+                        "user_id": room.sub,
+                        "role": "publisher",
+                    });
+                    let info = json!({
+                        "room_id": self.device_id,
+                        "publisher": participant,
+                        "you": participant,
+                        "subscribers": [],
+                        "iceServers": [],
+                        "reconnect_buffer": 0,
+                    });
+                    self.send_ack(&client_id, ack_id, vec![info]).await;
                 }
                 let ready = json!({
                     "data": { "status": "online", "publisher_availability_status": "ready" }
