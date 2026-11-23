@@ -160,7 +160,7 @@ After receiving the Open frame, the client sends `"40"` to connect to the defaul
 
 | Direction | Event | Payload and Behavior |
 |---|---|---|
-| Host → Cloud | `room_info` (Ack) | Host readiness notification. The server acks `{}` and immediately sends `bmsg_push`: `{"data":{"status":"online","publisher_availability_status":"ready"}}`. The host now counts as online. |
+| Host → Cloud | `room_info` (Ack) | Host readiness notification. The server acks `{"room_id","publisher","you","subscribers","iceServers","reconnect_buffer"}` and immediately sends `bmsg_push`: `{"data":{"status":"online","publisher_availability_status":"ready"}}`. The host now counts as online. |
 | Host / Viewer → Cloud | `refresh_reconnect_key` (Ack) | Server acks `["success", {"reconnect_key": "<32-char-hex>"}]`. |
 | Viewer → Cloud | `control` (Ack + 1 binary frame) | Requests a control session. The JSON payload carries `app_control_id`, optional `streamer_data`, and an `app_data` placeholder pointing to serialized `gv_pb.ConnectOptions`. When granted, the server allocates an `ice_id` and 24-hour TURN credentials, emits `be-controlled` to the host, and acks `["success", {"ice_id", "client_id": <host_id>, "app_control_id", "iceServers", "force_relay"}]`; when refused, it acks `["failure", {"reason": "host offline" \| "controlled from another device"}]`. |
 | Cloud → Host | `be-controlled` (1 binary frame) | The JSON payload carries `ice_id`, `client_id` (viewer's connection ID), `app_control_id`, `iceServers`, `force_relay`, `app_data` placeholder, optional `streamer_data`, and `controller_platform` mapped from `ConnectOptions.client_type` (`1` Windows, `2` Android, `3` iOS, `4` macOS). The binary frame forwards the raw `ConnectOptions` bytes. |

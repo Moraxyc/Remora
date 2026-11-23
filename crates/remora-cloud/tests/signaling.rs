@@ -115,6 +115,21 @@ async fn host_comes_online() {
         panic!("expected the room_info ack");
     };
     assert_eq!(ack.id, 11);
+    let room_info = &ack.args[0];
+    assert!(
+        room_info["room_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(room_info["publisher"]["role"], "publisher");
+    assert_eq!(room_info["you"]["role"], "publisher");
+    assert_eq!(
+        room_info["publisher"]["client_id"],
+        room_info["you"]["client_id"]
+    );
+    assert!(room_info["subscribers"].is_array());
+    assert!(room_info["iceServers"].is_array());
+    assert_eq!(room_info["reconnect_buffer"], 0);
     let Some(Packet::Event(status)) = host.recv().await else {
         panic!("expected the device status");
     };
