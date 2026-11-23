@@ -4,6 +4,51 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+/// Windows `MK_*` wire masks for mouse buttons, plus the legacy middle-button code.
+pub mod mouse_button {
+    pub const LEFT: i32 = 1;
+    pub const RIGHT: i32 = 2;
+    pub const MIDDLE: i32 = 16;
+    pub const LEGACY_MIDDLE: i32 = 4;
+    pub const XBUTTON1: i32 = 32;
+    pub const XBUTTON2: i32 = 64;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    XButton1,
+    XButton2,
+    Unknown(i32),
+}
+
+impl MouseButton {
+    pub const fn from_wire(code: i32) -> Self {
+        match code {
+            mouse_button::LEFT => Self::Left,
+            mouse_button::RIGHT => Self::Right,
+            mouse_button::MIDDLE | mouse_button::LEGACY_MIDDLE => Self::Middle,
+            mouse_button::XBUTTON1 => Self::XButton1,
+            mouse_button::XBUTTON2 => Self::XButton2,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub const fn to_wire(self) -> i32 {
+        match self {
+            Self::Left => mouse_button::LEFT,
+            Self::Right => mouse_button::RIGHT,
+            Self::Middle => mouse_button::MIDDLE,
+            Self::XButton1 => mouse_button::XBUTTON1,
+            Self::XButton2 => mouse_button::XBUTTON2,
+            Self::Unknown(code) => code,
+        }
+    }
+}
+
 /// Decoded JSON input message on `CONTROL_DATA_CHANNEL`.
 ///
 /// Unknown `action` names or unrecognized JSON objects decode into
@@ -22,6 +67,30 @@ pub enum InputMessage {
     MouseScroll { dx: i32, dy: i32 },
     TextInput { text: String },
     Unknown { name: String, raw: Value },
+}
+
+impl InputMessage {
+    pub const fn mouse_button(button: MouseButton, pressed: bool) -> Self {
+        Self::MouseButton {
+            button: button.to_wire(),
+            pressed,
+        }
+    }
+
+    pub const fn mouse_click(button: MouseButton) -> Self {
+        Self::MouseClick {
+            button: button.to_wire(),
+        }
+    }
+
+    pub const fn decoded_mouse_button(&self) -> Option<MouseButton> {
+        match self {
+            Self::MouseButton { button, .. } | Self::MouseClick { button } => {
+                Some(MouseButton::from_wire(*button))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for InputMessage {
@@ -242,6 +311,39 @@ mod tests {
             let bytes = encode_input(&msg);
             assert_eq!(decode_input(&bytes).unwrap(), msg);
         }
+    }
+
+    #[test]
+    fn maps_mouse_button_codes_and_preserves_raw_messages() {
+        for (code, button, canonical) in [
+            (1, MouseButton::Left, 1),
+            (2, MouseButton::Right, 2),
+            (16, MouseButton::Middle, 16),
+            (4, MouseButton::Middle, 16),
+            (32, MouseButton::XButton1, 32),
+            (64, MouseButton::XButton2, 64),
+            (128, MouseButton::Unknown(128), 128),
+        ] {
+            assert_eq!(MouseButton::from_wire(code), button);
+            assert_eq!(button.to_wire(), canonical);
+            let raw_click = InputMessage::MouseClick { button: code };
+            assert_eq!(raw_click.decoded_mouse_button(), Some(button));
+            assert_eq!(decode_input(&encode_input(&raw_click)).unwrap(), raw_click);
+            assert_eq!(
+                InputMessage::mouse_click(button),
+                InputMessage::MouseClick { button: canonical }
+            );
+            let press = InputMessage::mouse_button(button, true);
+            assert_eq!(press.decoded_mouse_button(), Some(button));
+            assert_eq!(
+                decode_input(&encode_input(&press)).unwrap(),
+                InputMessage::MouseButton {
+                    button: canonical,
+                    pressed: true,
+                }
+            );
+        }
+        assert_eq!(InputMessage::KeyboardHeartbeat.decoded_mouse_button(), None);
     }
 
     #[test]

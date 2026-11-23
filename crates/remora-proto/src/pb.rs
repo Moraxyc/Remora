@@ -1,3 +1,44 @@
 //! Generated from `proto/gv_pb.proto`.
 
+use std::fmt;
+
 include!(concat!(env!("OUT_DIR"), "/gv_pb.rs"));
+
+impl fmt::Debug for ClipboardChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClipboardChange")
+            .field("content_id", &self.content_id)
+            .field("len", &self.content.len())
+            .field("to_be_continued", &self.to_be_continued)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ClipboardTextChangeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClipboardTextChangeRequest")
+            .field("format_id", &self.format_id)
+            .field("len", &self.data.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for ClipboardDataBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClipboardDataBlock")
+            .field("block_id", &self.block_id)
+            .field("len", &self.data.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ClipboardFileContentsResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClipboardFileContentsResponse")
+            .field("task_id", &self.task_id)
+            .field("list_index", &self.list_index)
+            .field("err", &self.err)
+            .field("len", &self.data.len())
+            .finish_non_exhaustive()
+    }
+}
