@@ -19,8 +19,12 @@ use remora_proto::machine::{Machine, Timestamp};
 use remora_proto::pb;
 use remora_proto::session::DataChannel;
 use remora_proto::session::control::{ControlMessage, encode_message};
+use remora_proto::session::file::FileMessage;
 use remora_proto::session::input::InputMessage;
 use remora_proto::session::media::{MediaMessage, encode_forward_setting};
+use remora_proto::session::system::SystemMessage;
+use remora_proto::session::terminal::{TermFrame, TerminalControlMessage};
+use remora_proto::session::tunnel::TunnelFrame;
 use remora_proto::signal::SoacEvent;
 use serde_json::Value;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -301,6 +305,11 @@ pub enum PeerSessionEvent {
         fps_cap: Option<u32>,
     },
     Control(Box<ControlMessage>),
+    File(Box<FileMessage>),
+    Tunnel(TunnelFrame),
+    TermFrame(TermFrame),
+    TerminalControl(TerminalControlMessage),
+    System(Box<SystemMessage>),
     KeyframeRequested,
     EchoTimedOut {
         ice_id: String,
@@ -356,6 +365,11 @@ impl fmt::Debug for PeerSessionEvent {
                 .field("fps_cap", fps_cap)
                 .finish(),
             Self::Control(msg) => f.debug_tuple("Control").field(msg).finish(),
+            Self::File(msg) => f.debug_tuple("File").field(msg).finish(),
+            Self::Tunnel(frame) => f.debug_tuple("Tunnel").field(frame).finish(),
+            Self::TermFrame(frame) => f.debug_tuple("TermFrame").field(frame).finish(),
+            Self::TerminalControl(msg) => f.debug_tuple("TerminalControl").field(msg).finish(),
+            Self::System(msg) => f.debug_tuple("System").field(msg).finish(),
             Self::KeyframeRequested => f.write_str("KeyframeRequested"),
             Self::EchoTimedOut {
                 ice_id,
@@ -382,7 +396,35 @@ enum PeerCommand {
     SendInput(InputMessage),
     SendClipboard(String),
     SendControl(ControlMessage),
-    SendChannelRaw { channel: DataChannel, data: Vec<u8> },
+    SendChannelRaw {
+        channel: DataChannel,
+        data: Vec<u8>,
+    },
+    SendFileRequest {
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    },
+    SendFileResponse {
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    },
+    SendTunnelFrame(TunnelFrame),
+    SendTermFrame(TermFrame),
+    SendTerminalSessionChanged,
+    SendPrivacyResponse {
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    },
+    SendDrawResponse {
+        request_id: i64,
+        response: pb::DrawResponse,
+    },
+    SendVirtualAudioPolicyResponse {
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    },
     RequestKeyframe,
     DrainAndClose(Instant),
     Close,
@@ -451,6 +493,106 @@ impl PeerSender {
     pub async fn send_control(&self, msg: ControlMessage) -> Result<(), PeerSessionError> {
         self.cmd_tx
             .send(PeerCommand::SendControl(msg))
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a file RPC request on the selected channel.
+    pub async fn send_file_request(
+        &self,
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    ) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendFileRequest {
+                channel,
+                request_id,
+                which,
+            })
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a file RPC reply on the file channel.
+    pub async fn send_file_response(
+        &self,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    ) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendFileResponse { request_id, which })
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a port-mapping frame on the file channel.
+    pub async fn send_tunnel_frame(&self, frame: TunnelFrame) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendTunnelFrame(frame))
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a TERM frame on the binary channel.
+    pub async fn send_term_frame(&self, frame: TermFrame) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendTermFrame(frame))
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a terminal session-change notification on the binary channel.
+    pub async fn send_terminal_session_changed(&self) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendTerminalSessionChanged)
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a privacy-screen reply on the text channel.
+    pub async fn send_privacy_response(
+        &self,
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    ) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendPrivacyResponse {
+                request_id,
+                response,
+            })
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues an annotation reply on the text channel.
+    pub async fn send_draw_response(
+        &self,
+        request_id: i64,
+        response: pb::DrawResponse,
+    ) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendDrawResponse {
+                request_id,
+                response,
+            })
+            .await
+            .map_err(|_| PeerSessionError::Closed)
+    }
+
+    /// Queues a virtual audio policy reply on the selected channel.
+    pub async fn send_virtual_audio_policy_response(
+        &self,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    ) -> Result<(), PeerSessionError> {
+        self.cmd_tx
+            .send(PeerCommand::SendVirtualAudioPolicyResponse {
+                channel,
+                request_id,
+                error_code,
+            })
             .await
             .map_err(|_| PeerSessionError::Closed)
     }
@@ -757,6 +899,74 @@ impl PeerHandle {
         self.sender.send_control(msg).await
     }
 
+    /// Queues a file RPC request on the selected channel.
+    pub async fn send_file_request(
+        &self,
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    ) -> Result<(), PeerSessionError> {
+        self.sender
+            .send_file_request(channel, request_id, which)
+            .await
+    }
+
+    /// Queues a file RPC reply on the file channel.
+    pub async fn send_file_response(
+        &self,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    ) -> Result<(), PeerSessionError> {
+        self.sender.send_file_response(request_id, which).await
+    }
+
+    /// Queues a port-mapping frame on the file channel.
+    pub async fn send_tunnel_frame(&self, frame: TunnelFrame) -> Result<(), PeerSessionError> {
+        self.sender.send_tunnel_frame(frame).await
+    }
+
+    /// Queues a TERM frame on the binary channel.
+    pub async fn send_term_frame(&self, frame: TermFrame) -> Result<(), PeerSessionError> {
+        self.sender.send_term_frame(frame).await
+    }
+
+    /// Queues a terminal session-change notification on the binary channel.
+    pub async fn send_terminal_session_changed(&self) -> Result<(), PeerSessionError> {
+        self.sender.send_terminal_session_changed().await
+    }
+
+    /// Queues a privacy-screen reply on the text channel.
+    pub async fn send_privacy_response(
+        &self,
+        request_id: i64,
+        response: pb::PrivateScreenSettingResponse,
+    ) -> Result<(), PeerSessionError> {
+        self.sender
+            .send_privacy_response(request_id, response)
+            .await
+    }
+
+    /// Queues an annotation reply on the text channel.
+    pub async fn send_draw_response(
+        &self,
+        request_id: i64,
+        response: pb::DrawResponse,
+    ) -> Result<(), PeerSessionError> {
+        self.sender.send_draw_response(request_id, response).await
+    }
+
+    /// Queues a virtual audio policy reply on the selected channel.
+    pub async fn send_virtual_audio_policy_response(
+        &self,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    ) -> Result<(), PeerSessionError> {
+        self.sender
+            .send_virtual_audio_policy_response(channel, request_id, error_code)
+            .await
+    }
+
     pub async fn request_keyframe(&self) -> Result<(), PeerSessionError> {
         self.sender.request_keyframe().await
     }
@@ -798,6 +1008,16 @@ struct PeerLoopState<R: SignalingRelay> {
 impl<R: SignalingRelay> PeerLoopState<R> {
     fn machine_now(&self) -> Timestamp {
         Timestamp::from_duration(self.start_instant.elapsed())
+    }
+
+    fn queue_channel_command(
+        &mut self,
+        queue: impl FnOnce(&mut PeerMachine<StdRng>, Timestamp) -> Result<(), PeerError>,
+    ) {
+        let now = self.machine_now();
+        if let Err(err) = queue(&mut self.machine, now) {
+            warn!(ice_id = %self.config.ice_id, error = %err, "queue channel command failed");
+        }
     }
 
     fn publish_stats(&self) {
@@ -989,6 +1209,46 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                             if let Err(err) = write_channel(&mut self.rtc, &self.registry, &channel, &data) {
                                 debug!(ice_id = %self.config.ice_id, error = %err, "channel raw write skipped");
                             }
+                        }
+                        Some(PeerCommand::SendFileRequest { channel, request_id, which }) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_file_request(now, channel, request_id, which)
+                            });
+                        }
+                        Some(PeerCommand::SendFileResponse { request_id, which }) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_file_response(now, request_id, which)
+                            });
+                        }
+                        Some(PeerCommand::SendTunnelFrame(frame)) => {
+                            self.queue_channel_command(|machine, _| {
+                                machine.queue_tunnel_frame(&frame)
+                            });
+                        }
+                        Some(PeerCommand::SendTermFrame(frame)) => {
+                            self.queue_channel_command(|machine, _| {
+                                machine.queue_term_frame(&frame)
+                            });
+                        }
+                        Some(PeerCommand::SendTerminalSessionChanged) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_terminal_session_changed(now)
+                            });
+                        }
+                        Some(PeerCommand::SendPrivacyResponse { request_id, response }) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_privacy_response(now, request_id, response)
+                            });
+                        }
+                        Some(PeerCommand::SendDrawResponse { request_id, response }) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_draw_response(now, request_id, response)
+                            });
+                        }
+                        Some(PeerCommand::SendVirtualAudioPolicyResponse { channel, request_id, error_code }) => {
+                            self.queue_channel_command(|machine, now| {
+                                machine.queue_virtual_audio_policy_response(now, channel, request_id, error_code)
+                            });
                         }
                         Some(PeerCommand::RequestKeyframe) => {
                             if let Some(mid) = self.registry.video_rx_mid()
@@ -1378,6 +1638,21 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                 PeerEvent::ClipboardText(text) => {
                     self.emit(PeerSessionEvent::ClipboardText(text)).await;
                 }
+                PeerEvent::File(msg) => {
+                    self.emit(PeerSessionEvent::File(msg)).await;
+                }
+                PeerEvent::Tunnel(frame) => {
+                    self.emit(PeerSessionEvent::Tunnel(frame)).await;
+                }
+                PeerEvent::TermFrame(frame) => {
+                    self.emit(PeerSessionEvent::TermFrame(frame)).await;
+                }
+                PeerEvent::TerminalControl(msg) => {
+                    self.emit(PeerSessionEvent::TerminalControl(msg)).await;
+                }
+                PeerEvent::System(msg) => {
+                    self.emit(PeerSessionEvent::System(msg)).await;
+                }
                 PeerEvent::RawChannelData { channel, data } => {
                     self.emit(PeerSessionEvent::RawChannelData { channel, data })
                         .await;
@@ -1481,7 +1756,9 @@ fn normalize_soac_sdp(mut soac: SoacEvent) -> SoacEvent {
 mod tests {
     use super::*;
     use remora_proto::session::media::VideoCodec;
-    use std::time::Duration;
+    use remora_proto::session::system::encode_virtual_audio_policy_request;
+    use remora_proto::session::terminal::TERM_VERSION;
+    use remora_proto::session::tunnel::{TunnelFrameType, TunnelSyn, TunnelSynAck};
 
     fn sample_h264_frame(pts_ms: u64, keyframe: bool) -> EncodedVideoFrame {
         let mut data = Vec::new();
@@ -1547,8 +1824,7 @@ mod tests {
         peer.close().await;
     }
 
-    #[tokio::test]
-    async fn str0m_host_and_viewer_exchange_video_input_and_clipboard() {
+    async fn loopback_peers() -> (PeerHandle, PeerHandle, tokio::task::JoinHandle<()>) {
         let (host_sig, mut host_out) = ChannelSignalingRelay::new();
         let (viewer_sig, mut viewer_out) = ChannelSignalingRelay::new();
 
@@ -1559,6 +1835,8 @@ mod tests {
         let mut viewer_cfg = PeerSessionConfig::new(PeerRole::Viewer, "ice-loop-1");
         viewer_cfg.app_control_id = Some("ctrl-1".into());
         viewer_cfg.remote_client_id = Some("host-cid".into());
+        host_cfg.local_probe_target = Some((Ipv4Addr::LOCALHOST, 9).into());
+        viewer_cfg.local_probe_target = host_cfg.local_probe_target;
 
         let mut host = PeerHandle::spawn(host_cfg, Arc::new(host_sig))
             .await
@@ -1590,7 +1868,7 @@ mod tests {
             }
         });
 
-        // Wait until viewer PeerReady (echo complete)
+        // Wait for both sides to complete the control-channel echo.
         tokio::time::timeout(Duration::from_secs(10), async {
             let mut host_ready = false;
             let mut viewer_ready = false;
@@ -1611,6 +1889,56 @@ mod tests {
         })
         .await
         .expect("peers did not complete echo handshake");
+        (host, viewer, relay_task)
+    }
+
+    async fn expect_peer_event(
+        peer: &mut PeerHandle,
+        description: &str,
+        matches: impl Fn(&PeerSessionEvent) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = peer.next_event().await.expect("peer closed");
+                if matches(&event) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
+    async fn wait_for_data_channel(
+        sender: &PeerSender,
+        receiver: &mut PeerHandle,
+        channel: DataChannel,
+    ) {
+        // A protobuf with only seq set surfaces as Unknown on Text, and raw on File/Binary.
+        let probe = [0x08, 0x01];
+        let mut retry = tokio::time::interval(Duration::from_millis(50));
+        let received = expect_peer_event(receiver, channel.as_str(), |event| match event {
+            PeerSessionEvent::RawChannelData {
+                channel: received_on,
+                data,
+            } => *received_on == channel && *data == probe,
+            PeerSessionEvent::Control(msg) if channel == DataChannel::Text => {
+                matches!(msg.as_ref(), ControlMessage::Unknown { raw, .. } if *raw == probe)
+            }
+            _ => false,
+        });
+        tokio::pin!(received);
+        loop {
+            tokio::select! {
+                _ = &mut received => break,
+                _ = retry.tick() => sender.send_channel_raw(channel.clone(), probe.to_vec()).await.unwrap(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn str0m_host_and_viewer_exchange_video_input_and_clipboard() {
+        let (mut host, mut viewer, relay_task) = loopback_peers().await;
 
         // Send H.264 frames from host -> viewer
         host.send_video_frame(sample_h264_frame(0, true))
@@ -1662,6 +1990,164 @@ mod tests {
         })
         .await
         .expect("video/input/clipboard roundtrip timed out");
+
+        host.close().await;
+        viewer.close().await;
+        relay_task.abort();
+    }
+
+    #[tokio::test]
+    async fn str0m_host_and_viewer_exchange_session_codecs() {
+        use pb::file_transfer_ftp_request::Which as FileRequest;
+        use pb::file_transfer_ftp_response::Which as FileResponse;
+
+        let (mut host, mut viewer, relay_task) = loopback_peers().await;
+        let host_sender = host.sender();
+        let viewer_sender = viewer.sender();
+        for channel in [DataChannel::File, DataChannel::Binary, DataChannel::Text] {
+            wait_for_data_channel(&host_sender, &mut viewer, channel).await;
+        }
+
+        let task = pb::TaskId {
+            task_id: 17,
+            file_index: 0,
+        };
+        let remove = FileRequest::RemoveDir(pb::FileRemoveDir {
+            id: Some(task),
+            path: "/example/remove".into(),
+            recursive: false,
+        });
+        viewer
+            .send_file_request(DataChannel::Control, 42, remove.clone())
+            .await
+            .unwrap();
+        expect_peer_event(&mut host, "file RemoveDir request", |event| {
+            matches!(event, PeerSessionEvent::File(msg) if matches!(msg.as_ref(),
+                FileMessage::Request { request_id: 42, request, .. }
+                    if request.which.as_ref() == Some(&remove)))
+        })
+        .await;
+        let removed = FileResponse::Result(pb::FileTransferResult {
+            id: Some(task),
+            file_error: pb::FileTransferError::FtSucceeded as i32,
+            err_msg: String::new(),
+        });
+        host_sender
+            .send_file_response(42, removed.clone())
+            .await
+            .unwrap();
+        expect_peer_event(&mut viewer, "file RemoveDir result", |event| {
+            matches!(event, PeerSessionEvent::File(msg) if matches!(msg.as_ref(),
+                FileMessage::Response { request_id: 42, response, .. }
+                    if response.which.as_ref() == Some(&removed)))
+        })
+        .await;
+
+        let syn = TunnelFrame {
+            seq: 1,
+            timestamp: 2,
+            session_id: 3,
+            rule_id: 4,
+            stream_id: 5,
+            frame_type: TunnelFrameType::Syn,
+            payload: serde_json::to_vec(&TunnelSyn {
+                version: 1,
+                target_host: "target.invalid".into(),
+                target_port: 12345,
+            })
+            .unwrap(),
+        };
+        viewer_sender.send_tunnel_frame(syn.clone()).await.unwrap();
+        expect_peer_event(
+            &mut host,
+            "tunnel SYN",
+            |event| matches!(event, PeerSessionEvent::Tunnel(frame) if frame == &syn),
+        )
+        .await;
+        let ack = TunnelFrame {
+            seq: 2,
+            frame_type: TunnelFrameType::SynAck,
+            payload: serde_json::to_vec(&TunnelSynAck {
+                version: 1,
+                ok: true,
+                error: String::new(),
+            })
+            .unwrap(),
+            ..syn
+        };
+        host.send_tunnel_frame(ack.clone()).await.unwrap();
+        expect_peer_event(
+            &mut viewer,
+            "tunnel SYN_ACK",
+            |event| matches!(event, PeerSessionEvent::Tunnel(frame) if frame == &ack),
+        )
+        .await;
+
+        let term = TermFrame {
+            version: TERM_VERSION,
+            frame_type: 1,
+            flags: [0; 2],
+            session_id: 7,
+            payload: b"terminal data".to_vec(),
+        };
+        viewer.send_term_frame(term.clone()).await.unwrap();
+        expect_peer_event(
+            &mut host,
+            "binary TERM frame",
+            |event| matches!(event, PeerSessionEvent::TermFrame(frame) if frame == &term),
+        )
+        .await;
+        host.send_terminal_session_changed().await.unwrap();
+        expect_peer_event(&mut viewer, "binary terminal session change", |event| {
+            matches!(
+                event,
+                PeerSessionEvent::TerminalControl(TerminalControlMessage::SessionChanged { .. })
+            )
+        })
+        .await;
+
+        let privacy = pb::PrivateScreenSettingResponse::default();
+        host.send_privacy_response(43, privacy).await.unwrap();
+        expect_peer_event(&mut viewer, "privacy response", |event| {
+            matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::PrivacyResponse { request_id: 43, response, .. } if *response == privacy))
+        }).await;
+        let draw = pb::DrawResponse {
+            which: Some(pb::draw_response::Which::ToggleResponse(
+                pb::DrawToggleResponse { error_code: 0 },
+            )),
+        };
+        host.send_draw_response(44, draw).await.unwrap();
+        expect_peer_event(&mut viewer, "draw response", |event| {
+            matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::DrawResponse { request_id: 44, response, .. } if *response == draw))
+        })
+        .await;
+
+        viewer_sender
+            .send_channel_raw(
+                DataChannel::Control,
+                encode_virtual_audio_policy_request(1, 2, 45, 1),
+            )
+            .await
+            .unwrap();
+        expect_peer_event(&mut host, "virtual audio policy probe", |event| {
+            matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::VirtualAudioPolicyRequest { request_id: 45, policy: 1, .. }))
+        })
+        .await;
+        host.send_virtual_audio_policy_response(DataChannel::Control, 45, 0)
+            .await
+            .unwrap();
+        expect_peer_event(
+            &mut viewer,
+            "virtual audio policy no-op response",
+            |event| {
+                matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::VirtualAudioPolicyResponse { request_id: 45, error_code: 0, .. }))
+            },
+        )
+        .await;
 
         host.close().await;
         viewer.close().await;

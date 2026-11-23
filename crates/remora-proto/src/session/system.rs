@@ -413,17 +413,17 @@ pub fn encode_privacy_response(
     )
 }
 
-fn encode_draw_response(
+pub(crate) fn encode_draw_response(
     seq: i64,
     timestamp: i64,
     request_id: i64,
-    which: draw_response::Which,
+    response: pb::DrawResponse,
 ) -> Vec<u8> {
     encode_rpc_response(
         seq,
         timestamp,
         request_id,
-        rpc_response::Which::DrawResp(pb::DrawResponse { which: Some(which) }),
+        rpc_response::Which::DrawResp(response),
     )
 }
 pub fn encode_draw_stroke_response(
@@ -436,7 +436,11 @@ pub fn encode_draw_stroke_response(
         seq,
         timestamp,
         request_id,
-        draw_response::Which::StrokeResponse(pb::DrawStrokeResponse { error_code }),
+        pb::DrawResponse {
+            which: Some(draw_response::Which::StrokeResponse(
+                pb::DrawStrokeResponse { error_code },
+            )),
+        },
     )
 }
 pub fn encode_draw_clear_response(
@@ -449,7 +453,11 @@ pub fn encode_draw_clear_response(
         seq,
         timestamp,
         request_id,
-        draw_response::Which::ClearResponse(pb::DrawClearResponse { error_code }),
+        pb::DrawResponse {
+            which: Some(draw_response::Which::ClearResponse(pb::DrawClearResponse {
+                error_code,
+            })),
+        },
     )
 }
 pub fn encode_draw_toggle_response(
@@ -462,7 +470,11 @@ pub fn encode_draw_toggle_response(
         seq,
         timestamp,
         request_id,
-        draw_response::Which::ToggleResponse(pb::DrawToggleResponse { error_code }),
+        pb::DrawResponse {
+            which: Some(draw_response::Which::ToggleResponse(
+                pb::DrawToggleResponse { error_code },
+            )),
+        },
     )
 }
 

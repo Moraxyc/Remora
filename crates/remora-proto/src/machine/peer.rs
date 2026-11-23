@@ -18,7 +18,22 @@ use crate::session::clipboard::{
 use crate::session::control::{
     ControlDecodeError, ControlMessage, decode_message, echo_request, echo_response, encode_message,
 };
+use crate::session::file::{
+    FILE_REPLY_CHANNEL, FileMessage, encode_file_request, encode_file_response,
+    extract_file_message,
+};
 use crate::session::input::{InputDecodeError, InputMessage, decode_input, encode_input};
+use crate::session::system::{
+    DRAW_REPLY_CHANNEL, PRIVACY_REPLY_CHANNEL, SystemMessage, encode_draw_response,
+    encode_privacy_response, encode_virtual_audio_policy_response, extract_system_message,
+};
+use crate::session::terminal::{
+    TERMINAL_CHANNEL, TermDecodeError, TermFrame, TerminalControlMessage, decode_term_frame,
+    encode_session_changed, encode_term_frame, extract_terminal_control, is_term_frame,
+};
+use crate::session::tunnel::{
+    TUNNEL_CHANNEL, TunnelFrame, encode_tunnel_frame, extract_tunnel_frame,
+};
 use crate::signal::SoacEvent;
 
 const ECHO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -229,6 +244,11 @@ pub enum PeerEvent {
     Control(Box<ControlMessage>),
     Input(InputMessage),
     ClipboardText(String),
+    File(Box<FileMessage>),
+    Tunnel(TunnelFrame),
+    TermFrame(TermFrame),
+    TerminalControl(TerminalControlMessage),
+    System(Box<SystemMessage>),
     RawChannelData { channel: DataChannel, data: Vec<u8> },
     EchoTimedOut { ice_id: String, request_seq: i64 },
     Closed { ice_id: String },
@@ -250,6 +270,11 @@ impl fmt::Debug for PeerEvent {
                 .debug_struct("ClipboardText")
                 .field("len", &text.len())
                 .finish(),
+            Self::File(msg) => f.debug_tuple("File").field(msg).finish(),
+            Self::Tunnel(frame) => f.debug_tuple("Tunnel").field(frame).finish(),
+            Self::TermFrame(frame) => f.debug_tuple("TermFrame").field(frame).finish(),
+            Self::TerminalControl(msg) => f.debug_tuple("TerminalControl").field(msg).finish(),
+            Self::System(msg) => f.debug_tuple("System").field(msg).finish(),
             Self::RawChannelData { channel, data } => f
                 .debug_struct("RawChannelData")
                 .field("channel", channel)
@@ -276,6 +301,7 @@ pub enum PeerError {
     Control(ControlDecodeError),
     Input(InputDecodeError),
     Clipboard(ClipboardError),
+    Terminal(TermDecodeError),
 }
 
 impl fmt::Display for PeerError {
@@ -286,6 +312,7 @@ impl fmt::Display for PeerError {
             Self::Control(err) => err.fmt(f),
             Self::Input(err) => err.fmt(f),
             Self::Clipboard(err) => err.fmt(f),
+            Self::Terminal(err) => err.fmt(f),
         }
     }
 }
@@ -756,6 +783,101 @@ impl<R: Rng> PeerMachine<R> {
         Ok(())
     }
 
+    pub fn queue_file_request(
+        &mut self,
+        now: Timestamp,
+        channel: DataChannel,
+        request_id: i64,
+        which: pb::file_transfer_ftp_request::Which,
+    ) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, channel, |seq, ts| {
+            encode_file_request(seq, ts, request_id, which)
+        })
+    }
+
+    pub fn queue_file_response(
+        &mut self,
+        now: Timestamp,
+        request_id: i64,
+        which: pb::file_transfer_ftp_response::Which,
+    ) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, FILE_REPLY_CHANNEL, |seq, ts| {
+            encode_file_response(seq, ts, request_id, which)
+        })
+    }
+
+    pub fn queue_tunnel_frame(&mut self, frame: &TunnelFrame) -> Result<(), PeerError> {
+        self.queue_channel(TUNNEL_CHANNEL, |_| encode_tunnel_frame(frame))
+    }
+
+    pub fn queue_term_frame(&mut self, frame: &TermFrame) -> Result<(), PeerError> {
+        self.queue_channel(TERMINAL_CHANNEL, |_| encode_term_frame(frame))
+    }
+
+    pub fn queue_terminal_session_changed(&mut self, now: Timestamp) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, TERMINAL_CHANNEL, encode_session_changed)
+    }
+
+    pub fn queue_privacy_response(
+        &mut self,
+        now: Timestamp,
+        request_id: i64,
+        resp: pb::PrivateScreenSettingResponse,
+    ) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, PRIVACY_REPLY_CHANNEL, |seq, ts| {
+            encode_privacy_response(seq, ts, request_id, resp)
+        })
+    }
+
+    pub fn queue_draw_response(
+        &mut self,
+        now: Timestamp,
+        request_id: i64,
+        resp: pb::DrawResponse,
+    ) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, DRAW_REPLY_CHANNEL, |seq, ts| {
+            encode_draw_response(seq, ts, request_id, resp)
+        })
+    }
+
+    pub fn queue_virtual_audio_policy_response(
+        &mut self,
+        now: Timestamp,
+        channel: DataChannel,
+        request_id: i64,
+        error_code: i32,
+    ) -> Result<(), PeerError> {
+        self.queue_stamped_channel(now, channel, |seq, ts| {
+            encode_virtual_audio_policy_response(seq, ts, request_id, error_code)
+        })
+    }
+
+    fn queue_stamped_channel(
+        &mut self,
+        now: Timestamp,
+        channel: DataChannel,
+        encode: impl FnOnce(i64, i64) -> Vec<u8>,
+    ) -> Result<(), PeerError> {
+        self.queue_channel(channel, |peer| {
+            encode(
+                peer.alloc_seq(),
+                i64::try_from(now.as_millis()).unwrap_or(i64::MAX),
+            )
+        })
+    }
+
+    fn queue_channel(
+        &mut self,
+        channel: DataChannel,
+        encode: impl FnOnce(&mut Self) -> Vec<u8>,
+    ) -> Result<(), PeerError> {
+        self.ice_id.as_ref().ok_or(PeerError::MissingIceId)?;
+        let data = encode(self);
+        self.transmits
+            .push_back(PeerTransmit::SendChannel { channel, data });
+        Ok(())
+    }
+
     fn receive_clipboard_text(&mut self, text: String) {
         if text.is_empty() {
             return;
@@ -774,7 +896,7 @@ impl<R: Rng> PeerMachine<R> {
         channel: DataChannel,
         bytes: &[u8],
     ) -> Result<(), PeerError> {
-        match channel {
+        let event = match channel {
             DataChannel::Control | DataChannel::Text => {
                 if bytes.first() == Some(&b'{') {
                     let input = decode_input(bytes).map_err(PeerError::Input)?;
@@ -836,17 +958,39 @@ impl<R: Rng> PeerMachine<R> {
                     }
                     _ => {}
                 }
-                self.events.push_back(PeerEvent::Control(Box::new(msg)));
-                Ok(())
+                if let Some(file) = extract_file_message(&msg) {
+                    self.events.push_back(PeerEvent::File(Box::new(file)));
+                }
+                if let Some(control) = extract_terminal_control(&msg) {
+                    self.events.push_back(PeerEvent::TerminalControl(control));
+                }
+                if let Some(system) = extract_system_message(&msg) {
+                    self.events.push_back(PeerEvent::System(Box::new(system)));
+                }
+                Some(PeerEvent::Control(Box::new(msg)))
             }
-            other => {
-                self.events.push_back(PeerEvent::RawChannelData {
-                    channel: other,
-                    data: bytes.to_vec(),
-                });
-                Ok(())
-            }
-        }
+            DataChannel::File => decode_message(bytes).ok().and_then(|msg| {
+                if let Some(file) = extract_file_message(&msg) {
+                    Some(PeerEvent::File(Box::new(file)))
+                } else {
+                    extract_tunnel_frame(&msg).map(PeerEvent::Tunnel)
+                }
+            }),
+            DataChannel::Binary if is_term_frame(bytes) => Some(PeerEvent::TermFrame(
+                decode_term_frame(bytes).map_err(PeerError::Terminal)?,
+            )),
+            DataChannel::Binary => decode_message(bytes)
+                .ok()
+                .and_then(|msg| extract_terminal_control(&msg))
+                .map(PeerEvent::TerminalControl),
+            _ => None,
+        };
+        self.events
+            .push_back(event.unwrap_or_else(|| PeerEvent::RawChannelData {
+                channel,
+                data: bytes.to_vec(),
+            }));
+        Ok(())
     }
 
     /// Ends the peer session and queues teardown.
@@ -946,6 +1090,9 @@ mod tests {
 
     use super::*;
     use crate::session::clipboard::{ClipboardMessage, extract_clipboard_message};
+    use crate::session::system::encode_privacy_request;
+    use crate::session::terminal::{TERM_VERSION, encode_rename_session_request};
+    use crate::session::tunnel::TunnelFrameType;
     use crate::signal::{Event, SignalEvent};
 
     struct DeterministicRng(u64);
@@ -1326,6 +1473,243 @@ mod tests {
         };
         assert_eq!(channel, DataChannel::Text);
         extract_clipboard_message(&decode_message(&data).unwrap())
+    }
+
+    #[test]
+    fn control_and_text_emit_typed_events_before_legacy_control() {
+        let mut peer = PeerMachine::new(DeterministicRng(1));
+        let request = pb::FileRemoveDir {
+            path: "/private/file".into(),
+            ..Default::default()
+        };
+        let which = pb::file_transfer_ftp_request::Which::RemoveDir(request);
+        let privacy = pb::PrivateScreenSettingRequest {
+            enable: true,
+            setting_source: "private-source".into(),
+            ..Default::default()
+        };
+        let cases = [
+            (
+                encode_file_request(1, 2, 3, which.clone()),
+                PeerEvent::File(Box::new(FileMessage::Request {
+                    seq: 1,
+                    timestamp: 2,
+                    request_id: 3,
+                    request: pb::FileTransferFtpRequest { which: Some(which) },
+                })),
+                "/private/file",
+            ),
+            (
+                encode_rename_session_request(1, 2, 3, 4, "private-name"),
+                PeerEvent::TerminalControl(TerminalControlMessage::RenameSessionRequest {
+                    seq: 1,
+                    timestamp: 2,
+                    request_id: 3,
+                    session_id: 4,
+                    name: "private-name".into(),
+                }),
+                "private-name",
+            ),
+            (
+                encode_privacy_request(1, 2, 3, privacy.clone()),
+                PeerEvent::System(Box::new(SystemMessage::PrivacyRequest {
+                    seq: 1,
+                    timestamp: 2,
+                    request_id: 3,
+                    request: privacy,
+                })),
+                "private-source",
+            ),
+        ];
+        for channel in [DataChannel::Control, DataChannel::Text] {
+            for (wire, expected, secret) in &cases {
+                peer.handle_channel_input(Timestamp::ZERO, channel.clone(), wire)
+                    .unwrap();
+                let typed = peer.poll_event().unwrap();
+                assert_eq!(&typed, expected);
+                assert!(!format!("{typed:?}").contains(secret));
+                let legacy = peer.poll_event().unwrap();
+                assert_eq!(
+                    legacy,
+                    PeerEvent::Control(Box::new(decode_message(wire).unwrap()))
+                );
+                assert!(!format!("{legacy:?}").contains(secret));
+                assert_eq!(peer.poll_event(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn file_and_binary_preserve_unrecognized_payloads() {
+        let mut peer = PeerMachine::new(DeterministicRng(1));
+        let unsupported = encode_message(&echo_request(1, 2, None));
+        for channel in [
+            DataChannel::File,
+            DataChannel::Binary,
+            DataChannel::Streamer,
+        ] {
+            for bytes in [&[0xff][..], &unsupported] {
+                peer.handle_channel_input(Timestamp::ZERO, channel.clone(), bytes)
+                    .unwrap();
+                assert_eq!(
+                    peer.poll_event(),
+                    Some(PeerEvent::RawChannelData {
+                        channel: channel.clone(),
+                        data: bytes.to_vec(),
+                    })
+                );
+                assert_eq!(peer.poll_event(), None);
+                assert_eq!(peer.poll_transmit(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn binary_rejects_malformed_term_frames() {
+        let mut peer = PeerMachine::new(DeterministicRng(1));
+        let mut wire = encode_term_frame(&TermFrame {
+            version: TERM_VERSION,
+            frame_type: 1,
+            flags: [0; 2],
+            session_id: 1,
+            payload: vec![1],
+        });
+        wire.pop();
+        assert_eq!(
+            peer.handle_channel_input(Timestamp::ZERO, DataChannel::Binary, &wire),
+            Err(PeerError::Terminal(TermDecodeError::LengthMismatch {
+                expected: 1,
+                actual: 0,
+            }))
+        );
+        assert_eq!(peer.poll_event(), None);
+    }
+
+    #[test]
+    fn queues_session_codec_payloads_on_their_wire_channels() {
+        let mut peer = PeerMachine::new(DeterministicRng(1));
+        let now = Timestamp::from_millis(100);
+        let request = pb::file_transfer_ftp_request::Which::RemoveDir(pb::FileRemoveDir::default());
+        let result =
+            pb::file_transfer_ftp_response::Which::Result(pb::FileTransferResult::default());
+        let tunnel = TunnelFrame {
+            seq: 123,
+            timestamp: 456,
+            session_id: 1,
+            rule_id: 2,
+            stream_id: 3,
+            frame_type: TunnelFrameType::Data,
+            payload: b"tunnel payload".to_vec(),
+        };
+        let term = TermFrame {
+            version: TERM_VERSION,
+            frame_type: 1,
+            flags: [0; 2],
+            session_id: 1,
+            payload: b"terminal payload".to_vec(),
+        };
+        let privacy = pb::PrivateScreenSettingResponse::default();
+        let draw = pb::DrawResponse {
+            which: Some(pb::draw_response::Which::ToggleResponse(
+                pb::DrawToggleResponse::default(),
+            )),
+        };
+        let enqueue = |peer: &mut PeerMachine<DeterministicRng>| {
+            [
+                peer.queue_file_request(now, DataChannel::Control, 1, request.clone()),
+                peer.queue_file_response(now, 1, result.clone()),
+                peer.queue_tunnel_frame(&tunnel),
+                peer.queue_term_frame(&term),
+                peer.queue_terminal_session_changed(now),
+                peer.queue_privacy_response(now, 2, privacy),
+                peer.queue_draw_response(now, 3, draw),
+                peer.queue_virtual_audio_policy_response(now, DataChannel::Control, 4, 0),
+            ]
+        };
+
+        assert_eq!(
+            enqueue(&mut peer),
+            std::array::from_fn(|_| Err(PeerError::MissingIceId))
+        );
+        assert_eq!(peer.poll_transmit(), None);
+        peer.start(now, "ice");
+        let seq = peer.next_seq;
+        for result in enqueue(&mut peer) {
+            result.unwrap();
+        }
+        assert_eq!(
+            std::iter::from_fn(|| peer.poll_transmit()).collect::<Vec<_>>(),
+            [
+                (
+                    DataChannel::Control,
+                    encode_file_request(seq, 100, 1, request)
+                ),
+                (
+                    DataChannel::File,
+                    encode_file_response(seq + 1, 100, 1, result)
+                ),
+                (DataChannel::File, encode_tunnel_frame(&tunnel)),
+                (DataChannel::Binary, encode_term_frame(&term)),
+                (DataChannel::Binary, encode_session_changed(seq + 2, 100)),
+                (
+                    DataChannel::Text,
+                    encode_privacy_response(seq + 3, 100, 2, privacy)
+                ),
+                (
+                    DataChannel::Text,
+                    encode_draw_response(seq + 4, 100, 3, draw)
+                ),
+                (
+                    DataChannel::Control,
+                    encode_virtual_audio_policy_response(seq + 5, 100, 4, 0)
+                ),
+            ]
+            .map(|(channel, data)| PeerTransmit::SendChannel { channel, data })
+        );
+
+        for (channel, wire, expected) in [
+            (
+                DataChannel::File,
+                encode_file_response(
+                    1,
+                    2,
+                    3,
+                    pb::file_transfer_ftp_response::Which::Result(pb::FileTransferResult::default()),
+                ),
+                PeerEvent::File(Box::new(FileMessage::Response {
+                    seq: 1,
+                    timestamp: 2,
+                    request_id: 3,
+                    response: pb::FileTransferFtpResponse {
+                        which: Some(pb::file_transfer_ftp_response::Which::Result(
+                            pb::FileTransferResult::default(),
+                        )),
+                    },
+                })),
+            ),
+            (
+                DataChannel::File,
+                encode_tunnel_frame(&tunnel),
+                PeerEvent::Tunnel(tunnel),
+            ),
+            (
+                DataChannel::Binary,
+                encode_term_frame(&term),
+                PeerEvent::TermFrame(term),
+            ),
+            (
+                DataChannel::Binary,
+                encode_session_changed(1, 2),
+                PeerEvent::TerminalControl(TerminalControlMessage::SessionChanged {
+                    seq: 1,
+                    timestamp: 2,
+                }),
+            ),
+        ] {
+            peer.handle_channel_input(now, channel, &wire).unwrap();
+            assert_eq!(peer.poll_event(), Some(expected));
+            assert_eq!(peer.poll_event(), None);
+        }
     }
 
     #[test]

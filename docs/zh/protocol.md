@@ -179,6 +179,8 @@ Engine.IO 建立后，客户端发送 `"40"` 加入 Socket.IO 默认命名空间
 
 信令握手与 ICE 连通后，端点间直接通过 WebRTC 传输媒体轨道与五个 SCTP 数据通道，其线协议类型定义在 [`crates/remora-proto/proto/gv_pb.proto`](../../crates/remora-proto/proto/gv_pb.proto) 与 `crates/remora-proto/src/session/`：
 
-- **数据通道**：`CONTROL_DATA_CHANNEL`（`gv_pb.Message` 控制信封与 JSON 输入事件）、`TEXT_DATA_CHANNEL`（文本/剪贴板 RPC）、`FILE_DATA_CHANNEL`（文件传输 RPC）、`BINARY_DATA_CHANNEL`（终端 `TERM` 帧与端口映射隧道）及 `STREAMER_DATA_CHANNEL`。
+- **数据通道**：`CONTROL_DATA_CHANNEL`（`gv_pb.Message` 控制信封与 JSON 输入事件）、`TEXT_DATA_CHANNEL`（剪贴板与系统 RPC）、`FILE_DATA_CHANNEL`（文件传输 RPC 与端口映射帧）、`BINARY_DATA_CHANNEL`（终端消息）及 `STREAMER_DATA_CHANNEL`。
 - **控制握手与输入**：`CONTROL_DATA_CHANNEL` 打开后双方通过 `gv_pb.Message` 交换 `EchoRequest`/`EchoResponse`（携带 `FeatureFlag` 版本协商）、`SimpleAction`、`CaptureConfig`、`CodecNegotiation` 与 `RpcRequest`/`RpcResponse`；控制端以 JSON 格式发送键盘、鼠标与文本输入事件。
+- **文件传输与端口映射**：文件 RPC 请求可经控制、文本或文件通道发送；应答（含 `RemoveDir` 的结果）统一走 `FILE_DATA_CHANNEL`。端口映射也走文件通道，使用封装在 `gv_pb.Message` 中的 `PortMappingFrame`。
+- **终端与系统**：二进制 `TERM` 帧和 protobuf `TerminalSessionChanged` 通知走 `BINARY_DATA_CHANNEL`。控制、文本与二进制通道均可识别终端控制 RPC。控制与文本通道均可识别隐私屏、标注（`Draw`）和虚拟音频策略 RPC。隐私屏与标注应答走 `TEXT_DATA_CHANNEL`。`VirtualAudioDriverPolicy` 应答通道由发送方指定，无操作探测应答的 `error_code` 为 `0`。
 - **剪贴板与音视频**：支持分片 `ClipboardChange`（每片最大 8192 字节）与 `ClipboardTextChangeRequest` RPC（最大 1 MiB）；音视频使用 H.264 / H.265 与 Opus，并附带 `video-capture-index`、`video-frame-is-new-frame`、`video-feedback-latency` 与 `video-frame-sending-delay` RTP 头扩展。
