@@ -1,0 +1,234 @@
+name: 12-wallpaper
+description: Host uploads raw and multipart wallpapers, sets and clears device wallpaper, and verifies 4-upload retention and unbind cleanup
+profile: windows-4.48.2
+
+actors:
+  host:
+    kind: host
+    device_name: wallpaper-host
+  viewer:
+    kind: viewer
+    device_name: wallpaper-viewer
+
+steps:
+  - actor: host
+    action: device_init
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: login
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: host
+    action: room_create
+    expect:
+      http_status: 200
+      code: 0
+
+  # Fetch upload token for the bound host device
+  - actor: host
+    action: wallpaper_token
+    filetype: 1
+    save:
+      upload_token: token
+      upload_url: req_url
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        ttl: 3600
+        max_size: 10485760
+
+  # Upload #1: raw PNG bytes without Content-Type (matches Windows host behavior)
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "89504e470d0a1a0a77616c6c706170657231"
+    save:
+      png1_url: url
+    expect:
+      http_status: 200
+      json_eq:
+        fsize: 18
+        md5: "1472019a9eeebf655ba2db3abaffc9de"
+        mime: "image/png"
+
+  # Fetch #1 without credentials and verify immutable + sandbox security headers
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.png1_url}"
+    expect:
+      http_status: 200
+      json_eq:
+        size: 18
+        content_hex: "89504e470d0a1a0a77616c6c706170657231"
+        content_type: "image/png"
+        cache_control: "public, max-age=31536000, immutable"
+        x_content_type_options: "nosniff"
+        csp: "default-src 'none'; sandbox"
+
+  # Reject non-image uploads with HTTP 415
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "3c737667206f6e6c6f61643d616c6572742831293e"
+    expect:
+      http_status: 415
+      json_eq:
+        error: "not_an_image"
+
+  # Upload #2: multipart JPEG
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "ffd8ffe077616c6c706170657232"
+    content_type: "image/jpeg"
+    multipart_filename: "wall.jpg"
+    save:
+      jpg2_url: url
+    expect:
+      http_status: 200
+      json_eq:
+        fsize: 14
+        md5: "b00c3d0b04a3432237c035e7273c2673"
+        mime: "image/jpeg"
+
+  # Set upload #1 as the device's active wallpaper
+  - actor: host
+    action: device_wallpaper
+    wallpaper_url: "${vars.png1_url}"
+    expect:
+      http_status: 200
+      code: 0
+
+  # Viewer sees wallpaper_url in device/list
+  - actor: viewer
+    action: device_list
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        my_binded_devices.0.wallpaper_url: "${vars.png1_url}"
+
+  # Uploads #3..#6 push #2 outside the latest-4 retention window while active wallpaper #1 is kept
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "89504e470d0a1a0a77616c6c706170657233"
+    save:
+      png3_url: url
+    expect:
+      http_status: 200
+      json_eq:
+        mime: "image/png"
+
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "89504e470d0a1a0a77616c6c706170657234"
+    expect:
+      http_status: 200
+      json_eq:
+        mime: "image/png"
+
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "89504e470d0a1a0a77616c6c706170657235"
+    expect:
+      http_status: 200
+      json_eq:
+        mime: "image/png"
+
+  - actor: host
+    action: upload_file
+    url: "${vars.upload_url}"
+    token: "${vars.upload_token}"
+    content_hex: "89504e470d0a1a0a77616c6c706170657236"
+    save:
+      png6_url: url
+    expect:
+      http_status: 200
+      json_eq:
+        mime: "image/png"
+
+  # Active wallpaper (#1), oldest retained upload (#3), and newest (#6) survive; evicted (#2) returns 404
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.png1_url}"
+    expect:
+      http_status: 200
+      json_eq:
+        size: 18
+
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.jpg2_url}"
+    expect:
+      http_status: 404
+
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.png3_url}"
+    expect:
+      http_status: 200
+      json_eq:
+        size: 18
+
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.png6_url}"
+    expect:
+      http_status: 200
+      json_eq:
+        size: 18
+
+  # Clear wallpaper with empty URL and verify device_list reflects the cleared state
+  - actor: host
+    action: device_wallpaper
+    wallpaper_url: ""
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: device_list
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+      json_eq:
+        my_binded_devices.0.device_id: "${host.device_id}"
+      json_absent:
+        - my_binded_devices.0.wallpaper_url
+
+  # Unbind deletes the device's remaining uploads
+  - actor: viewer
+    action: device_unbind
+    target: host
+    token: "${host.user_token}"
+    expect:
+      http_status: 200
+      code: 0
+
+  - actor: viewer
+    action: fetch_file
+    url: "${vars.png6_url}"
+    expect:
+      http_status: 404
+
+invariants:
+  - no_secrets_in_logs
+  - no_secrets_in_trace
+  - redacted_trace

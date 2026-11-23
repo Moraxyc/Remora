@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use futures_util::SinkExt;
+use md5::{Digest as _, Md5};
 use prost::Message as _;
 use remora_proto::control::{
     AssistDeviceRecord, AssistFavoritesRequest, CancelRemoteAssistRequest, JoinShareByCodeRequest,
@@ -104,6 +106,14 @@ struct FakeConfirmation {
     status: FakeConfirmStatus,
 }
 
+#[derive(Clone)]
+struct StoredFile {
+    id: String,
+    device_id: Option<String>,
+    mime: String,
+    content: Vec<u8>,
+}
+
 #[derive(Default)]
 struct CloudState {
     next_id: u64,
@@ -126,6 +136,9 @@ struct CloudState {
     control_mode_waiters: HashMap<String, oneshot::Sender<UploadControlModeRequest>>,
     sign_waiters: HashMap<String, oneshot::Sender<UploadShareSignRequest>>,
     confirmations: HashMap<String, FakeConfirmation>,
+    upload_tokens: HashMap<String, (String, Option<String>)>, // token -> (user_token, device_id)
+    files: Vec<StoredFile>,
+    wallpapers: HashMap<String, String>, // device_id -> file_id
     http_calls: Vec<RecordedHttpCall>,
 }
 
@@ -278,6 +291,13 @@ impl FakeCloudInstance {
                 "/api/v1/release/fetch/update/{device_id}",
                 get(release_fetch_update_device),
             )
+            .route("/api/v1/tool/fp/token", get(fp_token))
+            .route(
+                "/api/files",
+                post(upload_file).layer(DefaultBodyLimit::max(FAKE_MAX_FILE_SIZE + 1024 * 1024)),
+            )
+            .route("/api/files/{id}", get(serve_file))
+            .route("/api/v1/device/wallpaper", post(set_wallpaper))
             .route("/api/v1/room/create", post(room_create))
             .route("/api/v1/room/join/by_device/{device_id}", post(room_join))
             .route("/socket.io/", get(ws_connect))
@@ -733,6 +753,9 @@ async fn device_list(
         });
         if !d.name.is_empty() {
             obj["alias"] = json!(d.name);
+        }
+        if let Some(file_id) = guard.wallpapers.get(&d.device_id) {
+            obj["wallpaper_url"] = json!(format!("{}/api/files/{file_id}", state.base_url));
         }
         obj
     };
@@ -2480,6 +2503,10 @@ async fn device_unbind(
         guard
             .saved_shares
             .retain(|r| r.publisher_device_id != device_id);
+        guard.wallpapers.remove(&device_id);
+        guard
+            .files
+            .retain(|f| f.device_id.as_deref() != Some(device_id.as_str()));
         let mut removed_sessions = Vec::new();
         guard.sessions.retain(|ice_id, (dev_id, viewer_id, _)| {
             if dev_id == &device_id {
@@ -3050,6 +3077,314 @@ async fn handle_ws_event(
         }
         _ => {}
     }
+}
+
+const FAKE_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+const FAKE_KEPT_UPLOADS: usize = 4;
+
+fn fake_image_type(content: &[u8]) -> Option<&'static str> {
+    if content.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if content.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if content.starts_with(b"RIFF") && content.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if content.starts_with(b"GIF87a") || content.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if content.starts_with(b"BM") && content.len() > 14 {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
+fn fake_parse_file_id_from_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (_, path) = rest.split_once('/')?;
+    let path = path.split(['?', '#']).next()?;
+    let id = path.strip_prefix("api/files/")?;
+    let valid = id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    valid.then(|| id.to_owned())
+}
+
+fn extract_multipart_first_file(content_type: &str, body: &[u8]) -> Option<Vec<u8>> {
+    let boundary = content_type
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("boundary="))?
+        .trim_matches('"');
+    if boundary.is_empty() {
+        return None;
+    }
+    let delim = format!("--{boundary}");
+    let delim_bytes = delim.as_bytes();
+    let start = body
+        .windows(delim_bytes.len())
+        .position(|w| w == delim_bytes)?;
+    let mut rest = &body[start + delim_bytes.len()..];
+    if rest.starts_with(b"\r\n") {
+        rest = &rest[2..];
+    } else if rest.starts_with(b"\n") {
+        rest = &rest[1..];
+    }
+    let header_end = rest.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let after_headers = &rest[header_end + 4..];
+    let next_delim = after_headers
+        .windows(delim_bytes.len())
+        .position(|w| w == delim_bytes)?;
+    let mut part = &after_headers[..next_delim];
+    if part.ends_with(b"\r\n") {
+        part = &part[..part.len() - 2];
+    } else if part.ends_with(b"\n") {
+        part = &part[..part.len() - 1];
+    }
+    Some(part.to_vec())
+}
+
+async fn fp_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::GET, pq, &headers, &[]) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(user_tok) = bearer_valid(&guard, &headers) else {
+        return token_invalid_resp();
+    };
+    let caller_id = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .filter(|id| {
+            guard
+                .devices_by_id
+                .get(*id)
+                .is_some_and(|d| d.owner.as_deref() == Some("1"))
+        })
+        .map(str::to_owned);
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let upload_tok = format!("fake.upload.{seq}");
+    guard
+        .upload_tokens
+        .insert(upload_tok.clone(), (user_tok, caller_id));
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(json!({
+            "token": upload_tok,
+            "req_url": format!("{}/api/files", state.base_url),
+            "ttl": 3600,
+            "max_size": FAKE_MAX_FILE_SIZE,
+        })))
+        .unwrap(),
+    )
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    {
+        let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+        guard.http_calls.push(RecordedHttpCall {
+            method: "POST".to_owned(),
+            path: pq.to_owned(),
+            body: body.to_vec(),
+        });
+    }
+    let raw_auth = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.strip_prefix("Bearer ").unwrap_or(s));
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some((user_tok, device_id)) = raw_auth.and_then(|t| guard.upload_tokens.get(t)).cloned()
+    else {
+        return json_envelope(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
+    };
+    if !guard.user_tokens.contains(&user_tok) {
+        return json_envelope(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
+    }
+
+    let content = match headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(ct) if ct.starts_with("multipart/form-data") => {
+            match extract_multipart_first_file(ct, &body) {
+                Some(bytes) => bytes,
+                None => return json_envelope(StatusCode::BAD_REQUEST, json!({ "error": "empty" })),
+            }
+        }
+        _ => body.to_vec(),
+    };
+
+    if content.is_empty() {
+        return json_envelope(StatusCode::BAD_REQUEST, json!({ "error": "empty" }));
+    }
+    if content.len() > FAKE_MAX_FILE_SIZE {
+        return json_envelope(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({ "error": "too_large" }),
+        );
+    }
+    let Some(mime) = fake_image_type(&content) else {
+        return json_envelope(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({ "error": "not_an_image" }),
+        );
+    };
+    let md5 = hex::encode(Md5::digest(&content));
+    let seq = guard.next_id;
+    guard.next_id += 1;
+    let id = format!("{seq:032x}");
+    let fsize = content.len();
+    guard.files.push(StoredFile {
+        id: id.clone(),
+        device_id: device_id.clone(),
+        mime: mime.to_owned(),
+        content,
+    });
+
+    // Retain the latest FAKE_KEPT_UPLOADS per device_id plus any active wallpaper.
+    let active_wallpapers: HashSet<String> = guard.wallpapers.values().cloned().collect();
+    let mut kept_for_uploader = 0usize;
+    let mut keep_ids: HashSet<String> = HashSet::new();
+    for file in guard.files.iter().rev() {
+        if file.device_id == device_id {
+            if kept_for_uploader < FAKE_KEPT_UPLOADS {
+                keep_ids.insert(file.id.clone());
+                kept_for_uploader += 1;
+            }
+        } else {
+            keep_ids.insert(file.id.clone());
+        }
+    }
+    guard
+        .files
+        .retain(|f| keep_ids.contains(&f.id) || active_wallpapers.contains(&f.id));
+
+    json_envelope(
+        StatusCode::OK,
+        json!({
+            "url": format!("{}/api/files/{id}", state.base_url),
+            "fsize": fsize,
+            "md5": md5,
+            "mime": mime,
+        }),
+    )
+}
+
+async fn serve_file(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let guard = state.inner.lock().expect("fakecloud lock poisoned");
+    let Some(file) = guard.files.iter().find(|f| f.id == id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = axum::http::HeaderValue::from_str(&file.mime)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("application/octet-stream"));
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+            ),
+            (
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+            (
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static("default-src 'none'; sandbox"),
+            ),
+        ],
+        file.content,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct FakeWallpaperRequest {
+    wallpaper_url: String,
+}
+
+async fn set_wallpaper(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Bytes,
+) -> Response {
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if let Some(resp) = check_http_preconditions(&state, &Method::POST, pq, &headers, &body) {
+        return resp;
+    }
+    let mut guard = state.inner.lock().expect("fakecloud lock poisoned");
+    if bearer_valid(&guard, &headers).is_none() {
+        return token_invalid_resp();
+    }
+    let Some(device_id) = headers
+        .get("x-param-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    };
+    if !guard
+        .devices_by_id
+        .get(&device_id)
+        .is_some_and(|d| d.owner.as_deref() == Some("1"))
+    {
+        return json_envelope(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_value(error_envelope(ErrorCode::UnknownDevice, "no such device"))
+                .unwrap(),
+        );
+    }
+    let Ok(req) = serde_json::from_slice::<FakeWallpaperRequest>(&body) else {
+        return json_envelope(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::to_value(error_envelope(ErrorCode::InvalidRequest, "invalid request"))
+                .unwrap(),
+        );
+    };
+    if req.wallpaper_url.is_empty() {
+        guard.wallpapers.remove(&device_id);
+        return json_envelope(
+            StatusCode::OK,
+            serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+        );
+    }
+    let Some(file_id) = fake_parse_file_id_from_url(&req.wallpaper_url) else {
+        return json_envelope(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::to_value(error_envelope(ErrorCode::InvalidRequest, "invalid request"))
+                .unwrap(),
+        );
+    };
+    if !guard.files.iter().any(|f| f.id == file_id) {
+        return json_envelope(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::to_value(error_envelope(ErrorCode::InvalidRequest, "invalid request"))
+                .unwrap(),
+        );
+    }
+    guard.wallpapers.insert(device_id, file_id);
+    json_envelope(
+        StatusCode::OK,
+        serde_json::to_value(ok_envelope(EmptyData {})).unwrap(),
+    )
 }
 
 fn controller_platform(connect_options: &[u8]) -> Option<u8> {

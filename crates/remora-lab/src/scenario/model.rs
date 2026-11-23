@@ -280,6 +280,33 @@ pub enum StepAction {
         #[serde(default)]
         token: Option<String>,
     },
+    WallpaperToken {
+        #[serde(default = "default_wallpaper_filetype")]
+        filetype: u32,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
+    UploadFile {
+        url: String,
+        token: String,
+        content_hex: String,
+        #[serde(default)]
+        content_type: Option<String>,
+        #[serde(default)]
+        multipart_filename: Option<String>,
+    },
+    FetchFile {
+        url: String,
+    },
+    DeviceWallpaper {
+        wallpaper_url: String,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        device_id: Option<String>,
+    },
     RoomCreate {
         #[serde(default)]
         device_id: Option<String>,
@@ -500,6 +527,10 @@ fn default_login_status() -> u8 {
     1
 }
 
+fn default_wallpaper_filetype() -> u32 {
+    1
+}
+
 fn default_capture_type() -> i32 {
     1
 }
@@ -550,6 +581,8 @@ pub struct Expect {
     pub json_eq: BTreeMap<String, Value>,
     #[serde(default)]
     pub json_exists: Vec<String>,
+    #[serde(default)]
+    pub json_absent: Vec<String>,
     #[serde(default)]
     pub json_contains: BTreeMap<String, Value>,
 }

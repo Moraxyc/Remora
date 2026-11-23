@@ -1838,6 +1838,177 @@ async fn execute_action_step(
             };
             ("poll_device_status", StepOutcome::http_ok(matched_payload))
         }
+        StepAction::WallpaperToken {
+            filetype,
+            token,
+            device_id,
+        } => {
+            let resolved_token = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => actor_mutex.lock().await.user_token.clone(),
+            };
+            let resolved_device = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => actor_mutex.lock().await.device_id.clone(),
+            };
+            let path = format!("/api/v1/tool/fp/token?filetype={filetype}");
+            let out = {
+                let actor = actor_mutex.lock().await;
+                send_raw_http(
+                    &actor.raw_client,
+                    &env.base_url,
+                    env.sign_key.as_ref(),
+                    "GET",
+                    &path,
+                    None,
+                    None,
+                    resolved_token.as_deref(),
+                    resolved_device.as_deref(),
+                    true,
+                    &BTreeMap::new(),
+                    &actor.recorder,
+                )
+                .await?
+            };
+            if let Some(tok) = out.payload.get("token").and_then(Value::as_str) {
+                env.record_secret("upload_token", tok);
+            }
+            ("wallpaper_token", out)
+        }
+        StepAction::UploadFile {
+            url,
+            token,
+            content_hex,
+            content_type,
+            multipart_filename,
+        } => {
+            let resolved_url = env.resolve_template(url).await;
+            let resolved_token = env.resolve_template(token).await;
+            let bytes = hex::decode(content_hex)
+                .map_err(|e| LabError::Scenario(format!("upload_file invalid content_hex: {e}")))?;
+            let (body_bytes, header_ct) = if let Some(filename) = multipart_filename {
+                let boundary = "remora-lab-upload-boundary";
+                let part_ct = content_type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream");
+                let mut form = Vec::new();
+                form.extend_from_slice(
+                    format!(
+                        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {part_ct}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                );
+                form.extend_from_slice(&bytes);
+                form.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+                (
+                    form,
+                    Some(format!("multipart/form-data; boundary={boundary}")),
+                )
+            } else {
+                (bytes, content_type.clone())
+            };
+            let client = actor_mutex.lock().await.raw_client.clone();
+            let mut req = client
+                .post(&resolved_url)
+                .header(reqwest::header::AUTHORIZATION, resolved_token)
+                .body(body_bytes);
+            if let Some(ct) = header_ct {
+                req = req.header(reqwest::header::CONTENT_TYPE, ct);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| LabError::Scenario(format!("upload_file request failed: {e}")))?;
+            let status = resp.status().as_u16();
+            let resp_bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| LabError::Scenario(format!("upload_file read body failed: {e}")))?;
+            let payload: Value = serde_json::from_slice(&resp_bytes).unwrap_or(Value::Null);
+            (
+                "upload_file",
+                StepOutcome {
+                    http_status: Some(status),
+                    code: None,
+                    ack_status: None,
+                    event_name: None,
+                    payload,
+                },
+            )
+        }
+        StepAction::FetchFile { url } => {
+            let resolved_url = env.resolve_template(url).await;
+            let client = actor_mutex.lock().await.raw_client.clone();
+            let resp = client.get(&resolved_url).send().await.map_err(|e| {
+                LabError::Scenario(format!("fetch_file request failed: {}", e.without_url()))
+            })?;
+            let status = resp.status().as_u16();
+            let header_str = |name: reqwest::header::HeaderName| -> Option<String> {
+                resp.headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            let content_type = header_str(reqwest::header::CONTENT_TYPE);
+            let cache_control = header_str(reqwest::header::CACHE_CONTROL);
+            let nosniff = header_str(reqwest::header::X_CONTENT_TYPE_OPTIONS);
+            let csp = header_str(reqwest::header::CONTENT_SECURITY_POLICY);
+            let resp_bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| LabError::Scenario(format!("fetch_file read body failed: {e}")))?;
+            (
+                "fetch_file",
+                StepOutcome {
+                    http_status: Some(status),
+                    code: None,
+                    ack_status: None,
+                    event_name: None,
+                    payload: json!({
+                        "size": resp_bytes.len(),
+                        "content_hex": hex::encode(&resp_bytes),
+                        "content_type": content_type,
+                        "cache_control": cache_control,
+                        "x_content_type_options": nosniff,
+                        "csp": csp,
+                    }),
+                },
+            )
+        }
+        StepAction::DeviceWallpaper {
+            wallpaper_url,
+            token,
+            device_id,
+        } => {
+            let resolved_url = env.resolve_template(wallpaper_url).await;
+            let resolved_token = match token {
+                Some(t) => Some(env.resolve_template(t).await),
+                None => actor_mutex.lock().await.user_token.clone(),
+            };
+            let resolved_device = match device_id {
+                Some(d) => Some(env.resolve_template(d).await),
+                None => actor_mutex.lock().await.device_id.clone(),
+            };
+            let out = {
+                let actor = actor_mutex.lock().await;
+                send_raw_http(
+                    &actor.raw_client,
+                    &env.base_url,
+                    env.sign_key.as_ref(),
+                    "POST",
+                    "/api/v1/device/wallpaper",
+                    Some(json!({ "wallpaper_url": resolved_url })),
+                    None,
+                    resolved_token.as_deref(),
+                    resolved_device.as_deref(),
+                    true,
+                    &BTreeMap::new(),
+                    &actor.recorder,
+                )
+                .await?
+            };
+            ("device_wallpaper", out)
+        }
         StepAction::RawHttp {
             method,
             path,
@@ -3474,6 +3645,15 @@ async fn verify_expect(
             return Err(LabError::Scenario(format!(
                 "step {step_idx} ({actor}.{action}): expected non-empty path `{path}` in {}",
                 redact_value(&outcome.payload)
+            )));
+        }
+    }
+    for path in &expect.json_absent {
+        let actual = json_path(&outcome.payload, path);
+        if !matches!(actual, None | Some(Value::Null)) {
+            return Err(LabError::Scenario(format!(
+                "step {step_idx} ({actor}.{action}): expected absent/null path `{path}`, got {:?}",
+                actual.map(redact_value)
             )));
         }
     }
