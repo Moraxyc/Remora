@@ -29,6 +29,7 @@ const VIEWER_CMD_CAP: usize = 64;
 pub struct ViewerConfig {
     pub force_join: bool,
     pub force_relay: bool,
+    pub prefer_relay: bool,
     pub enable_hevc: bool,
     pub enable_audio: bool,
     pub capture_type: i32,
@@ -46,6 +47,7 @@ impl Default for ViewerConfig {
         Self {
             force_join: false,
             force_relay: false,
+            prefer_relay: false,
             enable_hevc: false,
             enable_audio: true,
             capture_type: pb::connect_options::TypeEnum::CtDesktop as i32,
@@ -286,6 +288,7 @@ impl ViewerSession {
         peer_cfg.app_control_id = ack_app_id.or(Some(app_control_id));
         peer_cfg.ice_servers = parse_ice_servers(&ice_servers);
         peer_cfg.force_relay = cloud_force_relay || config.force_relay;
+        peer_cfg.prefer_relay = config.prefer_relay;
         peer_cfg.feature_flag = feature_flag_from_caps(&profile.caps.features);
         peer_cfg.enable_hevc = config.enable_hevc;
         peer_cfg.enable_audio = config.enable_audio;

@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use prost::encoding::{WireType, decode_key, skip_field};
 use remora_proto::pb::{self, rpc_request};
 use remora_proto::session::DataChannel;
 use remora_proto::session::channels as official_channels;
@@ -15,7 +17,7 @@ use str0m::channel::ChannelId;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaData, MediaTime, Mid, Pt};
 
-use crate::platform::{EncodedAudioFrame, EncodedVideoFrame};
+use crate::platform::{Bytes, EncodedAudioFrame, EncodedVideoFrame};
 
 /// Standard UU data channel labels opened by the viewer in order.
 pub const DEFAULT_DATA_CHANNELS: [&str; 5] = [
@@ -165,7 +167,7 @@ pub fn write_video_frame(
     let wallclock = wallclock_anchor + Duration::from_millis(frame.pts_ms);
     let media_time = MediaTime::new(frame.pts_ms.saturating_mul(90), Frequency::NINETY_KHZ);
     writer
-        .write(pt, wallclock, media_time, frame.data.as_slice())
+        .write(pt, wallclock, media_time, frame.data.as_ref())
         .map_err(|e| ChannelError::Rtc(e.to_string()))?;
     Ok(())
 }
@@ -216,7 +218,7 @@ pub fn write_audio_frame(
     let wallclock = wallclock_anchor + Duration::from_millis(frame.pts_ms);
     let media_time = MediaTime::new(frame.pts_ms.saturating_mul(48), Frequency::FORTY_EIGHT_KHZ);
     writer
-        .write(pt, wallclock, media_time, frame.data.as_slice())
+        .write(pt, wallclock, media_time, frame.data.as_ref())
         .map_err(|e| ChannelError::Rtc(e.to_string()))?;
     Ok(())
 }
@@ -234,7 +236,7 @@ pub fn media_data_to_video_frame(data: &MediaData) -> Option<EncodedVideoFrame> 
         codec,
         is_keyframe,
         pts_ms,
-        data: data.data.to_vec(),
+        data: Bytes::from_owner(Arc::clone(&data.data)),
     })
 }
 
@@ -250,8 +252,26 @@ pub fn media_data_to_audio_frame(data: &MediaData) -> Option<EncodedAudioFrame> 
         pts_ms,
         sample_rate: data.params.spec().clock_rate.get(),
         channels,
-        data: data.data.to_vec(),
+        data: Bytes::from_owner(Arc::clone(&data.data)),
     })
+}
+
+/// Returns up to 32 top-level field numbers and wire types, stopping at a malformed field or group.
+pub fn inspect_protobuf_shape(mut bytes: &[u8]) -> Vec<(u32, u8)> {
+    const MAX_FIELDS: usize = 32;
+    let mut fields = Vec::new();
+    while fields.len() < MAX_FIELDS && !bytes.is_empty() {
+        let Ok((number, wire_type)) = decode_key(&mut bytes) else {
+            break;
+        };
+        if matches!(wire_type, WireType::StartGroup | WireType::EndGroup)
+            || skip_field(wire_type, number, &mut bytes, Default::default()).is_err()
+        {
+            break;
+        }
+        fields.push((number, wire_type as u8));
+    }
+    fields
 }
 
 /// Builds the host initialization burst sent when `CONTROL_DATA_CHANNEL` opens.
@@ -414,4 +434,46 @@ fn contains_annex_b_keyframe(codec: VideoCodec, bytes: &[u8]) -> bool {
         i += prefix;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inspect_protobuf_shape;
+
+    #[test]
+    fn protobuf_shape_skips_payloads_without_exposing_nested_tags() {
+        let bytes = [
+            0x08, 0x96, 0x01, // field 1, varint
+            0x11, 0, 1, 2, 3, 4, 5, 6, 7, // field 2, fixed64
+            0x1A, 0x02, 0x08, 0x01, // field 3, length-delimited (nested field)
+            0xAD, 0x02, 0, 1, 2, 3, // field 37, fixed32
+        ];
+        assert_eq!(
+            inspect_protobuf_shape(&bytes),
+            [(1, 0), (2, 1), (3, 2), (37, 5)]
+        );
+    }
+
+    #[test]
+    fn protobuf_shape_stops_at_truncation() {
+        for incomplete in [&[0x80][..], &[0x10, 0x80], &[0x12, 2, 0], &[0x15, 0, 0]] {
+            let mut bytes = vec![0x08, 0x01];
+            bytes.extend_from_slice(incomplete);
+            assert_eq!(inspect_protobuf_shape(&bytes), [(1, 0)]);
+        }
+    }
+
+    #[test]
+    fn protobuf_shape_stops_at_invalid_keys_and_unsupported_wire_types() {
+        for key in [0x00, 0x13, 0x14, 0x16, 0x17] {
+            assert_eq!(inspect_protobuf_shape(&[0x08, 0, key, 0x18, 0]), [(1, 0)]);
+        }
+        assert!(inspect_protobuf_shape(&[0x80, 0x80, 0x80, 0x80, 0x10, 0]).is_empty());
+    }
+
+    #[test]
+    fn protobuf_shape_caps_the_number_of_fields() {
+        let bytes = [0x08, 0x01].repeat(33);
+        assert_eq!(inspect_protobuf_shape(&bytes), vec![(1, 0); 32]);
+    }
 }

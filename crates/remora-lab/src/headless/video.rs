@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use remora_endpoint::platform::{EncodedVideoFrame, PlatformError, VideoSink, VideoSource};
+use remora_endpoint::platform::{Bytes, EncodedVideoFrame, PlatformError, VideoSink, VideoSource};
 use remora_proto::session::media::VideoCodec;
 
 /// Default frame interval (30 fps) used when assigning monotonic timestamps to Annex-B units.
@@ -204,7 +204,7 @@ pub fn parse_annex_b_frames(
                     codec: VideoCodec::H264,
                     is_keyframe,
                     pts_ms,
-                    data,
+                    data: Bytes::from(data),
                 });
             }
             0 => {
@@ -275,7 +275,7 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: false,
             pts_ms: 0,
-            data: vec![1, 2, 3, 4],
+            data: Bytes::from_static(&[1, 2, 3, 4]),
         };
         assert!(sink.push_frame(&bad_start).is_err());
 
@@ -283,7 +283,7 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: true,
             pts_ms: 0,
-            data: vec![0, 0, 0, 1, 0x41, 0x9A],
+            data: Bytes::from_static(&[0, 0, 0, 1, 0x41, 0x9A]),
         };
         assert!(sink.push_frame(&bad_idr).is_err());
         assert_eq!(sink.frames, 0);

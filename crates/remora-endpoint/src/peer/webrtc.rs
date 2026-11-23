@@ -36,15 +36,17 @@ use tracing::{debug, info, warn};
 
 use crate::peer::channels::{
     ChannelError, ChannelRegistry, DEFAULT_DATA_CHANNELS, build_host_init_burst,
-    build_send_video_track_request, media_data_to_audio_frame, media_data_to_video_frame,
-    write_audio_frame, write_channel, write_video_frame,
+    build_send_video_track_request, inspect_protobuf_shape, media_data_to_audio_frame,
+    media_data_to_video_frame, write_audio_frame, write_channel, write_video_frame,
 };
+use crate::peer::governor::{GovernorConfig, GovernorSample, VideoGovernor};
 use crate::peer::turn::{TurnAllocation, TurnError, stun_binding_address};
 use crate::platform::{EncodedAudioFrame, EncodedVideoFrame};
 
 const CMD_CAP: usize = 256;
 const EVENT_CAP: usize = 256;
 const UDP_RECV_CAP: usize = 512;
+const VIDEO_STATS_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_COMPRESSED_SDP_B64: usize = 2 * 1024 * 1024;
 const MAX_SDP_BYTES: usize = 1024 * 1024;
 
@@ -202,12 +204,15 @@ pub struct PeerSessionConfig {
     pub app_control_id: Option<String>,
     pub ice_servers: Vec<IceServerSpec>,
     pub force_relay: bool,
+    pub prefer_relay: bool,
+    pub controller_platform: Option<u8>,
     pub feature_flag: pb::FeatureFlag,
     pub enable_hevc: bool,
     pub enable_audio: bool,
     pub video_width: i32,
     pub video_height: i32,
     pub video_fps: i32,
+    pub video_governor: Option<GovernorConfig>,
     pub clipboard_enabled: bool,
     pub local_probe_target: Option<SocketAddr>,
 }
@@ -218,6 +223,7 @@ impl fmt::Debug for PeerSessionConfig {
             .field("role", &self.role)
             .field("ice_id", &self.ice_id)
             .field("force_relay", &self.force_relay)
+            .field("prefer_relay", &self.prefer_relay)
             .field("ice_servers", &self.ice_servers)
             .field("enable_hevc", &self.enable_hevc)
             .field("enable_audio", &self.enable_audio)
@@ -234,6 +240,8 @@ impl PeerSessionConfig {
             app_control_id: None,
             ice_servers: Vec::new(),
             force_relay: false,
+            prefer_relay: false,
+            controller_platform: None,
             feature_flag: pb::FeatureFlag {
                 ff_capture_setting: 4,
                 ff_simple_action: 2,
@@ -246,6 +254,7 @@ impl PeerSessionConfig {
             video_width: 1920,
             video_height: 1080,
             video_fps: 30,
+            video_governor: None,
             clipboard_enabled: true,
             local_probe_target: None,
         }
@@ -273,18 +282,37 @@ pub struct PeerStats {
 #[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum PeerSessionEvent {
-    Connected { ice_id: String, is_relayed: bool },
-    ControlChannelReady { ice_id: String },
-    PeerReady { ice_id: String },
+    Connected {
+        ice_id: String,
+        is_relayed: bool,
+    },
+    ControlChannelReady {
+        ice_id: String,
+    },
+    PeerReady {
+        ice_id: String,
+    },
     Input(InputMessage),
     ClipboardText(String),
     VideoFrame(EncodedVideoFrame),
     AudioFrame(EncodedAudioFrame),
+    VideoCapChanged {
+        bitrate_kbps: u32,
+        fps_cap: Option<u32>,
+    },
     Control(Box<ControlMessage>),
     KeyframeRequested,
-    EchoTimedOut { ice_id: String, request_seq: i64 },
-    RawChannelData { channel: DataChannel, data: Vec<u8> },
-    Closed { ice_id: String },
+    EchoTimedOut {
+        ice_id: String,
+        request_seq: i64,
+    },
+    RawChannelData {
+        channel: DataChannel,
+        data: Vec<u8>,
+    },
+    Closed {
+        ice_id: String,
+    },
 }
 
 impl fmt::Debug for PeerSessionEvent {
@@ -318,6 +346,14 @@ impl fmt::Debug for PeerSessionEvent {
                 .debug_struct("AudioFrame")
                 .field("pts_ms", &frame.pts_ms)
                 .field("len", &frame.data.len())
+                .finish(),
+            Self::VideoCapChanged {
+                bitrate_kbps,
+                fps_cap,
+            } => f
+                .debug_struct("VideoCapChanged")
+                .field("bitrate_kbps", bitrate_kbps)
+                .field("fps_cap", fps_cap)
                 .finish(),
             Self::Control(msg) => f.debug_tuple("Control").field(msg).finish(),
             Self::KeyframeRequested => f.write_str("KeyframeRequested"),
@@ -479,8 +515,37 @@ impl PeerHandle {
         config: PeerSessionConfig,
         signaling: Arc<R>,
     ) -> Result<Self, PeerSessionError> {
+        let turn_alloc = TurnAllocation::allocate_first(&config.ice_servers).await?;
+        let effective_force_relay = if turn_alloc.is_none() {
+            if config.force_relay {
+                return Err(PeerSessionError::NoRelayAvailable);
+            }
+            if config.prefer_relay {
+                warn!(ice_id = %config.ice_id, "prefer_relay requested but no TURN relay available; falling back to direct ICE");
+            }
+            false
+        } else {
+            config.force_relay || config.prefer_relay
+        };
+
         let start_instant = Instant::now();
         let mut rtc_cfg = RtcConfig::new().set_sctp_max_message_size(262_144);
+        let video_governor = if config.role == PeerRole::Host {
+            config.video_governor.clone().map(|governor_config| {
+                let mut governor = VideoGovernor::new(governor_config);
+                if let Ok(nominal_fps) = u32::try_from(config.video_fps)
+                    && nominal_fps > 0
+                {
+                    governor.set_requested_limits(None, nominal_fps);
+                }
+                governor
+            })
+        } else {
+            None
+        };
+        if video_governor.is_some() {
+            rtc_cfg = rtc_cfg.set_stats_interval(Some(VIDEO_STATS_INTERVAL));
+        }
         {
             let codecs = rtc_cfg.codec_config();
             codecs.clear();
@@ -493,7 +558,7 @@ impl PeerHandle {
         let mut host_sockets: Vec<(SocketAddr, Arc<UdpSocket>)> = Vec::new();
         let mut local_candidates: Vec<Candidate> = Vec::new();
 
-        if !config.force_relay {
+        if !effective_force_relay {
             let mut bound_ips = Vec::new();
             if let Some(lan_ip) = detect_local_ip(config.local_probe_target).await
                 && !lan_ip.is_loopback()
@@ -544,15 +609,11 @@ impl PeerHandle {
             }
         }
 
-        let mut turn_alloc = TurnAllocation::allocate_first(&config.ice_servers).await?;
-        if let Some(alloc) = &turn_alloc {
-            if let Ok(cand) = Candidate::relayed(alloc.relayed_addr(), alloc.local_addr(), "udp")
-                && let Some(added) = rtc.add_local_candidate(cand)
-            {
-                local_candidates.push(added.clone());
-            }
-        } else if config.force_relay {
-            return Err(PeerSessionError::NoRelayAvailable);
+        if let Some(alloc) = &turn_alloc
+            && let Ok(cand) = Candidate::relayed(alloc.relayed_addr(), alloc.local_addr(), "udp")
+            && let Some(added) = rtc.add_local_candidate(cand)
+        {
+            local_candidates.push(added.clone());
         }
 
         let mut machine =
@@ -563,8 +624,9 @@ impl PeerHandle {
             config.ice_id.clone(),
             config.remote_client_id.clone(),
             config.app_control_id.clone(),
-            config.force_relay,
+            effective_force_relay,
         );
+        machine.set_controller_platform(config.controller_platform);
 
         let mut pending_offer: Option<SdpPendingOffer> = None;
         let mut initial_mid: Option<String> = None;
@@ -620,6 +682,8 @@ impl PeerHandle {
         let ice_id = config.ice_id.clone();
         let state = PeerLoopState {
             config,
+            effective_force_relay,
+            video_governor,
             start_instant,
             rtc,
             machine,
@@ -627,7 +691,7 @@ impl PeerHandle {
             host_sockets,
             udp_tasks,
             udp_rx,
-            turn_alloc: turn_alloc.take(),
+            turn_alloc,
             signaling,
             pending_offer,
             initial_mid,
@@ -708,6 +772,8 @@ impl PeerHandle {
 
 struct PeerLoopState<R: SignalingRelay> {
     config: PeerSessionConfig,
+    effective_force_relay: bool,
+    video_governor: Option<VideoGovernor>,
     start_instant: Instant,
     rtc: Rtc,
     machine: PeerMachine<StdRng>,
@@ -1003,7 +1069,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                 }
                 Str0mOutput::Event(ev) => match ev {
                     Str0mEvent::Connected => {
-                        let is_relayed = self.config.force_relay
+                        let is_relayed = self.effective_force_relay
                             || (self.last_tx_was_relay && self.last_rx_was_relay)
                             || (self.stats.turn_packets_tx > 0 && self.stats.host_packets_tx == 0);
                         self.stats.connected = true;
@@ -1080,6 +1146,27 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                             self.emit(PeerSessionEvent::AudioFrame(frame)).await;
                         }
                     }
+                    Str0mEvent::MediaEgressStats(stats) => {
+                        if self.registry.video_tx_mid() == Some(stats.mid)
+                            && let Some(governor) = &mut self.video_governor
+                            && let Some(loss) = stats.loss
+                            && let Some(decision) = governor.on_sample(GovernorSample {
+                                now: stats
+                                    .timestamp
+                                    .saturating_duration_since(self.start_instant),
+                                fraction_lost_pct: loss * 100.0,
+                                rtt_ms: stats
+                                    .rtt
+                                    .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX)),
+                            })
+                        {
+                            self.emit(PeerSessionEvent::VideoCapChanged {
+                                bitrate_kbps: decision.bitrate_kbps,
+                                fps_cap: decision.fps_cap,
+                            })
+                            .await;
+                        }
+                    }
                     Str0mEvent::KeyframeRequest(_) => {
                         self.emit(PeerSessionEvent::KeyframeRequested).await;
                     }
@@ -1103,7 +1190,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     }
                 }
                 PeerTransmit::ApplyRemoteOffer { sdp, .. } => {
-                    let sdp = if self.config.force_relay {
+                    let sdp = if self.effective_force_relay {
                         filter_sdp_relay_only(&sdp)
                     } else {
                         sdp
@@ -1133,7 +1220,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     }
                 }
                 PeerTransmit::ApplyRemoteAnswer { sdp, .. } => {
-                    let sdp = if self.config.force_relay {
+                    let sdp = if self.effective_force_relay {
                         filter_sdp_relay_only(&sdp)
                     } else {
                         sdp
@@ -1161,7 +1248,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                         .unwrap_or(candidate.trim());
                     match Candidate::from_sdp_string(trimmed) {
                         Ok(cand) => {
-                            if self.config.force_relay && cand.kind() != CandidateKind::Relayed {
+                            if self.effective_force_relay && cand.kind() != CandidateKind::Relayed {
                                 continue;
                             }
                             if let Some(alloc) = &mut self.turn_alloc {
@@ -1280,6 +1367,9 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     self.emit(PeerSessionEvent::PeerReady { ice_id }).await;
                 }
                 PeerEvent::Control(msg) => {
+                    if let ControlMessage::Unknown { raw, .. } = msg.as_ref() {
+                        debug!(ice_id = %self.config.ice_id, len = raw.len(), fields = ?inspect_protobuf_shape(raw), "received unknown control protobuf");
+                    }
                     self.emit(PeerSessionEvent::Control(msg)).await;
                 }
                 PeerEvent::Input(input) => {
@@ -1410,8 +1500,51 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: keyframe,
             pts_ms,
-            data,
+            data: data.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn force_relay_without_turn_fails() {
+        let (signaling, _outgoing) = ChannelSignalingRelay::new();
+        let mut config = PeerSessionConfig::new(PeerRole::Host, "ice-force-relay");
+        config.force_relay = true;
+        assert!(matches!(
+            PeerHandle::spawn(config, Arc::new(signaling)).await,
+            Err(PeerSessionError::NoRelayAvailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn prefer_relay_without_turn_offers_direct_ice() {
+        let (signaling, mut outgoing) = ChannelSignalingRelay::new();
+        let mut config = PeerSessionConfig::new(PeerRole::Viewer, "ice-prefer-relay");
+        config.prefer_relay = true;
+        let peer = PeerHandle::spawn(config, Arc::new(signaling))
+            .await
+            .unwrap();
+
+        let Some(PeerSignalingOut::Soac(offer)) =
+            tokio::time::timeout(Duration::from_secs(2), outgoing.recv())
+                .await
+                .unwrap()
+        else {
+            panic!("expected viewer offer");
+        };
+        let offer: SoacEvent = serde_json::from_value(offer).unwrap();
+        let Some(sdp) = offer
+            .data
+            .as_ref()
+            .and_then(|data| data.get("sdp"))
+            .and_then(Value::as_str)
+        else {
+            panic!("expected SDP in viewer offer");
+        };
+        assert!(
+            sdp.lines()
+                .any(|line| line.starts_with("a=candidate:") && line.contains(" typ host"))
+        );
+        peer.close().await;
     }
 
     #[tokio::test]

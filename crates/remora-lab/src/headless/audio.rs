@@ -1,6 +1,6 @@
 //! Headless audio source and sink.
 
-use remora_endpoint::platform::{AudioSink, AudioSource, EncodedAudioFrame, PlatformError};
+use remora_endpoint::platform::{AudioSink, AudioSource, Bytes, EncodedAudioFrame, PlatformError};
 use remora_proto::session::media::AudioCodec;
 
 /// Emits a finite number of empty Opus placeholder frames.
@@ -32,7 +32,7 @@ impl AudioSource for SilenceAudioSource {
             pts_ms,
             sample_rate: 48_000,
             channels: 2,
-            data: vec![0xF8, 0xFF, 0xFE],
+            data: Bytes::from_static(&[0xF8, 0xFF, 0xFE]),
         }))
     }
 }

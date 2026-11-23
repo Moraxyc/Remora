@@ -2,7 +2,7 @@
 
 use remora_proto::session::media::AudioCodec;
 
-use super::PlatformError;
+use super::{Bytes, PlatformError};
 
 /// One encoded audio frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub struct EncodedAudioFrame {
     pub pts_ms: u64,
     pub sample_rate: u32,
     pub channels: u16,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 /// Produces encoded audio frames.

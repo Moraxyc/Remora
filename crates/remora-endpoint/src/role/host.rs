@@ -440,6 +440,7 @@ impl HostSupervisor {
         peer_cfg.app_control_id = bc.app_control_id;
         peer_cfg.ice_servers = parse_ice_servers(&bc.ice_servers);
         peer_cfg.force_relay = bc.force_relay || self.config.force_relay;
+        peer_cfg.controller_platform = bc.controller_platform;
         peer_cfg.feature_flag = self.host_features;
         peer_cfg.enable_hevc = self.config.enable_hevc;
         peer_cfg.enable_audio = self.config.enable_audio;

@@ -8,6 +8,7 @@ pub mod video;
 use std::fmt;
 
 pub use audio::{AudioSink, AudioSource, EncodedAudioFrame};
+pub use bytes::Bytes;
 pub use clipboard::Clipboard;
 pub use input::{InputSink, InputSource};
 pub use video::{EncodedVideoFrame, VideoSink, VideoSource};

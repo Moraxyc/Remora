@@ -2,7 +2,7 @@
 
 use remora_proto::session::media::VideoCodec;
 
-use super::PlatformError;
+use super::{Bytes, PlatformError};
 
 /// One encoded video access unit (for H.264/H.265, Annex-B byte stream).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +10,7 @@ pub struct EncodedVideoFrame {
     pub codec: VideoCodec,
     pub is_keyframe: bool,
     pub pts_ms: u64,
-    pub data: Vec<u8>,
+    pub data: Bytes,
 }
 
 /// Produces encoded video frames for outbound streaming.
