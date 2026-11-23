@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use hmac::{Hmac, KeyInit, Mac};
 use md5::{Digest as _, Md5};
-use rand::RngCore;
+use rand::Rng;
 use remora_proto::machine::peer::IceServerSpec;
 use sha1::Sha1;
 use tokio::net::UdpSocket;

@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
-use rand::SeedableRng;
 use remora_endpoint::Endpoint;
 use remora_endpoint::client::driver::drive_machine_with;
 use remora_endpoint::client::http::{ControlClient, HttpError};
@@ -2604,7 +2603,7 @@ async fn spawn_ws_handle(
     let task = tokio::spawn(async move {
         let anchor = tokio::time::Instant::now();
         let mut machine = SignalingMachine::with_signal_profile(
-            rand::rngs::StdRng::from_os_rng(),
+            rand::make_rng::<rand::rngs::StdRng>(),
             &profile.signal,
         );
         machine.connect(Timestamp::ZERO);

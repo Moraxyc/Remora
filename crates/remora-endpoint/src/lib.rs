@@ -22,8 +22,7 @@ mod sdk {
     use std::time::Duration;
 
     use futures_core::Stream;
-    use rand::RngCore;
-    use rand::SeedableRng;
+    use rand::Rng;
     use remora_proto::control::{
         ApiError, AssistDeviceRecordPage, AssistFavoritesRequest, AssistRoomConfig,
         CancelRemoteAssistRequest, DeviceGroupsResponse, DeviceInitRequest, DeviceInitResponse,
@@ -1425,7 +1424,7 @@ mod sdk {
 
             let anchor = Instant::now();
             let mut machine = SignalingMachine::with_signal_profile(
-                rand::rngs::StdRng::from_os_rng(),
+                rand::make_rng::<rand::rngs::StdRng>(),
                 &endpoint.inner.profile.signal,
             );
             machine.connect(Timestamp::ZERO);

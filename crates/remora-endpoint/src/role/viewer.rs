@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message as _;
-use rand::RngCore as _;
+use rand::Rng as _;
 use remora_proto::machine::peer::{PeerRole, parse_ice_servers};
 use remora_proto::machine::signaling::SignalingEvent;
 use remora_proto::pb;
