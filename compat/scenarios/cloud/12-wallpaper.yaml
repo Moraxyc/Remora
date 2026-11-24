@@ -108,15 +108,21 @@ steps:
       http_status: 200
       code: 0
 
-  # Viewer sees wallpaper_url in device/list
+  # Viewer sees wallpaper_url in device/list (both in current_device and my_binded_devices)
   - actor: viewer
     action: device_list
     token: "${host.user_token}"
+    device_id: "${host.device_id}"
     expect:
       http_status: 200
       code: 0
       json_eq:
-        my_binded_devices.0.wallpaper_url: "${vars.png1_url}"
+        current_device.device_id: "${host.device_id}"
+        current_device.wallpaper_url: "${vars.png1_url}"
+      json_contains:
+        my_binded_devices:
+          device_id: "${host.device_id}"
+          wallpaper_url: "${vars.png1_url}"
 
   # Uploads #3..#6 push #2 outside the latest-4 retention window while active wallpaper #1 is kept
   - actor: host
@@ -205,13 +211,14 @@ steps:
   - actor: viewer
     action: device_list
     token: "${host.user_token}"
+    device_id: "${host.device_id}"
     expect:
       http_status: 200
       code: 0
       json_eq:
-        my_binded_devices.0.device_id: "${host.device_id}"
+        current_device.device_id: "${host.device_id}"
       json_absent:
-        - my_binded_devices.0.wallpaper_url
+        - current_device.wallpaper_url
 
   # Unbind deletes the device's remaining uploads
   - actor: viewer
