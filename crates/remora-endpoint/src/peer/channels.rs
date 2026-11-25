@@ -2,11 +2,11 @@
 //! and [`crate::platform`] frame types.
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use prost::encoding::{WireType, decode_key, skip_field};
+use prost::encoding::{WireType, decode_key, decode_varint, skip_field};
 use remora_proto::pb::{self, rpc_request};
 use remora_proto::session::DataChannel;
 use remora_proto::session::channels as official_channels;
@@ -502,6 +502,107 @@ pub fn inspect_protobuf_shape(mut bytes: &[u8]) -> Vec<(u32, u8)> {
     fields
 }
 
+fn is_complete_wire_message(mut bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut count = 0usize;
+    while !bytes.is_empty() {
+        let Ok((number, wire_type)) = decode_key(&mut bytes) else {
+            return false;
+        };
+        if number == 0
+            || matches!(wire_type, WireType::StartGroup | WireType::EndGroup)
+            || skip_field(wire_type, number, &mut bytes, Default::default()).is_err()
+        {
+            return false;
+        }
+        count += 1;
+    }
+    count > 0
+}
+
+/// Formats a content-free structural summary of a protobuf wire payload (up to 3 nested levels,
+/// 16 fields per level): field numbers, varints, and byte lengths only, never raw byte contents.
+pub fn format_protobuf_shape(bytes: &[u8]) -> String {
+    fn walk(mut bytes: &[u8], depth: u8, out: &mut String) {
+        const MAX_DEPTH: u8 = 3;
+        const MAX_FIELDS: usize = 16;
+        let mut count = 0usize;
+        while !bytes.is_empty() {
+            if count >= MAX_FIELDS {
+                out.push_str(" ...");
+                return;
+            }
+            let Ok((number, wire_type)) = decode_key(&mut bytes) else {
+                if count > 0 {
+                    out.push(' ');
+                }
+                out.push('?');
+                return;
+            };
+            if count > 0 {
+                out.push(' ');
+            }
+            match wire_type {
+                WireType::Varint => {
+                    let Ok(v) = decode_varint(&mut bytes) else {
+                        out.push('?');
+                        return;
+                    };
+                    let _ = write!(out, "{number}=v{v}");
+                }
+                WireType::SixtyFourBit => {
+                    if bytes.len() < 8 {
+                        out.push('?');
+                        return;
+                    }
+                    bytes = &bytes[8..];
+                    let _ = write!(out, "{number}:f64");
+                }
+                WireType::ThirtyTwoBit => {
+                    if bytes.len() < 4 {
+                        out.push('?');
+                        return;
+                    }
+                    bytes = &bytes[4..];
+                    let _ = write!(out, "{number}:f32");
+                }
+                WireType::LengthDelimited => {
+                    let Ok(len) = decode_varint(&mut bytes) else {
+                        out.push('?');
+                        return;
+                    };
+                    let Ok(len) = usize::try_from(len) else {
+                        out.push('?');
+                        return;
+                    };
+                    let Some((payload, rest)) = bytes.split_at_checked(len) else {
+                        out.push('?');
+                        return;
+                    };
+                    bytes = rest;
+                    let _ = write!(out, "{number}:{}b", payload.len());
+                    if depth < MAX_DEPTH && is_complete_wire_message(payload) {
+                        out.push('{');
+                        walk(payload, depth + 1, out);
+                        out.push('}');
+                    }
+                }
+                WireType::StartGroup | WireType::EndGroup => {
+                    let _ = write!(out, "{number}:group?");
+                    return;
+                }
+            }
+            count += 1;
+        }
+    }
+
+    let mut out = String::new();
+    walk(bytes, 0, &mut out);
+    out
+}
+
 /// Builds the host initialization burst sent when `CONTROL_DATA_CHANNEL` opens.
 pub fn build_host_init_burst(
     mut alloc_seq: impl FnMut() -> i64,
@@ -666,9 +767,43 @@ fn contains_annex_b_keyframe(codec: VideoCodec, bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
+    use remora_proto::pb;
     use remora_proto::session::DataChannel;
 
-    use super::{ChannelOutbox, EnqueueStatus, OUTBOX_CAPACITY, inspect_protobuf_shape};
+    use super::{
+        ChannelOutbox, EnqueueStatus, OUTBOX_CAPACITY, format_protobuf_shape,
+        inspect_protobuf_shape,
+    };
+
+    #[test]
+    fn format_protobuf_shape_summarizes_structure_without_leaking_bytes() {
+        let rpc = pb::RpcRequest {
+            request_header: Some(pb::RequestHeader { request_id: 42 }),
+            which: Some(pb::rpc_request::Which::TextChangeRequest(
+                pb::ClipboardTextChangeRequest {
+                    format_id: 1,
+                    data: "secret-clip-text".to_owned(),
+                },
+            )),
+        };
+        let encoded = rpc.encode_to_vec();
+        let summary = format_protobuf_shape(&encoded);
+        assert!(summary.contains("1=v42"), "{summary}");
+        assert!(summary.contains("1=v1"), "{summary}");
+        assert!(summary.contains("2:16b"), "{summary}");
+        assert!(!summary.contains("secret"), "{summary}");
+    }
+
+    #[test]
+    fn format_protobuf_shape_bounds_depth_fields_and_truncation() {
+        let wide = [0x08, 0x01].repeat(18);
+        let summary = format_protobuf_shape(&wide);
+        assert!(summary.ends_with(" ..."), "{summary}");
+
+        let truncated = [0x08, 0x01, 0x12, 0x05, 0x01];
+        assert_eq!(format_protobuf_shape(&truncated), "1=v1 ?");
+    }
 
     #[test]
     fn outbox_coalesces_metrics_and_bounds_fifo_replies() {

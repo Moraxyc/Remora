@@ -18,6 +18,7 @@ use remora_proto::machine::peer::{
 use remora_proto::machine::{Machine, Timestamp};
 use remora_proto::pb;
 use remora_proto::session::DataChannel;
+use remora_proto::session::clipboard::extract_clipboard_message;
 use remora_proto::session::control::{ControlMessage, encode_message};
 use remora_proto::session::file::FileMessage;
 use remora_proto::session::input::InputMessage;
@@ -40,9 +41,9 @@ use tracing::{debug, info, warn};
 
 use crate::peer::channels::{
     ChannelError, ChannelOutbox, ChannelRegistry, DEFAULT_DATA_CHANNELS, EnqueueStatus,
-    build_host_init_burst, build_send_video_track_request, inspect_protobuf_shape,
-    media_data_to_audio_frame, media_data_to_video_frame, register_video_extensions,
-    write_audio_frame, write_channel, write_video_frame,
+    build_host_init_burst, build_send_video_track_request, format_protobuf_shape,
+    inspect_protobuf_shape, media_data_to_audio_frame, media_data_to_video_frame,
+    register_video_extensions, write_audio_frame, write_channel, write_video_frame,
 };
 use crate::peer::governor::{GovernorConfig, GovernorSample, VideoGovernor};
 use crate::peer::turn::{TurnAllocation, TurnError, stun_binding_address};
@@ -54,6 +55,7 @@ const UDP_RECV_CAP: usize = 512;
 const VIDEO_STATS_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_COMPRESSED_SDP_B64: usize = 2 * 1024 * 1024;
 const MAX_SDP_BYTES: usize = 1024 * 1024;
+const MAX_CLIPBOARD_SHAPE_LOGS: usize = 24;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -874,6 +876,7 @@ impl PeerHandle {
             local_candidates,
             last_tx_was_relay: false,
             last_rx_was_relay: false,
+            clipboard_shape_logs: 0,
             closing_deadline: None,
         };
 
@@ -1033,6 +1036,7 @@ struct PeerLoopState<R: SignalingRelay> {
     local_candidates: Vec<Candidate>,
     last_tx_was_relay: bool,
     last_rx_was_relay: bool,
+    clipboard_shape_logs: usize,
     closing_deadline: Option<Instant>,
 }
 
@@ -1700,7 +1704,24 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                 }
                 PeerEvent::Control(msg) => {
                     if let ControlMessage::Unknown { raw, .. } = msg.as_ref() {
-                        debug!(ice_id = %self.config.ice_id, len = raw.len(), fields = ?inspect_protobuf_shape(raw), "received unknown control protobuf");
+                        debug!(
+                            ice_id = %self.config.ice_id,
+                            len = raw.len(),
+                            fields = ?inspect_protobuf_shape(raw),
+                            shape = %format_protobuf_shape(raw),
+                            "received unknown control protobuf"
+                        );
+                    } else if self.clipboard_shape_logs < MAX_CLIPBOARD_SHAPE_LOGS
+                        && tracing::enabled!(tracing::Level::DEBUG)
+                        && extract_clipboard_message(&msg).is_some()
+                    {
+                        self.clipboard_shape_logs += 1;
+                        let encoded = encode_message(&msg);
+                        debug!(
+                            ice_id = %self.config.ice_id,
+                            shape = %format_protobuf_shape(&encoded),
+                            "received clipboard RPC shape"
+                        );
                     }
                     self.emit(PeerSessionEvent::Control(msg)).await;
                 }
