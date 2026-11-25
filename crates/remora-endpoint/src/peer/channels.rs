@@ -1,7 +1,7 @@
 //! Bridges `str0m` WebRTC data channels and media tracks with `remora_proto::session` codecs
 //! and [`crate::platform`] frame types.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,9 @@ use str0m::format::Codec;
 use str0m::media::{Frequency, MediaData, MediaTime, Mid, Pt};
 
 use crate::platform::{Bytes, EncodedAudioFrame, EncodedVideoFrame};
+
+/// Maximum ordered frames buffered per channel while closed or SCTP-backpressured.
+pub const OUTBOX_CAPACITY: usize = 64;
 
 /// Standard UU data channel labels opened by the viewer in order.
 pub const DEFAULT_DATA_CHANNELS: [&str; 5] = [
@@ -121,6 +124,115 @@ impl ChannelRegistry {
 
     pub fn video_rx_mid(&self) -> Option<Mid> {
         self.video_rx_mid
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChannelBuffer {
+    replies: VecDeque<Vec<u8>>,
+    latest_metrics: Option<Vec<u8>>,
+    overflow_reported: bool,
+}
+
+/// Result of attempting to buffer an ordered outbound frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueStatus {
+    Queued,
+    DroppedFirstOverflow,
+    Dropped,
+}
+
+/// Per-channel outbound buffer with bounded FIFO replies and a single coalescing metrics slot.
+#[derive(Debug, Default)]
+pub struct ChannelOutbox {
+    buffers: HashMap<DataChannel, ChannelBuffer>,
+}
+
+impl ChannelOutbox {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn has_pending(&self, channel: &DataChannel) -> bool {
+        self.buffers
+            .get(channel)
+            .is_some_and(|buf| !buf.replies.is_empty() || buf.latest_metrics.is_some())
+    }
+
+    pub fn has_any_pending(&self) -> bool {
+        self.buffers
+            .values()
+            .any(|buf| !buf.replies.is_empty() || buf.latest_metrics.is_some())
+    }
+
+    pub fn enqueue_reply(&mut self, channel: DataChannel, data: Vec<u8>) -> EnqueueStatus {
+        let buf = self.buffers.entry(channel).or_default();
+        if buf.replies.len() >= OUTBOX_CAPACITY {
+            if !buf.overflow_reported {
+                buf.overflow_reported = true;
+                return EnqueueStatus::DroppedFirstOverflow;
+            }
+            return EnqueueStatus::Dropped;
+        }
+        buf.replies.push_back(data);
+        EnqueueStatus::Queued
+    }
+
+    pub fn set_metrics(&mut self, channel: DataChannel, data: Vec<u8>) {
+        let buf = self.buffers.entry(channel).or_default();
+        buf.latest_metrics = Some(data);
+    }
+
+    /// Flushes queued frames for `channel`, preserving unsent frames on `ChannelNotOpen` or `BufferFull`.
+    pub fn flush_channel(
+        &mut self,
+        rtc: &mut Rtc,
+        registry: &ChannelRegistry,
+        channel: &DataChannel,
+    ) -> Result<usize, ChannelError> {
+        let Some(buf) = self.buffers.get_mut(channel) else {
+            return Ok(0);
+        };
+        let mut sent = 0usize;
+        while let Some(front) = buf.replies.front() {
+            match write_channel(rtc, registry, channel, front) {
+                Ok(()) => {
+                    buf.replies.pop_front();
+                    sent += 1;
+                }
+                Err(err) => return if sent > 0 { Ok(sent) } else { Err(err) },
+            }
+        }
+        if let Some(metrics) = buf.latest_metrics.as_deref() {
+            match write_channel(rtc, registry, channel, metrics) {
+                Ok(()) => {
+                    buf.latest_metrics = None;
+                    sent += 1;
+                }
+                Err(err) => return if sent > 0 { Ok(sent) } else { Err(err) },
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Flushes every channel that is currently open in `registry` and has pending frames.
+    pub fn flush_open(&mut self, rtc: &mut Rtc, registry: &ChannelRegistry) -> usize {
+        let channels: Vec<DataChannel> = self
+            .buffers
+            .iter()
+            .filter(|(ch, buf)| {
+                registry.channel_id(ch).is_some()
+                    && (!buf.replies.is_empty() || buf.latest_metrics.is_some())
+            })
+            .map(|(ch, _)| ch.clone())
+            .collect();
+        let mut total = 0usize;
+        for channel in channels {
+            if let Ok(n) = self.flush_channel(rtc, registry, &channel) {
+                total += n;
+            }
+        }
+        total
     }
 }
 
@@ -446,7 +558,42 @@ fn contains_annex_b_keyframe(codec: VideoCodec, bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::inspect_protobuf_shape;
+    use remora_proto::session::DataChannel;
+
+    use super::{ChannelOutbox, EnqueueStatus, OUTBOX_CAPACITY, inspect_protobuf_shape};
+
+    #[test]
+    fn outbox_coalesces_metrics_and_bounds_fifo_replies() {
+        let mut outbox = ChannelOutbox::new();
+        for i in 0..1_000u32 {
+            outbox.set_metrics(DataChannel::Text, i.to_le_bytes().to_vec());
+        }
+        for i in 0..OUTBOX_CAPACITY {
+            assert_eq!(
+                outbox.enqueue_reply(DataChannel::Text, vec![i as u8]),
+                EnqueueStatus::Queued
+            );
+        }
+        assert_eq!(
+            outbox.enqueue_reply(DataChannel::Text, vec![255]),
+            EnqueueStatus::DroppedFirstOverflow
+        );
+        assert_eq!(
+            outbox.enqueue_reply(DataChannel::Text, vec![254]),
+            EnqueueStatus::Dropped
+        );
+        let buf = outbox.buffers.get(&DataChannel::Text).unwrap();
+        assert_eq!(buf.replies.len(), OUTBOX_CAPACITY);
+        assert_eq!(buf.replies.front().unwrap(), &vec![0u8]);
+        assert_eq!(
+            buf.replies.back().unwrap(),
+            &vec![(OUTBOX_CAPACITY - 1) as u8]
+        );
+        assert_eq!(
+            buf.latest_metrics.as_deref(),
+            Some(&999u32.to_le_bytes()[..])
+        );
+    }
 
     #[test]
     fn protobuf_shape_skips_payloads_without_exposing_nested_tags() {

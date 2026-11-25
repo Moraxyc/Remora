@@ -39,9 +39,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::peer::channels::{
-    ChannelError, ChannelRegistry, DEFAULT_DATA_CHANNELS, build_host_init_burst,
-    build_send_video_track_request, inspect_protobuf_shape, media_data_to_audio_frame,
-    media_data_to_video_frame, write_audio_frame, write_channel, write_video_frame,
+    ChannelError, ChannelOutbox, ChannelRegistry, DEFAULT_DATA_CHANNELS, EnqueueStatus,
+    build_host_init_burst, build_send_video_track_request, inspect_protobuf_shape,
+    media_data_to_audio_frame, media_data_to_video_frame, write_audio_frame, write_channel,
+    write_video_frame,
 };
 use crate::peer::governor::{GovernorConfig, GovernorSample, VideoGovernor};
 use crate::peer::turn::{TurnAllocation, TurnError, stun_binding_address};
@@ -857,6 +858,7 @@ impl PeerHandle {
             rtc,
             machine,
             registry: ChannelRegistry::new(),
+            outbox: ChannelOutbox::new(),
             host_sockets,
             udp_tasks,
             udp_rx,
@@ -1015,6 +1017,7 @@ struct PeerLoopState<R: SignalingRelay> {
     rtc: Rtc,
     machine: PeerMachine<StdRng>,
     registry: ChannelRegistry,
+    outbox: ChannelOutbox,
     host_sockets: Vec<(SocketAddr, Arc<UdpSocket>)>,
     udp_tasks: Vec<tokio::task::JoinHandle<()>>,
     udp_rx: mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
@@ -1049,6 +1052,26 @@ impl<R: SignalingRelay> PeerLoopState<R> {
 
     fn publish_stats(&self) {
         let _ = self.stats_tx.send(self.stats.clone());
+    }
+
+    fn send_or_queue(&mut self, channel: DataChannel, data: Vec<u8>, is_metrics: bool) -> bool {
+        if !self.outbox.has_pending(&channel)
+            && write_channel(&mut self.rtc, &self.registry, &channel, &data).is_ok()
+        {
+            return true;
+        }
+        if is_metrics {
+            self.outbox.set_metrics(channel, data);
+        } else if self.outbox.enqueue_reply(channel.clone(), data)
+            == EnqueueStatus::DroppedFirstOverflow
+        {
+            warn!(
+                ice_id = %self.config.ice_id,
+                channel = channel.as_str(),
+                "channel outbox full; dropping excess replies"
+            );
+        }
+        false
     }
 
     async fn emit(&self, event: PeerSessionEvent) {
@@ -1222,20 +1245,12 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                             }
                         }
                         Some(PeerCommand::SendControl(msg)) => {
+                            let is_metrics = matches!(msg, ControlMessage::SystemMetrics { .. });
                             let data = encode_message(&msg);
-                            if let Err(err) = write_channel(
-                                &mut self.rtc,
-                                &self.registry,
-                                &DataChannel::Control,
-                                &data,
-                            ) {
-                                debug!(ice_id = %self.config.ice_id, error = %err, "control write skipped");
-                            }
+                            self.send_or_queue(DataChannel::Control, data, is_metrics);
                         }
                         Some(PeerCommand::SendChannelRaw { channel, data }) => {
-                            if let Err(err) = write_channel(&mut self.rtc, &self.registry, &channel, &data) {
-                                debug!(ice_id = %self.config.ice_id, error = %err, "channel raw write skipped");
-                            }
+                            self.send_or_queue(channel, data, false);
                         }
                         Some(PeerCommand::SendFileRequest { channel, request_id, which }) => {
                             self.queue_channel_command(|machine, now| {
@@ -1314,7 +1329,10 @@ impl<R: SignalingRelay> PeerLoopState<R> {
     async fn drain_until_quiescent(&mut self) -> Result<Option<Instant>, PeerSessionError> {
         loop {
             let timeout = self.drain_rtc().await?;
-            let mutated_rtc = self.drain_machine().await?;
+            let mut mutated_rtc = self.drain_machine().await?;
+            if self.outbox.flush_open(&mut self.rtc, &self.registry) > 0 {
+                mutated_rtc = true;
+            }
             let Some(timeout) = timeout else {
                 return Ok(None);
             };
@@ -1650,20 +1668,13 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                         self.config.clipboard_enabled,
                     );
                     for frame in frames {
-                        if write_channel(
-                            &mut self.rtc,
-                            &self.registry,
-                            &DataChannel::Control,
-                            &frame,
-                        )
-                        .is_ok()
-                        {
+                        if self.send_or_queue(DataChannel::Control, frame, false) {
                             mutated_rtc = true;
                         }
                     }
                 }
                 PeerTransmit::SendChannel { channel, data } => {
-                    if write_channel(&mut self.rtc, &self.registry, &channel, &data).is_ok() {
+                    if self.send_or_queue(channel, data, false) {
                         mutated_rtc = true;
                     }
                 }
@@ -2241,6 +2252,75 @@ mod tests {
                 SystemMessage::VirtualAudioPolicyResponse { request_id: 45, error_code: 0, .. }))
             },
         )
+        .await;
+
+        host.close().await;
+        viewer.close().await;
+        relay_task.abort();
+    }
+
+    #[tokio::test]
+    async fn early_text_replies_buffer_until_channel_opens() {
+        let (host_sig, mut host_out) = ChannelSignalingRelay::new();
+        let (viewer_sig, mut viewer_out) = ChannelSignalingRelay::new();
+
+        let mut host_cfg = PeerSessionConfig::new(PeerRole::Host, "ice-early-text");
+        host_cfg.local_probe_target = Some((Ipv4Addr::LOCALHOST, 9).into());
+        let mut viewer_cfg = PeerSessionConfig::new(PeerRole::Viewer, "ice-early-text");
+        viewer_cfg.local_probe_target = host_cfg.local_probe_target;
+
+        let host = PeerHandle::spawn(host_cfg, Arc::new(host_sig))
+            .await
+            .unwrap();
+        let mut viewer = PeerHandle::spawn(viewer_cfg, Arc::new(viewer_sig))
+            .await
+            .unwrap();
+
+        // Queue replies before any SOAC exchange occurs so TEXT_DATA_CHANNEL is guaranteed closed.
+        let privacy_a = pb::PrivateScreenSettingResponse {
+            req_privacy_type: 1,
+            cur_privacy_type: 1,
+            ..Default::default()
+        };
+        let privacy_b = pb::PrivateScreenSettingResponse {
+            req_privacy_type: 2,
+            cur_privacy_type: 2,
+            ..Default::default()
+        };
+        host.send_privacy_response(101, privacy_a).await.unwrap();
+        host.send_privacy_response(102, privacy_b).await.unwrap();
+
+        let host_sender = host.sender();
+        let viewer_sender = viewer.sender();
+        let relay_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(msg) = viewer_out.recv() => {
+                        if let PeerSignalingOut::Soac(val) = msg {
+                            let soac: SoacEvent = serde_json::from_value(val).unwrap();
+                            let _ = host_sender.feed_soac(soac).await;
+                        }
+                    }
+                    Some(msg) = host_out.recv() => {
+                        if let PeerSignalingOut::Soac(val) = msg {
+                            let soac: SoacEvent = serde_json::from_value(val).unwrap();
+                            let _ = viewer_sender.feed_soac(soac).await;
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+
+        expect_peer_event(&mut viewer, "first buffered privacy response", |event| {
+            matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::PrivacyResponse { request_id: 101, response, .. } if *response == privacy_a))
+        })
+        .await;
+        expect_peer_event(&mut viewer, "second buffered privacy response", |event| {
+            matches!(event, PeerSessionEvent::System(msg) if matches!(msg.as_ref(),
+                SystemMessage::PrivacyResponse { request_id: 102, response, .. } if *response == privacy_b))
+        })
         .await;
 
         host.close().await;
