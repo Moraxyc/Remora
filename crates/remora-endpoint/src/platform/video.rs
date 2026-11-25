@@ -10,7 +10,22 @@ pub struct EncodedVideoFrame {
     pub codec: VideoCodec,
     pub is_keyframe: bool,
     pub pts_ms: u64,
+    pub capture_index: Option<u16>,
+    pub is_new_frame: Option<bool>,
     pub data: Bytes,
+}
+
+impl EncodedVideoFrame {
+    pub fn new(codec: VideoCodec, is_keyframe: bool, pts_ms: u64, data: Bytes) -> Self {
+        Self {
+            codec,
+            is_keyframe,
+            pts_ms,
+            capture_index: Some(0),
+            is_new_frame: Some(true),
+            data,
+        }
+    }
 }
 
 /// Produces encoded video frames for outbound streaming.

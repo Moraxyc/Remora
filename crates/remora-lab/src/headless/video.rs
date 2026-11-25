@@ -204,6 +204,8 @@ pub fn parse_annex_b_frames(
                     codec: VideoCodec::H264,
                     is_keyframe,
                     pts_ms,
+                    capture_index: Some(0),
+                    is_new_frame: Some(true),
                     data: Bytes::from(data),
                 });
             }
@@ -275,6 +277,8 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: false,
             pts_ms: 0,
+            capture_index: Some(0),
+            is_new_frame: Some(true),
             data: Bytes::from_static(&[1, 2, 3, 4]),
         };
         assert!(sink.push_frame(&bad_start).is_err());
@@ -283,6 +287,8 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: true,
             pts_ms: 0,
+            capture_index: Some(0),
+            is_new_frame: Some(true),
             data: Bytes::from_static(&[0, 0, 0, 1, 0x41, 0x9A]),
         };
         assert!(sink.push_frame(&bad_idr).is_err());

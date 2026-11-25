@@ -11,11 +11,15 @@ use remora_proto::pb::{self, rpc_request};
 use remora_proto::session::DataChannel;
 use remora_proto::session::channels as official_channels;
 use remora_proto::session::control::{ControlMessage, encode_message};
-use remora_proto::session::media::{AudioCodec, VideoCodec};
-use str0m::Rtc;
+use remora_proto::session::media::{
+    AudioCodec, VideoCodec, decode_capture_index_ext, decode_new_frame_ext,
+    encode_capture_index_ext, encode_new_frame_ext, rtp_ext,
+};
 use str0m::channel::ChannelId;
 use str0m::format::Codec;
 use str0m::media::{Frequency, MediaData, MediaTime, Mid, Pt};
+use str0m::rtp::{Extension, ExtensionSerializer, ExtensionValues};
+use str0m::{Rtc, RtcConfig};
 
 use crate::platform::{Bytes, EncodedAudioFrame, EncodedVideoFrame};
 
@@ -262,6 +266,92 @@ pub fn write_channel(
     Ok(())
 }
 
+const CAPTURE_INDEX_EXT_ID: u8 = 9;
+const NEW_FRAME_EXT_ID: u8 = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureIndexExt(u16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NewFrameExt(bool);
+
+#[derive(Debug)]
+struct CaptureIndexSerializer;
+
+impl ExtensionSerializer for CaptureIndexSerializer {
+    fn write_to(&self, buf: &mut [u8], ev: &ExtensionValues) -> usize {
+        let Some(CaptureIndexExt(index)) = ev.user_values.get::<CaptureIndexExt>() else {
+            return 0;
+        };
+        let Some(dst) = buf.get_mut(..2) else {
+            return 0;
+        };
+        dst.copy_from_slice(&encode_capture_index_ext(*index));
+        2
+    }
+
+    fn parse_value(&self, buf: &[u8], ev: &mut ExtensionValues) -> bool {
+        let Some(index) = decode_capture_index_ext(buf) else {
+            return false;
+        };
+        ev.user_values.set(CaptureIndexExt(index));
+        true
+    }
+
+    fn is_video(&self) -> bool {
+        true
+    }
+
+    fn is_audio(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+struct NewFrameSerializer;
+
+impl ExtensionSerializer for NewFrameSerializer {
+    fn write_to(&self, buf: &mut [u8], ev: &ExtensionValues) -> usize {
+        let Some(NewFrameExt(is_new)) = ev.user_values.get::<NewFrameExt>() else {
+            return 0;
+        };
+        let Some(dst) = buf.first_mut() else {
+            return 0;
+        };
+        *dst = encode_new_frame_ext(*is_new)[0];
+        1
+    }
+
+    fn parse_value(&self, buf: &[u8], ev: &mut ExtensionValues) -> bool {
+        let Some(is_new) = decode_new_frame_ext(buf) else {
+            return false;
+        };
+        ev.user_values.set(NewFrameExt(is_new));
+        true
+    }
+
+    fn is_video(&self) -> bool {
+        true
+    }
+
+    fn is_audio(&self) -> bool {
+        false
+    }
+}
+
+/// Registers the UU `video-capture-index` and `video-frame-is-new-frame` RTP header extensions.
+pub fn register_video_extensions(config: RtcConfig) -> RtcConfig {
+    config
+        .set_extension(
+            CAPTURE_INDEX_EXT_ID,
+            Extension::with_serializer(rtp_ext::CAPTURE_INDEX_URI, CaptureIndexSerializer),
+        )
+        .set_extension(
+            NEW_FRAME_EXT_ID,
+            Extension::with_serializer(rtp_ext::NEW_FRAME_URI, NewFrameSerializer),
+        )
+}
+
 /// Writes one encoded video access unit (`EncodedVideoFrame`) directly onto the negotiated
 /// `str0m` video track.
 pub fn write_video_frame(
@@ -281,9 +371,15 @@ pub fn write_video_frame(
             return Err(ChannelError::UnsupportedCodec(format!("{other:?}")));
         }
     };
-    let writer = rtc.writer(mid).ok_or(ChannelError::NoVideoTrack)?;
+    let mut writer = rtc.writer(mid).ok_or(ChannelError::NoVideoTrack)?;
     let pt = select_video_pt(writer.payload_params(), target_codec)
         .ok_or_else(|| ChannelError::UnsupportedCodec(format!("{:?}", frame.codec)))?;
+    if let Some(index) = frame.capture_index {
+        writer = writer.user_extension_value(CaptureIndexExt(index));
+    }
+    if let Some(is_new) = frame.is_new_frame {
+        writer = writer.user_extension_value(NewFrameExt(is_new));
+    }
     let wallclock = wallclock_anchor + Duration::from_millis(frame.pts_ms);
     let media_time = MediaTime::new(frame.pts_ms.saturating_mul(90), Frequency::NINETY_KHZ);
     writer
@@ -352,10 +448,22 @@ pub fn media_data_to_video_frame(data: &MediaData) -> Option<EncodedVideoFrame> 
     };
     let pts_ms = data.time.rebase(Frequency::MILLIS).numer();
     let is_keyframe = data.is_keyframe() || contains_annex_b_keyframe(codec, &data.data);
+    let capture_index = data
+        .ext_vals
+        .user_values
+        .get::<CaptureIndexExt>()
+        .map(|ext| ext.0);
+    let is_new_frame = data
+        .ext_vals
+        .user_values
+        .get::<NewFrameExt>()
+        .map(|ext| ext.0);
     Some(EncodedVideoFrame {
         codec,
         is_keyframe,
         pts_ms,
+        capture_index,
+        is_new_frame,
         data: Bytes::from_owner(Arc::clone(&data.data)),
     })
 }

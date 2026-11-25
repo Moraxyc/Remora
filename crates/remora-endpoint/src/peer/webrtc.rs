@@ -41,8 +41,8 @@ use tracing::{debug, info, warn};
 use crate::peer::channels::{
     ChannelError, ChannelOutbox, ChannelRegistry, DEFAULT_DATA_CHANNELS, EnqueueStatus,
     build_host_init_burst, build_send_video_track_request, inspect_protobuf_shape,
-    media_data_to_audio_frame, media_data_to_video_frame, write_audio_frame, write_channel,
-    write_video_frame,
+    media_data_to_audio_frame, media_data_to_video_frame, register_video_extensions,
+    write_audio_frame, write_channel, write_video_frame,
 };
 use crate::peer::governor::{GovernorConfig, GovernorSample, VideoGovernor};
 use crate::peer::turn::{TurnAllocation, TurnError, stun_binding_address};
@@ -699,7 +699,8 @@ impl PeerHandle {
         };
 
         let start_instant = Instant::now();
-        let mut rtc_cfg = RtcConfig::new().set_sctp_max_message_size(262_144);
+        let mut rtc_cfg =
+            register_video_extensions(RtcConfig::new().set_sctp_max_message_size(262_144));
         let video_governor = if config.role == PeerRole::Host {
             config.video_governor.clone().map(|governor_config| {
                 let mut governor = VideoGovernor::new(governor_config);
@@ -1848,6 +1849,8 @@ mod tests {
             codec: VideoCodec::H264,
             is_keyframe: keyframe,
             pts_ms,
+            capture_index: Some(2),
+            is_new_frame: Some(keyframe),
             data: data.into(),
         }
     }
@@ -2076,6 +2079,8 @@ mod tests {
                         if let PeerSessionEvent::VideoFrame(f) = ev {
                             assert_eq!(f.codec, VideoCodec::H264);
                             assert!(!f.data.is_empty());
+                            assert_eq!(f.capture_index, Some(2));
+                            assert_eq!(f.is_new_frame, Some(f.pts_ms == 0));
                             frames_got += 1;
                         }
                     }
