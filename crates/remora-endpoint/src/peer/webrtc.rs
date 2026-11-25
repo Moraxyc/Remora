@@ -53,6 +53,7 @@ const CMD_CAP: usize = 256;
 const EVENT_CAP: usize = 256;
 const UDP_RECV_CAP: usize = 512;
 const VIDEO_STATS_INTERVAL: Duration = Duration::from_secs(1);
+const PATH_DIAG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_COMPRESSED_SDP_B64: usize = 2 * 1024 * 1024;
 const MAX_SDP_BYTES: usize = 1024 * 1024;
 const MAX_CLIPBOARD_SHAPE_LOGS: usize = 24;
@@ -280,6 +281,8 @@ pub struct PeerStats {
     pub turn_packets_rx: u64,
     pub host_packets_tx: u64,
     pub host_packets_rx: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
     pub video_frames_tx: u64,
     pub video_frames_rx: u64,
     pub audio_frames_tx: u64,
@@ -876,6 +879,8 @@ impl PeerHandle {
             local_candidates,
             last_tx_was_relay: false,
             last_rx_was_relay: false,
+            path_monitor: PathRateMonitor::default(),
+            next_path_diag: None,
             clipboard_shape_logs: 0,
             closing_deadline: None,
         };
@@ -1013,6 +1018,52 @@ impl PeerHandle {
     }
 }
 
+#[derive(Debug, Default)]
+struct PathRateMonitor {
+    previous: Option<(Instant, u64, u64)>,
+    last_route: Option<&'static str>,
+    ticks: u64,
+}
+
+impl PathRateMonitor {
+    fn sample(
+        &mut self,
+        now: Instant,
+        route: &'static str,
+        tx_bytes: u64,
+        rx_bytes: u64,
+    ) -> Option<(u64, u64, bool)> {
+        let rates = match self.previous.replace((now, tx_bytes, rx_bytes)) {
+            Some((prev_at, prev_tx, prev_rx)) => {
+                let secs = now.saturating_duration_since(prev_at).as_secs_f64();
+                if secs > 0.0 && tx_bytes >= prev_tx && rx_bytes >= prev_rx {
+                    Some((
+                        ((tx_bytes - prev_tx) as f64 * 8.0 / secs) as u64,
+                        ((rx_bytes - prev_rx) as f64 * 8.0 / secs) as u64,
+                    ))
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        self.ticks = self.ticks.saturating_add(1);
+        let route_changed = self.last_route != Some(route);
+        if route_changed || self.ticks.is_multiple_of(6) {
+            self.last_route = Some(route);
+            let (tx_bps, rx_bps) = rates.unwrap_or((0, 0));
+            return Some((tx_bps, rx_bps, route_changed));
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.previous = None;
+        self.last_route = None;
+        self.ticks = 0;
+    }
+}
+
 struct PeerLoopState<R: SignalingRelay> {
     config: PeerSessionConfig,
     effective_force_relay: bool,
@@ -1036,6 +1087,8 @@ struct PeerLoopState<R: SignalingRelay> {
     local_candidates: Vec<Candidate>,
     last_tx_was_relay: bool,
     last_rx_was_relay: bool,
+    path_monitor: PathRateMonitor,
+    next_path_diag: Option<Instant>,
     clipboard_shape_logs: usize,
     closing_deadline: Option<Instant>,
 }
@@ -1119,6 +1172,11 @@ impl<R: SignalingRelay> PeerLoopState<R> {
             {
                 earliest = c;
             }
+            if let Some(p) = self.next_path_diag
+                && p < earliest
+            {
+                earliest = p;
+            }
             let sleep_until = tokio::time::Instant::from_std(earliest);
 
             tokio::select! {
@@ -1139,6 +1197,32 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     if let Some(alloc) = &mut self.turn_alloc {
                         let _ = alloc.maybe_refresh(now).await;
                     }
+                    if self.stats.connected && self.next_path_diag.is_some_and(|d| now >= d) {
+                        let route = if self.effective_force_relay
+                            || self.last_tx_was_relay
+                            || self.last_rx_was_relay
+                        {
+                            "relay"
+                        } else {
+                            "direct"
+                        };
+                        if let Some((tx_bps, rx_bps, route_changed)) = self.path_monitor.sample(
+                            now,
+                            route,
+                            self.stats.tx_bytes,
+                            self.stats.rx_bytes,
+                        ) {
+                            info!(
+                                ice_id = %self.config.ice_id,
+                                route,
+                                route_changed,
+                                tx_bps,
+                                rx_bps,
+                                "ICE path throughput"
+                            );
+                        }
+                        self.next_path_diag = Some(now + PATH_DIAG_INTERVAL);
+                    }
                 }
                 pkt = self.udp_rx.recv(), if !self.host_sockets.is_empty() => {
                     let Some((local_addr, src_addr, data)) = pkt else {
@@ -1146,6 +1230,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     };
                     if let Ok(contents) = data.as_slice().try_into() {
                         self.stats.host_packets_rx += 1;
+                        self.stats.rx_bytes = self.stats.rx_bytes.saturating_add(data.len() as u64);
                         self.last_rx_was_relay = false;
                         let now = Instant::now();
                         let _ = self.rtc.handle_input(Str0mInput::Receive(
@@ -1173,6 +1258,10 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                                     Ok(Some((peer_addr, payload))) => {
                                         if let Ok(contents) = payload.as_slice().try_into() {
                                             self.stats.turn_packets_rx += 1;
+                                            self.stats.rx_bytes = self
+                                                .stats
+                                                .rx_bytes
+                                                .saturating_add(payload.len() as u64);
                                             self.last_rx_was_relay = true;
                                             let now = Instant::now();
                                             let _ = self.rtc.handle_input(Str0mInput::Receive(
@@ -1360,6 +1449,8 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                         && alloc.relayed_addr() == tx.source
                     {
                         self.stats.turn_packets_tx += 1;
+                        self.stats.tx_bytes =
+                            self.stats.tx_bytes.saturating_add(tx.contents.len() as u64);
                         self.last_tx_was_relay = true;
                         if let Err(err) = alloc.send_to_peer(tx.destination, &tx.contents).await {
                             debug!(ice_id = %self.config.ice_id, error = %err, "TURN send failed");
@@ -1371,6 +1462,8 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                         .or_else(|| self.host_sockets.first())
                     {
                         self.stats.host_packets_tx += 1;
+                        self.stats.tx_bytes =
+                            self.stats.tx_bytes.saturating_add(tx.contents.len() as u64);
                         self.last_tx_was_relay = false;
                         if let Err(err) = sock.send_to(&tx.contents, tx.destination).await {
                             debug!(ice_id = %self.config.ice_id, error = %err, "UDP send failed");
@@ -1384,6 +1477,7 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                             || (self.stats.turn_packets_tx > 0 && self.stats.host_packets_tx == 0);
                         self.stats.connected = true;
                         self.stats.is_relayed = is_relayed;
+                        self.next_path_diag = Some(Instant::now() + PATH_DIAG_INTERVAL);
                         self.publish_stats();
                         let mnow = self.machine_now();
                         self.machine.on_ice_connected(mnow)?;
@@ -1396,6 +1490,9 @@ impl<R: SignalingRelay> PeerLoopState<R> {
                     }
                     Str0mEvent::IceConnectionStateChange(state) => {
                         debug!(ice_id = %self.config.ice_id, ?state, "ICE state changed");
+                        if state == str0m::IceConnectionState::Disconnected {
+                            self.path_monitor.reset();
+                        }
                     }
                     Str0mEvent::MediaAdded(added) => {
                         if added.kind == MediaKind::Video {
@@ -2280,9 +2377,38 @@ mod tests {
         )
         .await;
 
+        assert!(host.stats().tx_bytes > 0);
+        assert!(host.stats().rx_bytes > 0);
+        assert!(viewer.stats().tx_bytes > 0);
+        assert!(viewer.stats().rx_bytes > 0);
+
         host.close().await;
         viewer.close().await;
         relay_task.abort();
+    }
+
+    #[test]
+    fn path_rate_monitor_computes_bps_and_resets_safely() {
+        let t0 = Instant::now();
+        let mut monitor = PathRateMonitor::default();
+        assert_eq!(
+            monitor.sample(t0, "direct", 1_000, 2_000),
+            Some((0, 0, true))
+        );
+        assert_eq!(
+            monitor.sample(t0 + Duration::from_secs(5), "direct", 6_000, 12_000),
+            None
+        );
+        // Route change surfaces immediately with measured bitrates.
+        assert_eq!(
+            monitor.sample(t0 + Duration::from_secs(10), "relay", 11_000, 22_000),
+            Some((8_000, 16_000, true))
+        );
+        monitor.reset();
+        assert_eq!(
+            monitor.sample(t0 + Duration::from_secs(15), "direct", 500, 500),
+            Some((0, 0, true))
+        );
     }
 
     #[tokio::test]
