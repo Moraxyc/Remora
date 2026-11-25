@@ -63,6 +63,7 @@ pub struct VideoGovernor {
     aim_kbps: Option<u32>,
     min_rtt_ms: Option<u32>,
     last_congestion: Option<Duration>,
+    last_loss: Option<Duration>,
     last_decrease: Option<Duration>,
     last_change: Option<Duration>,
 }
@@ -77,6 +78,7 @@ impl VideoGovernor {
             aim_kbps: None,
             min_rtt_ms: None,
             last_congestion: None,
+            last_loss: None,
             last_decrease: None,
             last_change: None,
         }
@@ -110,8 +112,8 @@ impl VideoGovernor {
             .config
             .rtt_clean_ms
             .max(baseline.saturating_add(self.config.rtt_clean_margin_ms));
-        let congested = fraction_lost_pct >= self.config.loss_congested_pct
-            || rtt_ms.is_some_and(|rtt| rtt >= congested_rtt);
+        let loss_congested = fraction_lost_pct >= self.config.loss_congested_pct;
+        let congested = loss_congested || rtt_ms.is_some_and(|rtt| rtt >= congested_rtt);
         let clean = fraction_lost_pct < self.config.loss_clean_pct
             && rtt_ms.is_none_or(|rtt| rtt < clean_rtt);
         let can_increase_or_step_fps =
@@ -128,6 +130,9 @@ impl VideoGovernor {
 
         if congested {
             self.last_congestion = Some(now);
+            if loss_congested {
+                self.last_loss = Some(now);
+            }
             if elapsed(now, self.last_decrease, self.config.decrease_cooldown) {
                 if next.bitrate_kbps > floor {
                     self.aim_kbps = Some((u64::from(next.bitrate_kbps) * 9 / 10) as u32);
@@ -142,9 +147,11 @@ impl VideoGovernor {
                 }
             }
         } else if can_increase_or_step_fps {
-            let can_probe = elapsed(now, self.last_congestion, self.config.probe_quiet_window);
+            let can_probe_bitrate =
+                elapsed(now, self.last_congestion, self.config.probe_quiet_window);
+            let can_probe_fps = elapsed(now, self.last_loss, self.config.probe_quiet_window);
             if clean {
-                let target = if can_probe {
+                let target = if can_probe_bitrate {
                     self.ceiling_kbps
                 } else {
                     self.aim_kbps
@@ -154,13 +161,13 @@ impl VideoGovernor {
                 if next.bitrate_kbps < target {
                     let increase = (next.bitrate_kbps / 4).max(MIN_INCREASE_KBPS);
                     next.bitrate_kbps = next.bitrate_kbps.saturating_add(increase).min(target);
-                    if can_probe {
+                    if can_probe_bitrate {
                         self.aim_kbps = None;
                     }
                 }
             }
             if self.config.fps_adapt
-                && can_probe
+                && can_probe_fps
                 && let Some(current_fps) = next.fps_cap
             {
                 next.fps_cap = FPS_LADDER
@@ -289,5 +296,57 @@ mod tests {
         assert_eq!(sample(&mut governor, 2, 4.0, None), cap(500, None));
         governor.set_requested_limits(Some(0), 30);
         assert_eq!(sample(&mut governor, 3, 4.0, None), cap(800, None));
+    }
+
+    #[test]
+    fn rtt_jitter_without_loss_does_not_pin_fps_ladder() {
+        let mut governor = VideoGovernor::new(GovernorConfig {
+            fps_adapt: true,
+            ..GovernorConfig::default()
+        });
+        governor.set_requested_limits(Some(1_500), 60);
+        assert_eq!(sample(&mut governor, 0, 20.0, Some(40)), cap(800, None));
+        let mut secs = 0;
+        let mut fps = 60;
+        while fps > 5 {
+            secs += 4;
+            let decision = sample(&mut governor, secs, 0.0, Some(330)).unwrap();
+            assert_eq!(decision.bitrate_kbps, 800);
+            fps = decision.fps_cap.unwrap();
+        }
+        assert_eq!(fps, 5);
+
+        // Even with periodic RTT spikes after t=0 loss (`last_congestion` at t=36),
+        // `last_loss` stays at t=0 so FPS climbs one rung at a time at t=60 while bitrate
+        // remains capped at 90% (1,350 kbps) until 60s after the last RTT spike.
+        assert_eq!(
+            sample(&mut governor, 60, 0.0, Some(40)),
+            cap(1_300, Some(8))
+        );
+        assert_eq!(
+            sample(&mut governor, 64, 0.0, Some(40)),
+            cap(1_350, Some(10))
+        );
+        assert_eq!(
+            sample(&mut governor, 68, 0.0, Some(40)),
+            cap(1_350, Some(12))
+        );
+        // An RTT spike still halves the risen bitrate cap.
+        assert_eq!(
+            sample(&mut governor, 72, 0.0, Some(330)),
+            cap(800, Some(12))
+        );
+    }
+
+    #[test]
+    fn rtt_only_congestion_keeps_ninety_percent_bitrate_ceiling() {
+        let mut governor = VideoGovernor::new(GovernorConfig::default());
+        governor.set_requested_limits(Some(2_400), 30);
+        assert_eq!(sample(&mut governor, 0, 0.0, Some(40)), None);
+        assert_eq!(sample(&mut governor, 1, 0.0, Some(330)), cap(1_200, None));
+        assert_eq!(sample(&mut governor, 15, 0.0, Some(40)), cap(1_700, None));
+        assert_eq!(sample(&mut governor, 19, 0.0, Some(40)), cap(2_160, None));
+        assert_eq!(sample(&mut governor, 23, 0.0, Some(40)), None);
+        assert_eq!(sample(&mut governor, 61, 0.0, Some(40)), cap(2_400, None));
     }
 }
