@@ -1222,6 +1222,39 @@ mod sdk {
         }
     }
 
+    #[cfg(feature = "peer")]
+    impl crate::peer::SignalingRelay for RoomSender {
+        fn send_soac(
+            &self,
+            payload: Value,
+        ) -> crate::peer::webrtc::BoxFuture<'_, Result<(), String>> {
+            Box::pin(async move { self.send_soac(payload).await.map_err(|e| e.to_string()) })
+        }
+
+        fn send_forward_setting(
+            &self,
+            payload: Value,
+        ) -> crate::peer::webrtc::BoxFuture<'_, Result<(), String>> {
+            Box::pin(async move {
+                self.send_forward_setting(payload)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        }
+
+        fn send_ice_finished<'a>(
+            &'a self,
+            ice_id: &'a str,
+            app_control_id: &'a str,
+        ) -> crate::peer::webrtc::BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.send_ice_finished(ice_id, app_control_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+        }
+    }
+
     /// Stream of inbound [`SignalingEvent`]s from a signaling room.
     pub struct RoomEventStream {
         rx: mpsc::Receiver<SignalingEvent>,

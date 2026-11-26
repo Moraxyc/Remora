@@ -176,33 +176,6 @@ impl SignalingRelay for ChannelSignalingRelay {
     }
 }
 
-#[cfg(feature = "client")]
-impl SignalingRelay for crate::RoomSender {
-    fn send_soac(&self, payload: Value) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.send_soac(payload).await.map_err(|e| e.to_string()) })
-    }
-
-    fn send_forward_setting(&self, payload: Value) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move {
-            self.send_forward_setting(payload)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    fn send_ice_finished<'a>(
-        &'a self,
-        ice_id: &'a str,
-        app_control_id: &'a str,
-    ) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            self.send_ice_finished(ice_id, app_control_id)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-}
-
 /// Configuration for spawning a WebRTC peer session.
 #[derive(Clone)]
 pub struct PeerSessionConfig {
