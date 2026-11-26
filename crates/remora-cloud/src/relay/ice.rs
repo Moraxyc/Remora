@@ -13,11 +13,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hmac::{Hmac, KeyInit, Mac};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::Sha1;
 
 use crate::bus::{Bus, BusMessage, RelayCommand, TOPIC_RELAY};
+pub(crate) use crate::contracts::Grant;
 
 /// How long issued TURN credentials stay valid. The TURN server checks them again whenever an
 /// allocation is refreshed, so this bounds how long one session can stay relayed.
@@ -30,24 +31,6 @@ pub struct Ice {
     stun: Vec<String>,
     turn: Option<Turn>,
     force_relay: bool,
-}
-
-/// What both sides of one session are told.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Grant {
-    /// `iceServers`.
-    pub servers: Value,
-    /// Whether peers may only connect through TURN, which keeps their addresses from each other.
-    pub force_relay: bool,
-}
-
-impl Default for Grant {
-    fn default() -> Self {
-        Self {
-            servers: json!([]),
-            force_relay: false,
-        }
-    }
 }
 
 /// Spawns the `relay` role service, subscribing synchronously before returning so no

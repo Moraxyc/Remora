@@ -71,8 +71,8 @@ impl Bus for LocalBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::auth::token::Role;
     use crate::bus::{PresenceChanged, TOPIC_PRESENCE, TOPIC_ROOM_COMMAND};
+    use crate::contracts::Role;
 
     fn presence(device_id: &str, online: bool) -> BusMessage {
         BusMessage::PresenceChanged(PresenceChanged {

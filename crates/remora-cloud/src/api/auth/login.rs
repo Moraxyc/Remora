@@ -14,11 +14,11 @@ use tokio::sync::watch;
 
 use crate::PublicUrl;
 use crate::api::address::ClientAddress;
-use crate::api::auth::token::{TokenKey, random};
 use crate::api::device::{CallerDevice, Devices};
 use crate::api::middleware::limit::Limits;
 use crate::api::user::{OWNER_ID, Sessions, Users};
 use crate::api::{self, ApiError, Body};
+use crate::contracts::{TokenKey, random};
 
 /// How long a generated QR code can be used to log in.
 const QR_LIFETIME: Duration = Duration::from_secs(180);

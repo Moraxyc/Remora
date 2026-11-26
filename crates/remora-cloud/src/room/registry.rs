@@ -17,12 +17,11 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
-use crate::api::auth::token::{Role, Room, random};
 use crate::bus::{
     ActiveParticipant, Bus, BusMessage, EndpointEvent, EndpointFrame, RelayCommand, Reply,
     RoomCommand, TOPIC_RELAY, TOPIC_ROOM_COMMAND, TOPIC_TO_ENDPOINT, ToEndpoint,
 };
-use crate::relay::ice::Grant;
+use crate::contracts::{Grant, Role, Room, random};
 use crate::room::ReconnectGrace;
 
 /// Capacity of each room actor's command inbox.

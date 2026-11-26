@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 use remora_proto::signal::{encode_ack, encode_event};
 use tokio::sync::mpsc;
 
-use crate::api::auth::token::Role;
 use crate::bus::{
     Bus, BusMessage, EndpointEvent, EndpointFrame, TOPIC_PRESENCE, TOPIC_TO_ENDPOINT,
 };
+use crate::contracts::Role;
 
 #[derive(Debug, PartialEq)]
 pub enum Outbound {

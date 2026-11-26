@@ -22,11 +22,11 @@ use tokio::sync::oneshot;
 
 use crate::Database;
 use crate::api::address::ClientAddress;
-use crate::api::auth::token::{GuestToken, Room, TokenKey, now, random};
 use crate::api::device::{CallerDevice, CallerVersion, Device, Devices, connect_id_for};
 use crate::api::middleware::limit::Limits;
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body, Empty, OptionalBody};
+use crate::contracts::{GuestToken, Room, TokenKey, now, random};
 use crate::room::{RoomClient, Tickets};
 
 const GUEST_ID_HEADER: &str = "x-param-guest-id";

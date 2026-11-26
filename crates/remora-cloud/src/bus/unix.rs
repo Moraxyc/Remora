@@ -24,8 +24,7 @@ use super::{
     ActiveParticipant, Bus, BusMessage, EndpointEvent, EndpointFrame, PresenceChanged,
     RelayCommand, Reply, RoomCommand, Subscription, ToEndpoint,
 };
-use crate::api::auth::token::{Role, Room};
-use crate::relay::ice::Grant;
+use crate::contracts::{Grant, Role, Room};
 
 const CHANNEL_CAPACITY: usize = 1024;
 

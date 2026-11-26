@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::api::auth::token::{TokenKey, random};
+use crate::contracts::random;
 
 /// Schema changes, applied in order. `PRAGMA user_version` counts those already applied.
 const MIGRATIONS: &[&str] = &[
@@ -134,7 +134,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
-    tokens: Arc<TokenKey>,
+    token_key: [u8; 32],
 }
 
 impl Database {
@@ -157,10 +157,10 @@ impl Database {
     fn init(mut connection: Connection) -> Result<Self, DatabaseError> {
         connection.busy_timeout(BUSY_TIMEOUT)?;
         migrate(&mut connection)?;
-        let tokens = Arc::new(TokenKey::new(token_key(&connection)?));
+        let token_key = token_key(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            tokens,
+            token_key,
         })
     }
 
@@ -168,8 +168,8 @@ impl Database {
         self.connection.lock().expect("database lock poisoned")
     }
 
-    pub(crate) fn tokens(&self) -> Arc<TokenKey> {
-        self.tokens.clone()
+    pub(crate) fn token_key(&self) -> [u8; 32] {
+        self.token_key
     }
 }
 
@@ -250,14 +250,18 @@ mod tests {
     #[test]
     fn the_token_key_outlives_a_restart() {
         let path = temp_file("key");
-        let user = crate::api::auth::token::UserToken {
+        use crate::contracts::{TokenKey, UserToken};
+
+        let user = UserToken {
             user_id: "1".into(),
             session_id: "s".into(),
         };
-        let token = Database::open(&path).unwrap().tokens().issue_user(&user);
-        let reopened = Database::open(&path).unwrap();
-        assert_eq!(reopened.tokens().verify_user(&token), Some(user));
-        assert_eq!(Database::in_memory().tokens().verify_user(&token), None);
+        let key = TokenKey::new(Database::open(&path).unwrap().token_key());
+        let token = key.issue_user(&user);
+        let reopened = TokenKey::new(Database::open(&path).unwrap().token_key());
+        assert_eq!(reopened.verify_user(&token), Some(user));
+        let ephemeral = TokenKey::new(Database::in_memory().token_key());
+        assert_eq!(ephemeral.verify_user(&token), None);
     }
 
     #[test]

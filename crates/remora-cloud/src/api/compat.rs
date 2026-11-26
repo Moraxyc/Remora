@@ -9,10 +9,10 @@ use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::api::auth::token::now;
 use crate::api::device::{CallerVersion, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body, Empty};
+use crate::contracts::now;
 
 const VERSION_CODE_HEADER: &str = "x-param-vc";
 

@@ -23,13 +23,13 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::api::ApiError;
-use crate::api::auth::token::{Room, TokenKey, random};
 use crate::api::device::Devices;
 use crate::api::share::Shares;
 use crate::bus::{
     Bus, BusMessage, EndpointFrame, PresenceChanged, Reply, RoomCommand, TOPIC_PRESENCE,
     TOPIC_ROOM_COMMAND,
 };
+use crate::contracts::{Room, TokenKey, random};
 use crate::gateway::presence::{Connections, Outbound};
 
 const AUTH_HEADER: &str = "x-nrd-auth";

@@ -18,8 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub use local::LocalBus;
 
-use crate::api::auth::token::{Role, Room};
-use crate::relay::ice::Grant;
+use crate::contracts::{Grant, Role, Room};
 
 /// Topic for messages delivered from rooms or API handlers to connected endpoints via gateways.
 pub const TOPIC_TO_ENDPOINT: &str = "to_endpoint";

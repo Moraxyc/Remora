@@ -1,13 +1,8 @@
-//! Tokens the cloud issues: HS256 JWTs, because clients read claims out of them.
+//! Shared domain contracts and token primitives used across cloud roles (`api`, `gateway`,
+//! `room`, `relay`, `store`, `bus`).
 //!
-//! - User tokens carry the `csrf` claim clients send back, and no `exp`: like UU's, they are
-//!   used until rejected. Each names its session (`sid`), which can be revoked.
-//! - Room tokens authenticate one signaling connection, as a device's host or as a viewer
-//!   joining it, and expire.
-//! - Upload tokens let a logged-in client upload files until they expire, as long as its
-//!   session is open.
-//!
-//! Each token names its kind, so one kind is never accepted as the other.
+//! Keeping these types upstream of all role modules prevents cyclic dependencies between the
+//! internal bus, persistence store, relay, signaling gateway, room registry, and HTTP API.
 
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use sha2::Sha256;
 
 /// `{"alg":"HS256","typ":"JWT"}`, base64url-encoded.
@@ -35,6 +31,24 @@ const UPLOAD_TOKEN_GRACE: Duration = Duration::from_secs(10 * 60);
 
 /// How long a guest identity token stays valid before the host refreshes via `guest/create`.
 const GUEST_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// ICE servers and relay policy handed to both sides of one session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Grant {
+    /// `iceServers`.
+    pub servers: Value,
+    /// Whether peers may only connect through TURN, which keeps their addresses from each other.
+    pub force_relay: bool,
+}
+
+impl Default for Grant {
+    fn default() -> Self {
+        Self {
+            servers: json!([]),
+            force_relay: false,
+        }
+    }
+}
 
 /// Secret that signs every token.
 pub struct TokenKey([u8; 32]);

@@ -3,6 +3,7 @@
 mod api;
 mod app;
 pub mod bus;
+mod contracts;
 mod gateway;
 mod relay;
 mod room;

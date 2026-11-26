@@ -8,6 +8,7 @@ use axum::middleware::{from_fn, from_fn_with_state, map_response};
 use axum::routing::{delete, get, post};
 
 use crate::bus::Bus;
+use crate::contracts::TokenKey;
 use crate::gateway::presence::Connections;
 use crate::room::RoomClient;
 use crate::{CloudRole, Config, Ping, PublicUrl, TrustedProxies, api, gateway, relay, room};
@@ -24,7 +25,7 @@ struct Cloud {
     users: api::user::Users,
     browsers: api::auth::browser::Browsers,
     logins: api::auth::login::Logins,
-    tokens: Arc<api::auth::token::TokenKey>,
+    tokens: Arc<TokenKey>,
     public_url: PublicUrl,
     rooms: RoomClient,
     bus: Arc<dyn Bus>,
@@ -163,7 +164,7 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
         users: config.database.clone().into(),
         browsers: config.database.clone().into(),
         logins: api::auth::login::Logins::new(config.public_url.clone(), config.auto_confirm),
-        tokens: config.database.tokens(),
+        tokens: Arc::new(TokenKey::new(config.database.token_key())),
         public_url: config.public_url,
         rooms: RoomClient::new(bus.clone()),
         bus,

@@ -12,11 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::PublicUrl;
-use crate::api::auth::token::{Room, TokenKey};
 use crate::api::device::{CallerDevice, CallerVersion, Devices};
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body};
 use crate::bus::{ActiveParticipant, Bus, BusMessage, Reply, RoomCommand, TOPIC_ROOM_COMMAND};
+use crate::contracts::{Room, TokenKey};
 
 /// How long clients should wait for the signaling connection to come up.
 const WS_CONNECT_TIMEOUT_MS: u32 = 16_000;

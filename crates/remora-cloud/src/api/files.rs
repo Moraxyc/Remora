@@ -20,10 +20,10 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::api::auth::token::{TokenKey, UPLOAD_TOKEN_TTL, Upload, UserToken, random};
 use crate::api::device::{CallerDevice, Devices};
 use crate::api::user::{Sessions, User};
 use crate::api::{self, ApiError, Body, Empty};
+use crate::contracts::{TokenKey, UPLOAD_TOKEN_TTL, Upload, UserToken, random};
 use crate::{Database, PublicUrl};
 
 /// Where clients upload files.
