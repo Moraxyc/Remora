@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::contracts::random;
+use crate::contracts::{Room, random};
 
 /// Schema changes, applied in order. `PRAGMA user_version` counts those already applied.
 const MIGRATIONS: &[&str] = &[
@@ -170,6 +170,39 @@ impl Database {
 
     pub(crate) fn token_key(&self) -> [u8; 32] {
         self.token_key
+    }
+
+    /// Whether the room token's device binding, guest identity, or share state is still valid.
+    pub(crate) fn is_room_admitted(&self, room: &Room) -> rusqlite::Result<bool> {
+        let connection = self.connection();
+        if room.guest {
+            let found: Option<i64> = connection
+                .query_row(
+                    "SELECT 1 FROM guests WHERE id = ?1 AND device_id = ?2",
+                    [&room.sub, &room.device_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(found.is_some())
+        } else if room.shared {
+            let active: Option<i64> = connection
+                .query_row(
+                    "SELECT active FROM device_shares WHERE device_id = ?1",
+                    [&room.device_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(active == Some(1))
+        } else {
+            let found: Option<i64> = connection
+                .query_row(
+                    "SELECT 1 FROM devices WHERE id = ?1 AND owner = ?2",
+                    [&room.device_id, &room.sub],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(found.is_some())
+        }
     }
 }
 

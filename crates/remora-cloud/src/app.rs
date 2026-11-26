@@ -11,11 +11,14 @@ use crate::bus::Bus;
 use crate::contracts::TokenKey;
 use crate::gateway::presence::Connections;
 use crate::room::RoomClient;
-use crate::{CloudRole, Config, Ping, PublicUrl, TrustedProxies, api, gateway, relay, room};
+use crate::{
+    CloudRole, Config, Database, Ping, PublicUrl, TrustedProxies, api, gateway, relay, room,
+};
 
 /// Everything the HTTP/WebSocket handlers share.
 #[derive(Clone, FromRef)]
 struct Cloud {
+    database: Database,
     devices: api::device::Devices,
     shares: api::share::Shares,
     share_challenges: api::share::ShareChallenges,
@@ -132,8 +135,7 @@ impl FromRef<Cloud> for gateway::Admission {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             tokens: cloud.tokens.clone(),
-            devices: cloud.devices.clone(),
-            shares: cloud.shares.clone(),
+            database: cloud.database.clone(),
         }
     }
 }
@@ -155,6 +157,7 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
     }
 
     let cloud = Cloud {
+        database: config.database.clone(),
         devices: config.database.clone().into(),
         shares: config.database.clone().into(),
         share_challenges: api::share::ShareChallenges::default(),

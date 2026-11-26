@@ -206,19 +206,6 @@ impl Shares {
         Ok(())
     }
 
-    pub fn is_share_active(&self, device_id: &str) -> rusqlite::Result<bool> {
-        let active: Option<i64> = self
-            .0
-            .connection()
-            .query_row(
-                "SELECT active FROM device_shares WHERE device_id = ?1",
-                [device_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(active == Some(1))
-    }
-
     pub fn resolve_by_connect_id(&self, connect_id: &str) -> rusqlite::Result<Option<ShareTarget>> {
         self.0
             .connection()

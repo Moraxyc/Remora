@@ -9,11 +9,14 @@ pub(crate) mod presence;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use remora_proto::error::ErrorCode;
 use remora_proto::profile::{Profile, detect_from_headers};
+use remora_proto::server::error_envelope;
 use remora_proto::signal::{
     Decoder, Handshake, PING, Packet, SignalEvent, encode_connected, encode_event,
 };
@@ -22,9 +25,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
-use crate::api::ApiError;
-use crate::api::device::Devices;
-use crate::api::share::Shares;
+use crate::Database;
 use crate::bus::{
     Bus, BusMessage, EndpointFrame, PresenceChanged, Reply, RoomCommand, TOPIC_PRESENCE,
     TOPIC_ROOM_COMMAND,
@@ -67,8 +68,7 @@ pub struct Switchboard {
 #[derive(Clone)]
 pub struct Admission {
     pub tokens: Arc<TokenKey>,
-    pub devices: Devices,
-    pub shares: Shares,
+    pub database: Database,
 }
 
 impl Admission {
@@ -78,16 +78,7 @@ impl Admission {
         let Some(room) = self.tokens.verify_room(token) else {
             return Ok(None);
         };
-        let allowed = if room.guest {
-            self.shares.guest_exists(&room.sub, &room.device_id)?
-        } else if room.shared {
-            self.shares.is_share_active(&room.device_id)?
-        } else {
-            self.devices
-                .platform_of_owned(&room.device_id, &room.sub)?
-                .is_some()
-        };
-        Ok(allowed.then_some(room))
+        Ok(self.database.is_room_admitted(&room)?.then_some(room))
     }
 }
 
@@ -116,7 +107,14 @@ pub async fn connect(
     let room = match admission.admit(token) {
         Ok(Some(room)) => room,
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
-        Err(error) => return ApiError::from(error).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "database query failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_envelope(ErrorCode::Internal, "internal error")),
+            )
+                .into_response();
+        }
     };
     let profile = detect_from_headers(
         headers
