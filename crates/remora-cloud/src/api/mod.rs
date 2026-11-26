@@ -6,6 +6,7 @@ pub(crate) mod compat;
 pub(crate) mod device;
 pub(crate) mod files;
 pub(crate) mod middleware;
+pub(crate) mod room;
 pub(crate) mod share;
 pub(crate) mod user;
 pub(crate) mod wake;

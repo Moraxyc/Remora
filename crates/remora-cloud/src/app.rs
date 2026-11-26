@@ -49,7 +49,7 @@ impl FromRef<Cloud> for api::device::DeviceInitService {
     }
 }
 
-impl FromRef<Cloud> for room::Tickets {
+impl FromRef<Cloud> for api::room::Tickets {
     fn from_ref(cloud: &Cloud) -> Self {
         Self {
             tokens: cloud.tokens.clone(),
@@ -108,7 +108,7 @@ impl FromRef<Cloud> for api::share::ShareService {
             shares: cloud.shares.clone(),
             devices: cloud.devices.clone(),
             rooms: cloud.rooms.clone(),
-            tickets: room::Tickets {
+            tickets: api::room::Tickets {
                 tokens: cloud.tokens.clone(),
                 public_url: cloud.public_url.clone(),
             },
@@ -354,10 +354,10 @@ pub fn build(config: Config, bus: Arc<dyn Bus>) -> Router {
             )
             .route("/api/v1/keymapping/list", get(api::compat::keymapping_list))
             .route("/api/v1/room/app_flag", post(api::compat::room_app_flag))
-            .route("/api/v1/room/create", post(room::create))
+            .route("/api/v1/room/create", post(api::room::create))
             .route(
                 "/api/v1/room/join/by_device/{device_id}",
-                post(room::join_by_device),
+                post(api::room::join_by_device),
             )
             .layer(from_fn(api::middleware::profile::detect_profile))
             .with_state(cloud.clone());

@@ -24,10 +24,11 @@ use crate::Database;
 use crate::api::address::ClientAddress;
 use crate::api::device::{CallerDevice, CallerVersion, Device, Devices, connect_id_for};
 use crate::api::middleware::limit::Limits;
+use crate::api::room::Tickets;
 use crate::api::user::User;
 use crate::api::{self, ApiError, Body, Empty, OptionalBody};
 use crate::contracts::{GuestToken, Room, TokenKey, now, random};
-use crate::room::{RoomClient, Tickets};
+use crate::room::RoomClient;
 
 const GUEST_ID_HEADER: &str = "x-param-guest-id";
 
